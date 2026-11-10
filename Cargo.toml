@@ -14,6 +14,8 @@ zetwerk-typst = { path = "crates/zetwerk-typst" }
 zetwerk-render = { path = "crates/zetwerk-render" }
 zetwerk-corpus = { path = "crates/zetwerk-corpus" }
 zetwerk-predict = { path = "crates/zetwerk-predict" }
+zetwerk-app = { path = "crates/zetwerk-app" }
+zetwerk-mcp = { path = "crates/zetwerk-mcp" }
 
 # The Typst family moves in lockstep and breaks embedder APIs on every minor
 # release, so it is pinned exactly.
@@ -30,6 +32,12 @@ typst-render = "=0.15.1"
 comemo = "0.5.1"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd", "png-format"] }
 lexopt = "0.3"
+winit = "0.30.13"
+wgpu = "30.0.1"
+pollster = "1.0"
+bytemuck = { version = "1.25", features = ["derive"] }
+notify = "8.2"
+serde_json = "1"
 rayon = "1.10"
 # Must be the version Typst links, so that `FontInstance::rusty()` is usable.
 rustybuzz = "0.20.1"
@@ -44,6 +52,8 @@ expect_used = "deny"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Flags every getter; the cases that matter are marked by hand.
+must_use_candidate = "allow"
 cast_precision_loss = "allow"
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"

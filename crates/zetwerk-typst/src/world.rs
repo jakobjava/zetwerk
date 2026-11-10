@@ -104,6 +104,8 @@ pub struct Project {
     env: Arc<Environment>,
     root: FsRoot,
     main: FileId,
+    /// Where the main file is on disk; `None` for an in-memory project.
+    main_path: Option<PathBuf>,
     /// Sources owned by the editor. These win over the files on disk.
     sources: HashMap<FileId, Source>,
     /// Files the editor does not own: images, bibliographies, packages and
@@ -126,7 +128,9 @@ impl Project {
         let bytes = std::fs::read(&absolute).map_err(|err| OpenError::Io(absolute.clone(), err))?;
         let text = String::from_utf8(bytes).map_err(|_| OpenError::NotUtf8(absolute.clone()))?;
         let vpath = VirtualPath::new(name).map_err(|_| invalid())?;
-        Ok(Self::with_main(env, root_dir.to_owned(), &vpath, text))
+        let mut project = Self::with_main(env, root_dir.to_owned(), &vpath, text);
+        project.main_path = Some(absolute);
+        Ok(project)
     }
 
     /// Creates a project whose main source lives only in memory. Other files
@@ -158,6 +162,7 @@ impl Project {
             env,
             root: FsRoot::new(root_dir),
             main,
+            main_path: None,
             sources: HashMap::from([(main, source)]),
             external: Arc::default(),
         }
@@ -184,6 +189,61 @@ impl Project {
         // `Source::edit` panics on out-of-bounds or non-boundary ranges.
         source.text().get(range.clone())?;
         Some(source.edit(range, text))
+    }
+
+    /// Where the main file is on disk; `None` for an in-memory project.
+    #[must_use]
+    pub fn main_path(&self) -> Option<&Path> {
+        self.main_path.as_deref()
+    }
+
+    /// Replaces the whole text of the main source, reparsing only what
+    /// differs.
+    pub fn set_main_text(&mut self, text: &str) {
+        if let Some(source) = self.sources.get_mut(&self.main) {
+            source.replace(text);
+        }
+    }
+
+    /// Every file on disk the document was built from so far: the main file
+    /// and whatever the last compiles read from the project directory.
+    /// Package files are not included; they do not change.
+    #[must_use]
+    pub fn dependencies(&self) -> Vec<PathBuf> {
+        let external = self
+            .external
+            .ids()
+            .into_iter()
+            .filter_map(|id| match id.root() {
+                VirtualRoot::Project => self.root.resolve(id.vpath()).ok(),
+                VirtualRoot::Package(_) => None,
+            });
+        self.main_path.iter().cloned().chain(external).collect()
+    }
+
+    /// Tells the project that `path` changed on disk. Returns whether the
+    /// document has to be compiled again.
+    ///
+    /// The main file is read again and replaces the text in memory. Any other
+    /// file is simply forgotten, so the next compile reads it afresh.
+    pub fn file_changed(&mut self, path: &Path) -> Result<bool, OpenError> {
+        if self.main_path.as_deref() == Some(path) {
+            let bytes = std::fs::read(path).map_err(|err| OpenError::Io(path.to_owned(), err))?;
+            let text = String::from_utf8(bytes).map_err(|_| OpenError::NotUtf8(path.to_owned()))?;
+            let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+            let unchanged = self
+                .source(self.main)
+                .is_some_and(|source| source.text() == text);
+            if !unchanged {
+                self.set_main_text(text);
+            }
+            return Ok(!unchanged);
+        }
+        let forgotten = VirtualPath::virtualize(self.root.path(), path).is_ok_and(|vpath| {
+            let id = RootedPath::new(VirtualRoot::Project, vpath).intern();
+            self.external.forget(id)
+        });
+        Ok(forgotten)
     }
 
     /// An immutable view of the project as it is right now.
@@ -276,6 +336,22 @@ struct ExternalSlot {
 }
 
 impl ExternalFiles {
+    /// Every file that has been asked for, found or not.
+    fn ids(&self) -> Vec<FileId> {
+        self.lock().keys().copied().collect()
+    }
+
+    /// Drops what is cached for `id`. Returns whether anything was.
+    fn forget(&self, id: FileId) -> bool {
+        self.lock().remove(&id).is_some()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<FileId, ExternalSlot>> {
+        // A panic while holding the lock can only leave a fully written slot
+        // or none behind, so a poisoned map is still consistent.
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn file(&self, id: FileId, load: impl FnOnce() -> FileResult<Bytes>) -> FileResult<Bytes> {
         self.with_slot(id, load, |slot| slot.bytes.clone())
     }
@@ -299,9 +375,7 @@ impl ExternalFiles {
         load: impl FnOnce() -> FileResult<Bytes>,
         f: impl FnOnce(&mut ExternalSlot) -> T,
     ) -> T {
-        // A panic while holding the lock can only leave a fully written slot
-        // or none behind, so a poisoned map is still consistent.
-        let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut slots = self.lock();
         let slot = slots.entry(id).or_insert_with(|| ExternalSlot {
             bytes: load(),
             source: None,

@@ -7,11 +7,6 @@ use typst::diag::SourceDiagnostic;
 use typst::ecow::EcoVec;
 use typst_layout::PagedDocument;
 
-/// How many compiles a memoized result may go unused before it is dropped.
-/// Low enough to bound memory in a long session, high enough that undo/redo
-/// and back-and-forth edits still hit the cache.
-const CACHE_MAX_AGE: usize = 10;
-
 /// The outcome of one compile.
 pub struct Compiled {
     /// The laid-out document, or `None` if compilation failed.
@@ -30,12 +25,16 @@ pub struct Compiled {
 /// Never panics: a panic inside Typst is caught and reported through
 /// [`Compiled::panicked`], because losing the editor to a compiler bug would
 /// mean losing the user's session.
+///
+/// Typst remembers intermediate results in a process-wide cache, which is
+/// what makes the next compile incremental. This function does not prune
+/// that cache; see [`forget_unused`].
 #[must_use]
 pub fn compile(world: &dyn World) -> Compiled {
     let result = catch_unwind(AssertUnwindSafe(|| typst::compile::<PagedDocument>(world)));
     let Ok(warned) = result else {
-        // The memoization cache may hold results from the interrupted run;
-        // drop all of it rather than trust it.
+        // The cache may hold results from the interrupted run; drop all of
+        // it rather than trust it.
         comemo::evict(0);
         return Compiled {
             document: None,
@@ -44,7 +43,6 @@ pub fn compile(world: &dyn World) -> Compiled {
             panicked: true,
         };
     };
-    comemo::evict(CACHE_MAX_AGE);
     let (document, errors) = match warned.output {
         Ok(document) => (Some(document), EcoVec::new()),
         Err(errors) => (None, errors),
@@ -55,4 +53,17 @@ pub fn compile(world: &dyn World) -> Compiled {
         warnings: warned.warnings,
         panicked: false,
     }
+}
+
+/// Drops cached results that the last `rounds` calls of this function found
+/// unused, to bound the memory a long session takes.
+///
+/// The cache and its notion of age are shared by everything compiled in the
+/// process: the document and the editor's own interface, which is typeset
+/// by Typst too. Every call ages every unused result, whoever makes it. A
+/// caller that compiles often must therefore pass a large `rounds`, or it
+/// ages the document's results away between two document compiles and the
+/// next one starts from nothing.
+pub fn forget_unused(rounds: usize) {
+    comemo::evict(rounds);
 }

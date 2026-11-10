@@ -7,6 +7,8 @@
 //! changed line does not cost a full page.
 
 mod cull;
+mod rasterizer;
+mod tiles;
 
 use tiny_skia::Pixmap;
 use typst::layout::{Abs, Point, Rect, Size};
@@ -15,6 +17,8 @@ use typst_layout::Page;
 use typst_render::RenderOptions;
 
 pub use cull::content_bounds;
+pub use rasterizer::{Rasterized, Rasterizer};
+pub use tiles::{TILE_PX, Tile, TileKey, tile_origins, tiles};
 
 /// Renders a whole page at `pixel_per_pt` device pixels per typographic point.
 #[must_use]
@@ -46,15 +50,30 @@ pub struct PixelRegion {
 /// the canvas origin, which rounds differently for a different origin.
 #[must_use]
 pub fn render_region(page: &Page, region: PixelRegion, pixel_per_pt: f64) -> Pixmap {
+    typst_render::render(
+        &crop_page(page, region, pixel_per_pt),
+        &options(pixel_per_pt),
+    )
+}
+
+/// The size in pixels of a whole-page render at `pixel_per_pt`.
+#[must_use]
+pub fn page_size_px(page: &Page, pixel_per_pt: f64) -> (u32, u32) {
+    // The same rounding `typst-render` applies to its canvas.
+    let px = |length: Abs| (pixel_per_pt * length.to_pt()).round().max(1.0) as u32;
+    (px(page.frame.width()), px(page.frame.height()))
+}
+
+/// A page consisting of just `region` of `page`.
+fn crop_page(page: &Page, region: PixelRegion, pixel_per_pt: f64) -> Page {
     let to_pt = |px: u32| Abs::pt(f64::from(px) / pixel_per_pt);
     let origin = Point::new(to_pt(region.x), to_pt(region.y));
     let size = Size::new(to_pt(region.width), to_pt(region.height));
     let frame = cull::crop(&page.frame, Rect::from_pos_size(origin, size));
-    let cropped = Page {
+    Page {
         frame,
         ..page.clone()
-    };
-    typst_render::render(&cropped, &options(pixel_per_pt))
+    }
 }
 
 fn options(pixel_per_pt: f64) -> RenderOptions {

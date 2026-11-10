@@ -1,0 +1,19 @@
+[package]
+name = "zetwerk-mcp"
+description = "MCP server that lets agents work with a running zetwerk window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rmcp = { version = "3.9", features = ["server", "client", "macros", "transport-io", "transport-async-rw"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "io-std", "macros", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+base64 = "0.22"
+
+[lints]
+workspace = true

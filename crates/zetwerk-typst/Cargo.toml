@@ -12,6 +12,7 @@ typst.workspace = true
 typst-kit.workspace = true
 typst-layout.workspace = true
 comemo.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true
