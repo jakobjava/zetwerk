@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 zetwerk-core = { path = "crates/zetwerk-core" }
 zetwerk-typst = { path = "crates/zetwerk-typst" }
+zetwerk-vim = { path = "crates/zetwerk-vim" }
 zetwerk-render = { path = "crates/zetwerk-render" }
 zetwerk-corpus = { path = "crates/zetwerk-corpus" }
 zetwerk-predict = { path = "crates/zetwerk-predict" }

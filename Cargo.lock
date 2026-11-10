@@ -5919,6 +5919,7 @@ dependencies = [
  "winit",
  "zetwerk-render",
  "zetwerk-typst",
+ "zetwerk-vim",
 ]
 
 [[package]]
@@ -5995,6 +5996,14 @@ dependencies = [
  "typst",
  "typst-kit",
  "typst-layout",
+]
+
+[[package]]
+name = "zetwerk-vim"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde_json",
 ]
 
 [[package]]
