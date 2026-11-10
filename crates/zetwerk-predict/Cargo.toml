@@ -1,0 +1,21 @@
+[package]
+name = "zetwerk-predict"
+description = "Predicts how a page changes for simple edits, without compiling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zetwerk-typst.workspace = true
+typst.workspace = true
+rustybuzz.workspace = true
+
+[dev-dependencies]
+zetwerk-corpus.workspace = true
+zetwerk-render.workspace = true
+typst-layout.workspace = true
+
+[lints]
+workspace = true

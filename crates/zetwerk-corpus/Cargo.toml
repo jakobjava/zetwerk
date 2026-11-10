@@ -1,0 +1,11 @@
+[package]
+name = "zetwerk-corpus"
+description = "Test and benchmark documents for zetwerk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

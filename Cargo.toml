@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+zetwerk-typst = { path = "crates/zetwerk-typst" }
+zetwerk-render = { path = "crates/zetwerk-render" }
+zetwerk-corpus = { path = "crates/zetwerk-corpus" }
+zetwerk-predict = { path = "crates/zetwerk-predict" }
+
+# The Typst family moves in lockstep and breaks embedder APIs on every minor
+# release, so it is pinned exactly.
+typst = "=0.15.1"
+typst-kit = { version = "=0.15.1", default-features = false, features = [
+    "embedded-fonts",
+    "scan-fonts",
+    "system-packages",
+    "system-downloader",
+    "datetime",
+] }
+typst-layout = "=0.15.1"
+typst-render = "=0.15.1"
+comemo = "0.5.1"
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd", "png-format"] }
+lexopt = "0.3"
+rayon = "1.10"
+# Must be the version Typst links, so that `FontInstance::rusty()` is usable.
+rustybuzz = "0.20.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+
+[profile.dev]
+# Typst is unusably slow unoptimised; optimise dependencies, keep our own
+# crates quick to rebuild.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = "line-tables-only"

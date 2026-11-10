@@ -1,0 +1,17 @@
+[package]
+name = "zetwerk-typst"
+description = "Typst world, compilation and page/source mapping for zetwerk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+typst.workspace = true
+typst-kit.workspace = true
+typst-layout.workspace = true
+comemo.workspace = true
+
+[lints]
+workspace = true
