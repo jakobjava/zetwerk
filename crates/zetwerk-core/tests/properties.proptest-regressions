@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9505287f6e2a1b5d9f57064f6d6ff731112ec959d9f896200cae7cce28b5345f # shrinks to initial = None, ops = [ExternalWrite(" ")]
+cc d4590e8e3c39fa9a1ccd789fe8ed2eca7e6e86cbfff75b3a37ed71b642a0a006 # shrinks to initial = None, ops = [Edit { at: Index(0), len: 0, text: " é", join: false }, Edit { at: Index(6148914691236517206), len: 1, text: "", join: false }, Edit { at: Index(0), len: 1, text: "", join: true }]
+cc c50230d92ec51e0e69a7aa113bb3bf16482a34c617d2f67ec7d271f177497e67 # shrinks to initial = None, ops = [ExternalWrite(""), Save { overwrite: false }]

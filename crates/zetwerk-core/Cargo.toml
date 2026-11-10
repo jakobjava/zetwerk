@@ -1,0 +1,25 @@
+[package]
+name = "zetwerk-core"
+description = "The durable document: edits, undo history, journal, recovery and saving"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `unnamed-tmpfile`: on Linux the temporary file has no name until it is
+# complete, so a crash during a save leaves nothing in the user's directory.
+atomic-write-file = { version = "0.3.1", features = ["unnamed-tmpfile"] }
+blake3 = "1.8"
+crc32fast = "1.5"
+
+[dev-dependencies]
+proptest = "1.12"
+
+[[test]]
+name = "crash"
+harness = false
+
+[lints]
+workspace = true

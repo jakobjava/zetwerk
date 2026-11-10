@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+zetwerk-core = { path = "crates/zetwerk-core" }
 zetwerk-typst = { path = "crates/zetwerk-typst" }
 zetwerk-render = { path = "crates/zetwerk-render" }
 zetwerk-corpus = { path = "crates/zetwerk-corpus" }
