@@ -18,8 +18,14 @@ use crate::gpu::TextureId;
 /// Height of the status line in points (one point is one logical pixel).
 pub const STATUS_HEIGHT: f64 = 20.0;
 
+/// Height of a row of the source pane in points.
+pub const ROW_HEIGHT: f64 = 17.0;
+/// Size of the source pane's text in points.
+const SOURCE_SIZE: f64 = 10.5;
+
 const BACKGROUND: &str = "#282828";
 const FOREGROUND: &str = "#ebdbb2";
+const DIM: &str = "#928374";
 const ACCENT: &str = "#fabd2f";
 const ALERT: &str = "#fb4934";
 const FONT: &str = "DejaVu Sans Mono";
@@ -36,6 +42,9 @@ const UNUSED_ROUNDS: usize = 2000;
 /// with every page scrolled past; a handful covers flipping back and forth.
 const CACHE_SIZE: usize = 32;
 
+/// How many image sizes are remembered before starting over.
+const SIZES_KEPT: usize = 20_000;
+
 /// A rendered piece of chrome.
 #[derive(Clone)]
 pub struct Image {
@@ -49,6 +58,12 @@ pub struct Chrome {
     cache: HashMap<TextureId, (u64, Arc<Pixmap>)>,
     /// Counts renders, to find the least recently used cache entry.
     clock: u64,
+    /// The pixel sizes of images rendered without keeping them: enough to
+    /// draw one that the compositor still holds.
+    sizes: HashMap<TextureId, (u32, u32)>,
+    /// The width of a cell of the source pane in pixels, at the scale
+    /// (as bits) it was measured for.
+    cell: Option<(u64, f64)>,
 }
 
 impl Chrome {
@@ -61,7 +76,65 @@ impl Chrome {
             project,
             cache: HashMap::new(),
             clock: 0,
+            sizes: HashMap::new(),
+            cell: None,
         })
+    }
+
+    /// The name of the image [`Chrome::render`] makes of `markup`.
+    #[must_use]
+    pub fn id(markup: &str, scale: f64) -> TextureId {
+        TextureId(hash128(&(markup, scale.to_bits())))
+    }
+
+    fn rasterize(&mut self, markup: &str, scale: f64) -> Option<Pixmap> {
+        self.project.set_main_text(markup);
+        let document = zetwerk_typst::compile(&self.project.snapshot()).document;
+        zetwerk_typst::forget_unused(UNUSED_ROUNDS);
+        Some(zetwerk_render::render_page(
+            document?.pages().first()?,
+            scale,
+        ))
+    }
+
+    /// Like [`Chrome::render`], without keeping the image: for the rows of
+    /// the source pane, which are many, and which the compositor keeps for
+    /// as long as they are drawn. Only the size is remembered.
+    pub fn render_once(&mut self, markup: &str, scale: f64) -> Option<Image> {
+        let id = Self::id(markup, scale);
+        let pixmap = Arc::new(self.rasterize(markup, scale)?);
+        if self.sizes.len() >= SIZES_KEPT {
+            self.sizes.clear();
+        }
+        self.sizes.insert(id, (pixmap.width(), pixmap.height()));
+        Some(Image { id, pixmap })
+    }
+
+    /// The size in pixels of an image made by [`Chrome::render_once`], if
+    /// it is still known.
+    #[must_use]
+    pub fn size_of(&self, id: TextureId) -> Option<(u32, u32)> {
+        self.sizes.get(&id).copied()
+    }
+
+    /// The width in pixels of one cell of the source pane: the advance of
+    /// its monospaced font, measured by setting a row of characters.
+    pub fn cell_width(&mut self, scale: f64) -> f64 {
+        /// How many characters are set to measure one.
+        const SAMPLE: usize = 64;
+        if let Some((for_scale, width)) = self.cell
+            && for_scale == scale.to_bits()
+        {
+            return width;
+        }
+        let markup = row_markup(&"M".repeat(SAMPLE), false);
+        let width = self.rasterize(&markup, scale).map_or(
+            // Should the sample not render, a usual width for such a font.
+            SOURCE_SIZE * 0.6 * scale,
+            |pixmap| f64::from(pixmap.width()) / SAMPLE as f64,
+        );
+        self.cell = Some((scale.to_bits(), width));
+        width
     }
 
     /// Typesets `markup` and rasterizes its first page at `scale` pixels per
@@ -69,7 +142,7 @@ impl Chrome {
     /// templates in this module would be a bug.
     pub fn render(&mut self, markup: &str, scale: f64) -> Option<Image> {
         self.clock += 1;
-        let id = TextureId(hash128(&(markup, scale.to_bits())));
+        let id = Self::id(markup, scale);
         if let Some((used, pixmap)) = self.cache.get_mut(&id) {
             *used = self.clock;
             return Some(Image {
@@ -77,14 +150,7 @@ impl Chrome {
                 pixmap: Arc::clone(pixmap),
             });
         }
-        self.project.set_main_text(markup);
-        let document = zetwerk_typst::compile(&self.project.snapshot()).document;
-        zetwerk_typst::forget_unused(UNUSED_ROUNDS);
-        let document = document?;
-        let pixmap = Arc::new(zetwerk_render::render_page(
-            document.pages().first()?,
-            scale,
-        ));
+        let pixmap = Arc::new(self.rasterize(markup, scale)?);
         if self.cache.len() >= CACHE_SIZE
             && let Some(oldest) = self
                 .cache
@@ -129,6 +195,21 @@ pub fn status_markup(status: &Status, width: f64) -> String {
         mode = string(status.mode),
         left = string(status.left),
         right = string(status.right),
+    )
+}
+
+/// Markup for one row of the source pane: `text` on one line, on nothing.
+/// The image is as wide as the text. Blanks at either end of `text` may get
+/// lost; the caller places the image where the first other character goes.
+#[must_use]
+pub fn row_markup(text: &str, dim: bool) -> String {
+    let color = if dim { DIM } else { FOREGROUND };
+    format!(
+        r#"#set page(width: auto, height: {ROW_HEIGHT}pt, margin: 0pt, fill: none)
+#set text(font: "{FONT}", size: {SOURCE_SIZE}pt, fill: rgb("{color}"), top-edge: "ascender", bottom-edge: "descender", ligatures: false, kerning: false, hyphenate: false)
+#set align(horizon)
+#{text}"#,
+        text = string(text),
     )
 }
 

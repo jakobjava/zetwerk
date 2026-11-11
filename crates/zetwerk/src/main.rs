@@ -121,6 +121,7 @@ fn run() -> Result<(), String> {
         path: input,
         font_set,
         power: args.power,
+        state_dir: state_dir()?,
     };
     // Kept until the window closes; dropping it stops the server.
     let mut server = None;
@@ -317,4 +318,20 @@ fn render(args: &Args, input: &Path, font_set: FontSet) -> Result<(), String> {
         pages.len()
     );
     Ok(())
+}
+
+/// Where zetwerk keeps what has to outlive a session: `$XDG_STATE_HOME/zetwerk`,
+/// or `~/.local/state/zetwerk`.
+fn state_dir() -> Result<PathBuf, String> {
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let base = match (set("XDG_STATE_HOME"), set("HOME")) {
+        (Some(state), _) => PathBuf::from(state),
+        (None, Some(home)) => PathBuf::from(home).join(".local/state"),
+        (None, None) => {
+            return Err(
+                "neither XDG_STATE_HOME nor HOME is set: nowhere to keep journals".to_owned(),
+            );
+        }
+    };
+    Ok(base.join("zetwerk"))
 }

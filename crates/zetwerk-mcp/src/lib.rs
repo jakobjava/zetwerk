@@ -55,8 +55,15 @@ pub struct EditorState {
     /// The revision the pages on screen were compiled from. Differs from
     /// `revision` while a compile is under way.
     pub compiled_revision: Option<u64>,
-    /// `normal` or `command`.
+    /// `normal`, `insert`, `replace`, `visual`, `visual-line` or `command`.
     pub mode: String,
+    /// The cursor's line in the source, counting from 1; 0 if the window
+    /// only shows the document and does not edit it.
+    pub line: usize,
+    /// The cursor's column in its line, counting characters from 1.
+    pub column: usize,
+    /// Whether the text has changes that are not in the file.
+    pub modified: bool,
     /// The text on the command line, while it is open.
     pub command: Option<String>,
     /// Errors of the last compile, as `file:line:column: error: message`.

@@ -101,9 +101,11 @@ impl Walker<'_> {
         self.text.line_start(self.pos) == self.pos
     }
 
-    /// Whether the walker is at the very end and cannot go on.
-    fn at_text_end(&self) -> bool {
-        self.at_line_end() && self.text.next_line(self.pos).is_none()
+    /// Whether the walker stands in the blanks a line begins with.
+    fn in_indent(&self) -> bool {
+        let line = self.text.line_text(self.pos);
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        self.pos - self.text.line_start(self.pos) < indent
     }
 
     /// Vim's `back_in_line`: to the start of the word or the run of blanks
@@ -162,7 +164,9 @@ pub fn word_forward(
         let start_class = walker.class();
         let on_last_line = walker.on_last_line();
         let stepped = walker.forward();
-        if stepped == Stepped::Blocked || (stepped == Stepped::NewLine && on_last_line) {
+        // On the last line, leaving its last character is already going
+        // too far.
+        if stepped == Stepped::Blocked || (stepped != Stepped::Within && on_last_line) {
             return (walker.pos, false);
         }
         if stepped != Stepped::Within && stop_at_line_end && last {
@@ -185,6 +189,11 @@ pub fn word_forward(
             let on_last_line = walker.on_last_line();
             let stepped = walker.forward();
             if stepped == Stepped::Blocked || (stepped == Stepped::NewLine && on_last_line) {
+                return (walker.pos, true);
+            }
+            if stepped != Stepped::Within && stop_at_line_end && last {
+                // Blanks at the end of a line: the line's end is as far
+                // as an operator goes.
                 return (walker.pos, true);
             }
         }
@@ -272,15 +281,16 @@ fn word_end_or_empty_line(
 
 /// `iw`, `aw`, `iW` and `aW`: a port of Vim's `current_word`. Returns the
 /// two ends of the object (the second may come before the first) and
-/// whether the second end is included. `None` if there are not `count`
-/// words to take.
+/// whether the second end is included. If there are not `count` words to
+/// take, the error is where the search for them ended, which is where Vim
+/// leaves the cursor.
 pub fn word_object(
     text: Text,
     pos: usize,
     count: usize,
     around: bool,
     big: bool,
-) -> Option<(usize, usize, bool)> {
+) -> Result<(usize, usize, bool), usize> {
     let mut walker = Walker { text, pos, big };
     let mut inclusive = true;
     let mut include_white = false;
@@ -291,7 +301,7 @@ pub fn word_object(
         // go to the end of the word.
         let (to, ok) = word_end_or_empty_line(text, walker.pos, 1, big, true, true);
         if !ok {
-            return None;
+            return Err(to);
         }
         walker.pos = to;
     } else {
@@ -304,33 +314,35 @@ pub fn word_object(
         }
         include_white = around;
     }
-    for _ in 1..count {
+    for left in (1..count).rev() {
         inclusive = true;
-        // One on, over a line end if that is what comes.
-        if walker.forward() == Stepped::OntoEnd {
-            if walker.forward() == Stepped::Blocked {
-                return None;
-            }
-        } else if walker.at_text_end() {
-            return None;
+        // One on, and from the last character of a line onto the next line.
+        let mut stepped = walker.forward();
+        if stepped == Stepped::OntoEnd {
+            stepped = walker.forward();
         }
-        if around {
-            let (to, ok) = word_forward(text, walker.pos, 1, big, true);
-            if !ok {
-                return None;
-            }
+        if stepped == Stepped::Blocked {
+            return Err(walker.pos);
+        }
+        if around == (walker.class() == Class::Blank) {
+            let (to, ok) = word_end_or_empty_line(text, walker.pos, 1, big, true, true);
             walker.pos = to;
+            if !ok {
+                return Err(to);
+            }
+        } else {
+            // Blanks where a word is wanted or the other way round: up to
+            // where the next word starts, and one back.
+            let (to, ok) = word_forward(text, walker.pos, 1, big, true);
+            walker.pos = to;
+            if !ok && left > 1 {
+                return Err(to);
+            }
             if walker.column_is_zero() {
                 inclusive = false;
             } else {
                 walker.backward();
             }
-        } else {
-            let (to, ok) = word_end_or_empty_line(text, walker.pos, 1, big, true, true);
-            if !ok {
-                return None;
-            }
-            walker.pos = to;
         }
     }
     if include_white && (walker.class() != Class::Blank || (walker.column_is_zero() && !inclusive))
@@ -350,7 +362,56 @@ pub fn word_object(
             }
         }
     }
-    Some((start, walker.pos, inclusive))
+    Ok((start, walker.pos, inclusive))
+}
+
+/// The inside of the brackets at `open_at` and `close_at`, as Vim's
+/// `current_block` works it out: its two ends and whether the second is
+/// included.
+///
+/// A closing bracket with only blanks before it on its line gives up its
+/// line: the inside then ends where that line starts.
+pub fn block_inside(text: Text, open_at: usize, close_at: usize) -> (usize, usize, bool) {
+    let mut start = Walker {
+        text,
+        pos: open_at,
+        big: false,
+    };
+    if start.forward() == Stepped::OntoEnd {
+        start.forward();
+    }
+    let mut end = Walker {
+        text,
+        pos: close_at,
+        big: false,
+    };
+    let mut at_line_start = end.column_is_zero();
+    end.back_over_line_end();
+    while end.in_indent() {
+        at_line_start = true;
+        let stepped = end.backward();
+        if stepped == Stepped::Blocked {
+            break;
+        }
+        if stepped == Stepped::NewLine {
+            if end.column_is_zero() {
+                // An empty line stops the search.
+                break;
+            }
+            end.backward();
+        }
+    }
+    if at_line_start {
+        if end.forward() == Stepped::OntoEnd {
+            end.forward();
+        }
+        (start.pos, end.pos, false)
+    } else if start.pos <= end.pos {
+        (start.pos, end.pos, true)
+    } else {
+        // Nothing between the brackets.
+        (start.pos, start.pos, false)
+    }
 }
 
 /// `ge` and `gE`. Returns where the motion got to and whether it got as far

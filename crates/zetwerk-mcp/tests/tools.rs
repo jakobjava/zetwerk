@@ -24,6 +24,9 @@ impl Editor for FakeEditor {
             revision: 7,
             compiled_revision: Some(6),
             mode: "normal".to_owned(),
+            line: 4,
+            column: 2,
+            modified: true,
             command: None,
             problems: vec!["thesis.typ:1:1: error: nope".to_owned()],
         })

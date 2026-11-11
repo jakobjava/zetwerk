@@ -33,6 +33,36 @@ pub struct Step<'a> {
     pub to: StateId,
 }
 
+impl Step<'_> {
+    /// The part of the text, as it is after the step, that the step
+    /// replaced: from the first byte any of its changes touched to the last.
+    /// A step that changed nothing still has a place, and gives the empty
+    /// range there. `None` for a step without changes.
+    #[must_use]
+    pub fn extent(&self) -> Option<std::ops::Range<usize>> {
+        let ordered: Vec<&Change> = match self.direction {
+            Direction::Forward => self.changes.iter().collect(),
+            Direction::Backward => self.changes.iter().rev().collect(),
+        };
+        let mut extent: Option<std::ops::Range<usize>> = None;
+        for change in ordered {
+            let (from, to) = match self.direction {
+                Direction::Forward => (change.old.len(), change.new.len()),
+                Direction::Backward => (change.new.len(), change.old.len()),
+            };
+            let (start, end) = match &extent {
+                None => (change.at, change.at + from),
+                Some(so_far) => (
+                    so_far.start.min(change.at),
+                    so_far.end.max(change.at + from),
+                ),
+            };
+            extent = Some(start..end - from + to);
+        }
+        extent
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct History {
     nodes: Vec<Node>,
@@ -234,6 +264,37 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_knows_what_part_of_the_text_it_replaces() {
+        let change = |at, old: &str, new: &str| Change {
+            at,
+            old: old.to_owned(),
+            new: new.to_owned(),
+        };
+        // "abcdef" -> "aXXcdef" -> "aXXcdYf"
+        let changes = [change(1, "b", "XX"), change(5, "e", "Y")];
+        let forward = Step {
+            changes: &changes,
+            direction: Direction::Forward,
+            to: 1,
+        };
+        assert_eq!(forward.extent(), Some(1..6));
+        let backward = Step {
+            changes: &changes,
+            direction: Direction::Backward,
+            to: 0,
+        };
+        assert_eq!(backward.extent(), Some(1..5));
+        // A change of nothing still has a place.
+        let nothing = [change(3, "", "")];
+        let step = Step {
+            changes: &nothing,
+            direction: Direction::Backward,
+            to: 0,
+        };
+        assert_eq!(step.extent(), Some(3..3));
+    }
 
     fn change(text: &str) -> Vec<Change> {
         vec![Change {

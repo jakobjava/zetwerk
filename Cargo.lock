@@ -5917,6 +5917,7 @@ dependencies = [
  "typst-layout",
  "wgpu",
  "winit",
+ "zetwerk-core",
  "zetwerk-render",
  "zetwerk-typst",
  "zetwerk-vim",

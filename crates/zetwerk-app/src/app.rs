@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use typst_layout::PagedDocument;
 use winit::application::ApplicationHandler;
@@ -20,10 +20,11 @@ use winit::window::{Window, WindowId};
 use zetwerk_render::Rasterizer;
 use zetwerk_typst::{Compiler, Environment, FontSet, Project, Scheduler, Urgency};
 
+use crate::editor::Editor;
 use crate::gpu::{self, Gpu, Quad};
 use crate::keys::{Key, KeyPress};
 use crate::power::PowerMode;
-use crate::viewer::{self, State, Viewer};
+use crate::viewer::{self, Edited, State, Viewer};
 use crate::watch::FileWatcher;
 
 /// How the window should be opened.
@@ -32,7 +33,14 @@ pub struct Options {
     pub path: PathBuf,
     pub font_set: FontSet,
     pub power: PowerMode,
+    /// Where the journals that make edits survive a crash are kept.
+    pub state_dir: PathBuf,
 }
+
+/// How long a change may wait before the journal is forced onto the disk.
+/// A crash of zetwerk loses nothing either way; this bounds what a power
+/// failure can take.
+const SYNC_AFTER: Duration = Duration::from_secs(1);
 
 /// Something asked of a running window from another thread.
 pub enum Request {
@@ -133,6 +141,10 @@ struct Session {
     cursor: (f64, f64),
     /// When the input that the next frame responds to arrived.
     input_at: Option<Instant>,
+    /// How long input has to pause before the document is compiled.
+    debounce: Duration,
+    /// When the text was last changed by a command.
+    last_edit: Option<Instant>,
     /// Requests waiting for the window to settle.
     waiting: Vec<Request>,
 }
@@ -157,6 +169,8 @@ impl ApplicationHandler<Event> for App {
         };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            // Away from the window is a good moment to make sure.
+            WindowEvent::Focused(false) => session.viewer.sync(),
             WindowEvent::RedrawRequested => session.redraw(),
             other => session.window_event(other),
         }
@@ -185,14 +199,33 @@ impl ApplicationHandler<Event> for App {
         let Some(session) = &mut self.session else {
             return;
         };
-        if session.scheduler.take_due(Instant::now()) {
+        let now = Instant::now();
+        if session.scheduler.take_due(now) {
             let (revision, world) = session.viewer.snapshot();
             session.compiler.compile(revision, world);
         }
-        event_loop.set_control_flow(match session.scheduler.deadline() {
+        let mut sync_at = session
+            .viewer
+            .unsynced_since()
+            .map(|since| since + SYNC_AFTER);
+        if sync_at.is_some_and(|at| at <= now) {
+            session.viewer.sync();
+            sync_at = None;
+        }
+        let deadline = [session.scheduler.deadline(), sync_at]
+            .into_iter()
+            .flatten()
+            .min();
+        event_loop.set_control_flow(match deadline {
             Some(deadline) => ControlFlow::WaitUntil(deadline),
             None => ControlFlow::Wait,
         });
+    }
+
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        if let Some(session) = &mut self.session {
+            session.viewer.sync();
+        }
     }
 }
 
@@ -205,6 +238,8 @@ impl Session {
         let env = Environment::new(options.font_set);
         let project =
             Project::open(Arc::clone(&env), &options.path).map_err(|err| err.to_string())?;
+        let (editor, opened) = Editor::open(&options.path, &options.state_dir, project.main())
+            .map_err(|err| err.to_string())?;
         let name = options
             .path
             .file_name()
@@ -275,7 +310,8 @@ impl Session {
             (size.width, size.height),
             window.scale_factor(),
         )
-        .ok_or("cannot set up the interface")?;
+        .ok_or("cannot set up the interface")?
+        .editing(editor, &opened);
         let mut session = Self {
             window,
             surface,
@@ -289,6 +325,8 @@ impl Session {
             modifiers: ModifiersState::empty(),
             cursor: (0.0, 0.0),
             input_at: None,
+            debounce: budget.debounce,
+            last_edit: None,
             waiting: Vec::new(),
         };
         session.watch_dependencies();
@@ -326,6 +364,7 @@ impl Session {
                     ctrl: self.modifiers.control_key(),
                     alt: self.modifiers.alt_key(),
                 });
+                self.after_keys();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let line = 60.0 * self.window.scale_factor();
@@ -356,6 +395,7 @@ impl Session {
                 for key in keys {
                     self.viewer.key(key);
                 }
+                self.after_keys();
                 self.input_at.get_or_insert_with(Instant::now);
             }
             Request::State(reply) => {
@@ -364,6 +404,30 @@ impl Session {
             // Answered at the end of a frame that finds everything settled.
             waiting => self.waiting.push(waiting),
         }
+    }
+
+    /// Schedules a compile if the keys just handled changed the text.
+    ///
+    /// Typing is compiled when it pauses. A command that changes the text
+    /// is compiled at once, unless commands come in quick succession (a
+    /// held key): those are compiled when they pause, like typing.
+    fn after_keys(&mut self) {
+        let Some(edited) = self.viewer.take_edited() else {
+            return;
+        };
+        let now = Instant::now();
+        let rapid = self
+            .last_edit
+            .is_some_and(|last| now.duration_since(last) < self.debounce);
+        let urgency = match edited {
+            Edited::Typing => Urgency::WhenIdle,
+            Edited::Command if rapid => Urgency::WhenIdle,
+            Edited::Command | Edited::LeftInsert => Urgency::Now,
+        };
+        if edited == Edited::Command {
+            self.last_edit = Some(now);
+        }
+        self.scheduler.request(urgency, now);
     }
 
     fn files_changed(&mut self, paths: &[PathBuf]) {

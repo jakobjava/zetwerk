@@ -4,6 +4,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use zetwerk_app::app::{Handle, Request, Screenshot};
+use zetwerk_app::editor::Mode as EditMode;
 use zetwerk_app::keys;
 use zetwerk_app::viewer::Mode;
 use zetwerk_mcp::{Editor, EditorState};
@@ -42,10 +43,24 @@ impl Bridge {
 impl Editor for Bridge {
     fn state(&self) -> Result<EditorState, String> {
         let state = self.ask(Request::State, PROMPT)?;
-        let (mode, command) = match state.mode {
-            Mode::Normal => ("normal", None),
-            Mode::Command(text) => ("command", Some(text)),
+        let (mode, command) = match (state.mode, &state.editing) {
+            (Mode::Command(text), _) => ("command", Some(text)),
+            (Mode::Normal, Some(editing)) => {
+                let mode = match editing.mode {
+                    EditMode::Normal => "normal",
+                    EditMode::Insert if editing.replacing => "replace",
+                    EditMode::Insert => "insert",
+                    EditMode::Visual => "visual",
+                    EditMode::VisualLine => "visual-line",
+                    EditMode::Command => "command",
+                };
+                (mode, editing.command.clone())
+            }
+            (Mode::Normal, None) => ("normal", None),
         };
+        let (line, column, modified) = state.editing.as_ref().map_or((0, 0, false), |editing| {
+            (editing.line, editing.column, editing.modified)
+        });
         Ok(EditorState {
             file: state.file,
             pages: state.pages,
@@ -54,6 +69,9 @@ impl Editor for Bridge {
             revision: state.revision,
             compiled_revision: state.compiled_revision,
             mode: mode.to_owned(),
+            line,
+            column,
+            modified,
             command,
             problems: state.problems,
         })

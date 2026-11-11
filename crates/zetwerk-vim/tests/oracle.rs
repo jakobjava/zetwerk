@@ -35,6 +35,14 @@ vim.o.showmode = false
 -- avoids that.
 vim.ui_attach(vim.api.nvim_create_namespace("zetwerk"), { ext_messages = true }, function() end)
 vim.o.expandtab = true
+-- `J` joins lines as they are. Neovim would take what it thinks are comment
+-- leaders off them, by rules made for other languages: in Typst a leading
+-- `-` is a list item.
+-- Neovim maps a few keys by default (`Y` to `y$`, for one). Typed keys are
+-- fed past mappings, but the keys of a macro are not.
+vim.cmd("mapclear | mapclear!")
+vim.o.formatoptions = ""
+vim.o.comments = ""
 vim.o.textwidth = 0
 vim.o.wrap = false
 -- No pauses for messages nobody reads.
@@ -42,7 +50,15 @@ vim.o.more = false
 vim.o.report = 99999
 vim.o.shortmess = "aoOstTWAIcCqFS"
 local results = {}
+-- For finding a case that makes Neovim quit: `ZETWERK_ORACLE_LOG=file`
+-- notes every case there before it is run.
+local log = os.getenv("ZETWERK_ORACLE_LOG")
 for index, case in ipairs(cases) do
+  if log then
+    local file = io.open(log, "a")
+    file:write(vim.inspect(case.keys):gsub("\n", " "), "\n")
+    file:close()
+  end
   vim.cmd("enew!")
   vim.bo.swapfile = false
   -- Set the lines without recording it, so that undo cannot take them away.
@@ -54,11 +70,23 @@ for index, case in ipairs(cases) do
   -- be cleared, so it is set to one that changes nothing; the engine is
   -- started the same way.
   vim.fn.setcharsearch({ char = "" })
+  -- `@@` plays the register played last, also in an earlier case. Playing
+  -- an empty one leaves it with nothing to play.
+  vim.fn.setreg("z", {})
+  pcall(vim.cmd, "silent! normal! @z")
+  vim.fn.setreg("/", "")
+  vim.v.searchforward = 1
   -- (`silent`, or entering insert mode waits a second for a message left
   -- over from the case before to be read.)
+  -- Marks may outlive the case that set them. (Before the insert below,
+  -- which leaves the mark `gi` goes to.)
+  pcall(vim.cmd, "delmarks!")
+  pcall(vim.cmd, "delmarks <>")
   vim.cmd([[silent exe "normal! i\<Esc>"]])
   vim.api.nvim_win_set_cursor(0, { case.row, case.col })
-  for _, name in ipairs({ '"', "0", "1", "2", "-", "a", "b" }) do vim.fn.setreg(name, {}) end
+  -- Where `''` goes back to is kept per window: start from here.
+  vim.cmd("normal! m'")
+  for _, name in ipairs({ '"', "0", "1", "2", "-", "a", "b", "q", "w" }) do vim.fn.setreg(name, {}) end
   for _, chunk in ipairs(case.keys) do
     local keys = vim.api.nvim_replace_termcodes(chunk, true, true, true)
     pcall(vim.api.nvim_feedkeys, keys, "ntx", false)
@@ -83,9 +111,16 @@ vim.fn.writefile({ vim.json.encode(results) }, arg[2])
 #[derive(Default)]
 struct Buffer {
     text: String,
-    /// The text before each undo step, and the part of it the step replaced.
-    undo: Vec<(String, Range<usize>)>,
-    redo: Vec<(String, Range<usize>)>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+}
+
+/// One undo step: the text on its other side, and the part of the text
+/// with the step made that the step replaced (`None` until it replaced
+/// something).
+struct Step {
+    other: String,
+    changed: Option<Range<usize>>,
 }
 
 impl Host for Buffer {
@@ -95,52 +130,49 @@ impl Host for Buffer {
 
     fn edit(&mut self, edits: &[Edit], join: bool) {
         if !join || self.undo.is_empty() {
-            let replaced = edits.first().map_or(0..0, |edit| edit.range.clone());
-            self.undo.push((self.text.clone(), replaced));
+            self.undo.push(Step {
+                other: self.text.clone(),
+                changed: None,
+            });
         }
         self.redo.clear();
+        let step = self.undo.last_mut().unwrap();
         for edit in edits {
+            let (start, end) = match &step.changed {
+                None => (edit.range.start, edit.range.end),
+                Some(changed) => (
+                    changed.start.min(edit.range.start),
+                    changed.end.max(edit.range.end),
+                ),
+            };
+            step.changed = Some(start..end - edit.range.len() + edit.text.len());
             self.text.replace_range(edit.range.clone(), &edit.text);
         }
     }
 
     fn undo(&mut self) -> Option<Range<usize>> {
-        let (before, replaced) = self.undo.pop()?;
-        let after = std::mem::replace(&mut self.text, before);
-        self.redo.push((after, replaced.clone()));
-        Some(replaced)
+        let step = self.undo.pop()?;
+        let changed = step.changed.clone().unwrap_or(0..0);
+        let after = std::mem::replace(&mut self.text, step.other);
+        let untouched = after.len() - changed.end;
+        let restored = changed.start..self.text.len() - untouched;
+        self.redo.push(Step {
+            other: after,
+            changed: step.changed,
+        });
+        Some(restored)
     }
 
     fn redo(&mut self) -> Option<Range<usize>> {
-        let (after, replaced) = self.redo.pop()?;
-        let before = std::mem::replace(&mut self.text, after);
-        let changed = changed_range(&before, &self.text);
-        self.undo.push((before, replaced));
+        let step = self.redo.pop()?;
+        let before = std::mem::replace(&mut self.text, step.other);
+        let changed = step.changed.clone().unwrap_or(0..0);
+        self.undo.push(Step {
+            other: before,
+            changed: step.changed,
+        });
         Some(changed)
     }
-}
-
-/// The part of `new` that differs from `old`.
-fn changed_range(old: &str, new: &str) -> Range<usize> {
-    let mut prefix = old
-        .bytes()
-        .zip(new.bytes())
-        .take_while(|(a, b)| a == b)
-        .count();
-    while !new.is_char_boundary(prefix) {
-        prefix -= 1;
-    }
-    let (old_rest, new_rest) = (&old[prefix..], &new[prefix..]);
-    let mut suffix = old_rest
-        .bytes()
-        .rev()
-        .zip(new_rest.bytes().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    while !new_rest.is_char_boundary(new_rest.len() - suffix) {
-        suffix -= 1;
-    }
-    prefix..new.len() - suffix
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +212,9 @@ fn run_engine(case: &Case) -> Outcome {
         .map(|line| line.len() + 1)
         .sum();
     engine.set_cursor(start + case.col, &buffer.text);
+    for press in keys::parse("m'").unwrap() {
+        engine.key(press, &mut buffer);
+    }
     for chunk in &case.keys {
         for press in keys::parse(chunk).unwrap() {
             engine.key(press, &mut buffer);
@@ -235,14 +270,19 @@ fn run_neovim(cases: &[Case], name: &str) -> Option<Vec<Outcome>> {
         let _ = std::fs::remove_dir_all(&directory);
         return None;
     };
-    let results = std::fs::read_to_string(&output).unwrap_or_else(|_| {
+    // Not `read_to_string`: Neovim can cut a character of several bytes in
+    // half, and the case that makes it do so should show up as a
+    // disagreement, not as unreadable results.
+    let results = std::fs::read(&output).unwrap_or_else(|_| {
         panic!(
-            "Neovim wrote no results: {}",
-            String::from_utf8_lossy(&status.stderr)
+            "Neovim wrote no results ({}): {} {}",
+            status.status,
+            String::from_utf8_lossy(&status.stderr),
+            String::from_utf8_lossy(&status.stdout)
         )
     });
     let _ = std::fs::remove_dir_all(&directory);
-    let results: Vec<Value> = serde_json::from_str(&results).unwrap();
+    let results: Vec<Value> = serde_json::from_str(&String::from_utf8_lossy(&results)).unwrap();
     Some(
         results
             .iter()
@@ -343,14 +383,8 @@ fn count(random: &mut Random) -> String {
 
 const MOTIONS: &[&str] = &[
     "h", "l", "j", "k", "w", "W", "b", "B", "e", "E", "ge", "gE", "0", "^", "$", "gg", "G", "{",
-    "}", "fa", "fo", "Fa", "t.", "T(", "f ", ";", ",", "%", "g_", "+", "-", "_", "|",
-];
-
-/// Motions that either move or fail, and never give an operator an empty
-/// range to work on.
-const MOVING: &[&str] = &[
-    "j", "k", "w", "W", "b", "B", "e", "E", "ge", "gE", "gg", "G", "{", "}", "fa", "fo", "Fa",
-    "t.", "T(", "f ", ";", ",", "%",
+    "}", "fa", "fo", "Fa", "t.", "T(", "f ", ";", ",", "%", "g_", "+", "-", "_", "|", "<Space>",
+    "<BS>", "<CR>",
 ];
 
 fn motion(random: &mut Random) -> String {
@@ -382,8 +416,7 @@ fn operation(random: &mut Random) -> String {
     } else {
         ""
     };
-    let case_operator = operator.starts_with('g');
-    let mut prefix = count(random);
+    let prefix = count(random);
     let target = match random.below(8) {
         0 => {
             // Doubled: `dd`, `guu`, `<<`.
@@ -394,17 +427,20 @@ fn operation(random: &mut Random) -> String {
             };
             format!("{}{last}", count(random))
         }
-        1 | 2 => {
-            // Vim moves the cursor when a counted object cannot be found;
-            // the engine leaves it. Objects are compared without counts.
-            prefix.clear();
-            random.pick(OBJECTS).to_owned()
-        }
-        // On a range that turns out empty, Vim's case operators change a
-        // character or a whole line depending on where the cursor is. The
-        // engine changes nothing; such motions are left out here.
-        _ if case_operator => format!("{}{}", count(random), random.pick(MOVING)),
-        _ => motion(random),
+        1 | 2 => format!("{}{}", count(random), random.pick(OBJECTS)),
+        // Not `g_`: from a blank after a character of several bytes it
+        // leaves Neovim's cursor inside that character, and the operator
+        // then works on half of it.
+        // Nor Space and Backspace, which with an operator go on into the
+        // next line by rules of their own that the engine does not have:
+        // there they stay in their line.
+        _ => loop {
+            let motion = motion(random);
+            if !motion.ends_with("g_") && !motion.ends_with("<Space>") && !motion.ends_with("<BS>")
+            {
+                break motion;
+            }
+        },
     };
     let typed = if operator == "c" {
         format!("{}<Esc>", random.pick(TYPED))
@@ -416,7 +452,7 @@ fn operation(random: &mut Random) -> String {
 
 fn command(random: &mut Random) -> String {
     let typed = |random: &mut Random| format!("{}<Esc>", random.pick(TYPED));
-    match random.below(22) {
+    match random.below(30) {
         0 => format!("{}x", count(random)),
         1 => format!("{}X", count(random)),
         2 => format!("{}D", count(random)),
@@ -433,11 +469,38 @@ fn command(random: &mut Random) -> String {
         13 => format!("{}a{}", count(random), typed(random)),
         14 => format!("I{}", typed(random)),
         15 => format!("A{}", typed(random)),
-        16 => format!("o{}", typed(random)),
-        17 => format!("O{}", typed(random)),
+        16 => format!("{}o{}", count(random), typed(random)),
+        17 => format!("{}O{}", count(random), typed(random)),
         18 => "u".to_owned(),
         19 => "<C-r>".to_owned(),
-        20 => format!("{}.", count(random)),
+        20 | 21 => format!("{}.", count(random)),
+        22 => format!("{}gJ", count(random)),
+        25 => format!("{}R{}", count(random), typed(random)),
+        // Backspace only over what was typed: going back further, Neovim
+        // changes characters it did not replace, in ways the engine does
+        // not follow. There it only moves back.
+        26 => format!(
+            "R{}<BS><BS>{}",
+            random.pick(&["ab", "a b", "X.y", "word two"]),
+            typed(random)
+        ),
+        27 => format!("R{}<CR>{}", random.pick(TYPED), typed(random)),
+        // Cursor keys in insert mode end one insert and begin another.
+        23 => format!(
+            "{}{}{}{}{}",
+            count(random),
+            random.pick(&["i", "a", "A", "o"]),
+            random.pick(TYPED),
+            random.pick(&["<Left>", "<Right>", "<Up>", "<Down>", "<Home>", "<End>"]),
+            typed(random)
+        ),
+        24 => format!(
+            "{}i{}<C-u>{}<CR>{}",
+            count(random),
+            random.pick(TYPED),
+            random.pick(TYPED),
+            typed(random)
+        ),
         _ => format!(
             "i{}<BS><BS>{}<C-w>z<Esc>",
             random.pick(TYPED),
@@ -446,33 +509,53 @@ fn command(random: &mut Random) -> String {
     }
 }
 
-fn visual(random: &mut Random) -> String {
+fn visual(random: &mut Random) -> Vec<String> {
     // Not compared yet: text objects in visual mode (Vim extends the
-    // selection in ways the engine does not model), `$` (which selects the
-    // line break too) and putting over a selection.
-    let mut keys = random.pick(&["v", "V"]).to_owned();
+    // selection in ways the engine does not model), putting over a
+    // selection, and `I` and `A`, which the engine has in a simple form
+    // that agrees with Neovim in most cases but not in all.
+    let mut keys = vec![random.pick(&["v", "V"]).to_owned()];
     for _ in 0..=random.below(3) {
-        let motion = motion(random);
-        if !motion.ends_with('$') {
-            keys.push_str(&motion);
-        }
+        keys.push(motion(random));
     }
     if random.chance(8) {
-        keys.push('o');
+        keys.push("o".to_owned());
     }
     let end = random.pick(&[
-        "d", "y", "x", ">", "<lt>", "~", "u", "U", "J", "c", "rx", "<Esc>", "", "D", "Y",
+        "d", "y", "x", ">", "<lt>", "~", "u", "U", "J", "c", "rx", "<Esc>", "", "D", "Y", "X", "s",
+        "S", "C", "gJ", "v", "V",
     ]);
-    keys.push_str(end);
-    if end == "c" {
-        keys.push_str(random.pick(TYPED));
-        keys.push_str("<Esc>");
+    let mut last = end.to_owned();
+    if matches!(end, "c" | "s" | "S" | "C") {
+        last.push_str(random.pick(TYPED));
+        last.push_str("<Esc>");
     }
+    keys.push(last);
     keys
 }
 
 /// Runs `count` cases built by `keys` and reports every disagreement.
-fn compare(name: &str, seed: u64, count: usize, mut keys: impl FnMut(&mut Random) -> Vec<String>) {
+///
+/// `ZETWERK_ORACLE_ROUNDS=n` runs n times as many cases, on other texts and
+/// keys each round: for a long look after changes to the engine.
+fn compare(name: &str, seed: u64, count: usize, keys: impl FnMut(&mut Random) -> Vec<String>) {
+    let rounds = std::env::var("ZETWERK_ORACLE_ROUNDS")
+        .ok()
+        .and_then(|rounds| rounds.parse().ok())
+        .unwrap_or(1_u64);
+    let mut keys = keys;
+    for round in 0..rounds {
+        let seed = seed.wrapping_add(round.wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1;
+        compare_round(name, seed, count, &mut keys);
+    }
+}
+
+fn compare_round(
+    name: &str,
+    seed: u64,
+    count: usize,
+    keys: &mut impl FnMut(&mut Random) -> Vec<String>,
+) {
     let mut random = Random(seed);
     let cases: Vec<Case> = (0..count)
         .map(|_| {
@@ -538,23 +621,259 @@ fn commands() {
 }
 
 #[test]
-#[ignore = "visual mode still disagrees with Neovim on about 3 % of cases; run with --ignored"]
 fn visual_mode() {
-    compare("visual", 0x27d4_eb2f_1656_67c5, 2000, |random| {
-        vec![visual(random)]
+    compare("visual", 0x27d4_eb2f_1656_67c5, 2000, visual);
+}
+
+/// A selection and what is done to it, for use among other commands: ends
+/// in normal mode, and without `$` and `g_`. Those make the selection one
+/// "to the end of the line", and repeating a change to such a selection
+/// overflows a number in Neovim, which then takes the text before the
+/// cursor instead of the text after it. The engine takes the rest of the
+/// line.
+fn closed_visual(random: &mut Random) -> Vec<String> {
+    let mut keys = visual(random);
+    keys.retain(|chunk| !chunk.ends_with('$') && !chunk.ends_with("g_"));
+    if matches!(keys.last().map(String::as_str), Some("" | "v" | "V")) {
+        keys.push("<Esc>".to_owned());
+    }
+    keys
+}
+
+#[test]
+fn sequences() {
+    compare("sequences", 0x85eb_ca6b_c2b2_ae35, 4000, |random| {
+        let mut selected = false;
+        (0..2 + random.below(5))
+            .flat_map(|_| match random.below(10) {
+                0..=2 => vec![motion(random)],
+                3..=5 => vec![operation(random)],
+                6 => {
+                    selected = true;
+                    closed_visual(random)
+                }
+                _ => {
+                    let command = command(random);
+                    // Here a selection may have been made while the cursor
+                    // was aiming at the end of its line for other reasons,
+                    // which runs into the overflow described above. `.`
+                    // after a selection is compared in `visual_repeat`.
+                    if selected && command.ends_with('.') {
+                        vec![motion(random)]
+                    } else {
+                        vec![command]
+                    }
+                }
+            })
+            .collect()
+    });
+}
+
+/// Text to search for: nothing that means something in a Vim pattern,
+/// which the engine does not have. It looks for the text as it is typed.
+const PATTERNS: &[&str] = &[
+    "foo", "bar", "a", "the", "if", "x1", "Baz", "word", "é", "id", "b", "o", "ab", "aa", "nope",
+];
+
+fn search(random: &mut Random) -> String {
+    let pattern = |random: &mut Random| random.pick(PATTERNS);
+    match random.below(10) {
+        0..=2 => format!("{}/{}<CR>", count(random), pattern(random)),
+        3 => format!("{}?{}<CR>", count(random), pattern(random)),
+        4 => format!("{}n", count(random)),
+        5 => format!("{}N", count(random)),
+        6 => format!("{}*", count(random)),
+        7 => format!("{}#", count(random)),
+        // Searches as what an operator works up to.
+        8 => format!(
+            "{}{}{}<CR>",
+            random.pick(&["d", "y", "gU"]),
+            random.pick(&["/", "?"]),
+            pattern(random)
+        ),
+        _ => format!(
+            "{}{}",
+            random.pick(&["d", "y", "g~"]),
+            random.pick(&["n", "N"])
+        ),
+    }
+}
+
+#[test]
+fn searches() {
+    compare("search", 0x6a09_e667_f3bc_c909, 3000, |random| {
+        (0..2 + random.below(4))
+            .map(|_| match random.below(10) {
+                0..=5 => search(random),
+                6..=8 => motion(random),
+                _ => ".".to_owned(),
+            })
+            .collect()
+    });
+}
+
+/// Marks, and the place the cursor last jumped from. Only up to the first
+/// change of the text: the engine's marks stay with the text they were put
+/// on, Vim's stay at their line and column.
+#[test]
+fn marks() {
+    compare("marks", 0x3c6e_f372_fe94_f82b, 3000, |random| {
+        let mark = |random: &mut Random| random.pick(&["a", "b"]);
+        let mut keys: Vec<String> = (0..3 + random.below(6))
+            .map(|_| match random.below(20) {
+                0..=6 => motion(random),
+                7 => format!("/{}<CR>", random.pick(PATTERNS)),
+                8 => random.pick(&["n", "N", "*", "#"]).to_owned(),
+                9..=11 => format!("m{}", mark(random)),
+                12..=14 => format!("{}{}", random.pick(&["`", "'"]), mark(random)),
+                15 | 16 => random.pick(&["``", "''"]).to_owned(),
+                17 => format!(
+                    "y{}{}",
+                    random.pick(&["`", "'"]),
+                    random.pick(&["a", "b", "'"])
+                ),
+                18 => format!("{}{}<Esc>", random.pick(&["v", "V"]), motion(random)),
+                _ => format!("gv{}<Esc>", motion(random)),
+            })
+            .collect();
+        keys.push(match random.below(6) {
+            0 => format!(
+                "d{}{}",
+                random.pick(&["`", "'"]),
+                random.pick(&["a", "b", "'"])
+            ),
+            1 => format!("c`{}X<Esc>", mark(random)),
+            2 => format!(">'{}", mark(random)),
+            3 => "gvd".to_owned(),
+            4 => format!("gi{}<Esc>", random.pick(TYPED)),
+            _ => "``".to_owned(),
+        });
+        keys
+    });
+}
+
+/// Where the engine means to differ from Vim: a mark stays with the text it
+/// was put on, whatever is typed or deleted before it, and comes back
+/// with an undo.
+#[test]
+fn marks_stay_with_their_text() {
+    let mut buffer = Buffer {
+        text: "one two three\nfour\n".to_owned(),
+        ..Buffer::default()
+    };
+    let mut engine = Engine::new();
+    let press = |engine: &mut Engine, buffer: &mut Buffer, notation: &str| {
+        for press in keys::parse(notation).unwrap() {
+            engine.key(press, buffer);
+        }
+    };
+    // Mark "three", then change the text before it in several ways.
+    press(
+        &mut engine,
+        &mut buffer,
+        "2wma0iXX <Esc>ggOnew line<Esc>Gdd",
+    );
+    assert_eq!(buffer.text, "new line\nXX one two three\n");
+    press(&mut engine, &mut buffer, "gg`a");
+    assert_eq!(&buffer.text[engine.cursor()..], "three\n");
+    press(&mut engine, &mut buffer, "uuugg`a");
+    assert_eq!(buffer.text, "one two three\nfour\n");
+    assert_eq!(&buffer.text[engine.cursor()..], "three\nfour\n");
+    // Text with a mark in it goes: the mark is where the text was.
+    press(&mut engine, &mut buffer, "0dwgg`a");
+    assert_eq!(&buffer.text[engine.cursor()..], "three\nfour\n");
+    press(&mut engine, &mut buffer, "0d$G`a");
+    assert_eq!(engine.cursor(), 0);
+}
+
+/// Records a macro of a few commands and plays it, also more often than
+/// it can succeed: a macro ends at the first command that fails.
+#[test]
+fn macros() {
+    compare("macros", 0xbb67_ae85_84ca_a73b, 2000, |random| {
+        let register = random.pick(&["q", "w"]);
+        let mut keys = vec![format!("q{register}")];
+        for _ in 0..=random.below(3) {
+            keys.push(match random.below(4) {
+                0 => motion(random),
+                1 => operation(random),
+                // Not `~`, `p` and `P`: once `.` has repeated one of them
+                // inside a macro, Neovim drops the rest of the macro.
+                _ => loop {
+                    let command = command(random);
+                    let key = command.trim_start_matches(|c: char| c.is_ascii_digit());
+                    if !matches!(key, "~" | "p" | "P") {
+                        break command;
+                    }
+                },
+            });
+        }
+        keys.push("q".to_owned());
+        for _ in 0..=random.below(2) {
+            keys.push(match random.below(5) {
+                0 => motion(random),
+                1 => format!("{}@@", count(random)),
+                _ => format!("{}@{register}", count(random)),
+            });
+        }
+        keys
     });
 }
 
 #[test]
-#[ignore = "chained commands still disagree with Neovim; run with --ignored"]
-fn sequences() {
-    compare("sequences", 0x85eb_ca6b_c2b2_ae35, 3000, |random| {
-        (0..2 + random.below(5))
-            .map(|_| match random.below(9) {
-                0..=2 => motion(random),
-                3..=5 => operation(random),
-                _ => command(random),
-            })
-            .collect()
+fn visual_repeat() {
+    compare("repeat", 0x1b87_3593_cc9e_2d51, 2000, |random| {
+        let mut keys = closed_visual(random);
+        for _ in 0..=random.below(2) {
+            for _ in 0..random.below(3) {
+                keys.push(motion(random));
+            }
+            keys.push(".".to_owned());
+        }
+        if random.chance(3) {
+            keys.push("u".to_owned());
+        }
+        keys
     });
+}
+
+/// For looking into one case by hand:
+/// (`§` separates commands too, for when the keys have a `~~` in them.)
+/// `ZETWERK_PROBE='keys~~keys|row|col|line|line' cargo test -p zetwerk-vim --test oracle probe -- --ignored --nocapture`
+#[test]
+#[ignore = "a tool, not a test"]
+fn probe() {
+    let Ok(spec) = std::env::var("ZETWERK_PROBE") else {
+        return;
+    };
+    let mut parts = spec.split('|');
+    let separator = if spec.contains('§') { "§" } else { "~~" };
+    let keys: Vec<String> = parts
+        .next()
+        .unwrap()
+        .split(separator)
+        .map(str::to_owned)
+        .collect();
+    let row = parts.next().unwrap().parse().unwrap();
+    let col = parts.next().unwrap().parse().unwrap();
+    let lines: Vec<String> = parts.map(str::to_owned).collect();
+    for upto in 1..=keys.len() {
+        let case = Case {
+            lines: lines.clone(),
+            row,
+            col,
+            keys: keys[..upto].to_vec(),
+        };
+        let neovim = run_neovim(std::slice::from_ref(&case), "probe").map(|mut all| all.remove(0));
+        let engine = run_engine(&case);
+        let mark = if neovim.as_ref() == Some(&engine) {
+            "  "
+        } else {
+            "!!"
+        };
+        println!(
+            "{mark} after {:?}\n     neovim: {neovim:?}\n     engine: {engine:?}",
+            keys[upto - 1]
+        );
+    }
 }

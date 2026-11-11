@@ -1,5 +1,6 @@
 //! Text objects: the things `iw`, `ap`, `i(` and `a"` select.
 
+use crate::motion;
 use crate::text::{Class, Text, class};
 
 /// A selected stretch of text, from `start` up to but not including `end`.
@@ -157,8 +158,9 @@ pub fn paragraph(text: Text, pos: usize, around: bool, count: usize) -> Option<O
 }
 
 /// `i(`, `a(` and their relatives: the innermost pair of `open` and `close`
-/// around the cursor. If the cursor is in no pair, the search starts from
-/// the next bracket after the cursor instead, on this line or a later one.
+/// around the cursor. If the cursor is in no pair, the next pair after it,
+/// on this line or a later one. Returns the two ends of the object and
+/// whether the second is included.
 pub fn bracket(
     text: Text,
     pos: usize,
@@ -166,23 +168,45 @@ pub fn bracket(
     close: char,
     around: bool,
     count: usize,
-) -> Option<Object> {
-    // Inside an opening bracket: its block, or nothing if it is never
-    // closed. Not inside any: the block of the next bracket after the
-    // cursor.
-    let mut open_at = if let Some(open_at) = unmatched_open(text, pos, open, close) {
-        open_at
+) -> Option<(usize, usize, bool)> {
+    let (open_at, close_at) = if let Some(open_at) = unmatched_open(text, pos, open, close) {
+        // Inside an opening bracket: its block, or nothing if it is never
+        // closed. A count asks for that many levels of nesting.
+        let mut pair = (open_at, matching_close(text, open_at, open, close)?);
+        for _ in 1..count {
+            let outside = pair.0.checked_sub(1)?;
+            pair = enclosing_from(text, outside, pair.1, open, close)?;
+        }
+        pair
     } else {
-        let ahead = pos + text.0.get(pos..)?.find([open, close])?;
-        unmatched_open(text, ahead, open, close)?
+        // Vim's search: forwards for an opening bracket, where every
+        // closing bracket on the way asks for one more. A count repeats
+        // the search from the bracket found.
+        let mut from = pos;
+        for _ in 0..count {
+            let after = text.next(from);
+            let mut skip = 0_usize;
+            let mut found = None;
+            for (offset, c) in text.0.get(after..)?.char_indices() {
+                if c == close {
+                    skip += 1;
+                } else if c == open {
+                    if skip == 0 {
+                        found = Some(after + offset);
+                        break;
+                    }
+                    skip -= 1;
+                }
+            }
+            from = found?;
+        }
+        (from, matching_close(text, from, open, close)?)
     };
-    let mut close_at = matching_close(text, open_at, open, close)?;
-    // A count asks for that many levels of nesting.
-    for _ in 1..count {
-        let outside = open_at.checked_sub(1)?;
-        (open_at, close_at) = enclosing_from(text, outside, close_at, open, close)?;
-    }
-    bracket_object(text, open_at, close_at, around)
+    Some(if around {
+        (open_at, close_at, true)
+    } else {
+        motion::block_inside(text, open_at, close_at)
+    })
 }
 
 /// The innermost pair that contains the pair from `before + 1` to `inner_close`.
@@ -255,47 +279,10 @@ fn matching_close(text: Text, open_at: usize, open: char, close: char) -> Option
     None
 }
 
-fn bracket_object(text: Text, open_at: usize, close_at: usize, around: bool) -> Option<Object> {
-    if around {
-        return Some(Object {
-            start: open_at,
-            end: text.next(close_at),
-            linewise: false,
-        });
-    }
-    let mut start = text.next(open_at);
-    let mut end = close_at;
-    // A block whose brackets stand on lines of their own is selected by
-    // whole lines: the break after the opening bracket and the indentation
-    // before the closing one do not belong to the inside.
-    if text.char_at(start) == Some('\n') {
-        let close_line = text.line_start(close_at);
-        let only_indent = text
-            .0
-            .get(close_line..close_at)?
-            .chars()
-            .all(|c| c == ' ' || c == '\t');
-        if only_indent && close_line > start {
-            start += 1;
-            end = close_line;
-            return Some(Object {
-                start,
-                end,
-                linewise: true,
-            });
-        }
-        start += 1;
-    }
-    Some(Object {
-        start,
-        end,
-        linewise: false,
-    })
-}
-
 /// `i"`, `a"` and the same for `'` and `` ` ``: a quoted string on the
-/// cursor's line.
-pub fn quote(text: Text, pos: usize, quote: char, around: bool) -> Option<Object> {
+/// cursor's line. With a count of two or more, the inside takes the quotes
+/// along (but no blanks).
+pub fn quote(text: Text, pos: usize, quote: char, around: bool, count: usize) -> Option<Object> {
     let (line_start, line_end) = (text.line_start(pos), text.line_end(pos));
     let line = text.0.get(line_start..line_end)?;
     let mut quotes = Vec::new();
@@ -324,6 +311,13 @@ pub fn quote(text: Text, pos: usize, quote: char, around: bool) -> Option<Object
             }
         }
     };
+    if !around && count > 1 {
+        return Some(Object {
+            start: open,
+            end: text.next(close),
+            linewise: false,
+        });
+    }
     if !around {
         return Some(Object {
             start: text.next(open),
@@ -401,35 +395,37 @@ mod tests {
 
     #[test]
     fn brackets() {
+        fn get(text: &str, pos: usize, around: bool) -> Option<&str> {
+            let (start, end, inclusive) = bracket(Text(text), pos, '(', ')', around, 1)?;
+            let end = if inclusive { Text(text).next(end) } else { end };
+            text.get(start..end)
+        }
         let text = "f(a, (b), c)\n";
-        let get = |pos, around| slice(text, bracket(Text(text), pos, '(', ')', around, 1));
-        assert_eq!(get(3, false), Some("a, (b), c"));
-        assert_eq!(get(6, false), Some("b"));
-        assert_eq!(get(6, true), Some("(b)"));
-        assert_eq!(get(1, true), Some("(a, (b), c)"));
-        assert_eq!(get(11, false), Some("a, (b), c"));
+        assert_eq!(get(text, 3, false), Some("a, (b), c"));
+        assert_eq!(get(text, 6, false), Some("b"));
+        assert_eq!(get(text, 6, true), Some("(b)"));
+        assert_eq!(get(text, 1, true), Some("(a, (b), c)"));
+        assert_eq!(get(text, 11, false), Some("a, (b), c"));
         assert_eq!(
-            get(0, false),
+            get(text, 0, false),
             Some("a, (b), c"),
             "outside any pair: the next one"
         );
-        assert_eq!(
-            slice(
-                "a ) (b)\n",
-                bracket(Text("a ) (b)\n"), 0, '(', ')', false, 1)
-            ),
-            None
-        );
+        assert_eq!(get("a ) (b)\n", 0, false), None);
+        assert_eq!(get("()\n", 0, false), Some(""));
+        // A closing bracket on a line of its own gives up its line.
         let block = "{\n  x\n}\n";
-        let inner = bracket(Text(block), 4, '{', '}', false, 1);
-        assert_eq!(slice(block, inner), Some("  x\n"));
-        assert_eq!(inner.map(|object| object.linewise), Some(true));
+        assert_eq!(
+            bracket(Text(block), 4, '{', '}', false, 1),
+            Some((2, 6, false))
+        );
     }
 
     #[test]
     fn quotes() {
         let text = "say \"hi \\\" there\" now 'x'\n";
-        let get = |pos, quote_char, around| slice(text, quote(Text(text), pos, quote_char, around));
+        let get =
+            |pos, quote_char, around| slice(text, quote(Text(text), pos, quote_char, around, 1));
         assert_eq!(get(6, '"', false), Some("hi \\\" there"));
         assert_eq!(
             get(0, '"', false),

@@ -89,6 +89,7 @@ fn parse_special(name: &str) -> Result<KeyPress, String> {
         ("tab", ..) => Key::Tab,
         ("space", ..) => Key::Char(' '),
         ("lt", ..) => Key::Char('<'),
+        ("bar", ..) => Key::Char('|'),
         ("up", ..) => Key::Up,
         ("down", ..) => Key::Down,
         ("left", ..) => Key::Left,

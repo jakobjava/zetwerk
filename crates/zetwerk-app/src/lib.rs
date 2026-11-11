@@ -1,5 +1,6 @@
 pub mod app;
 pub mod chrome;
+pub mod editor;
 pub mod gpu;
 pub use zetwerk_vim::keys;
 pub mod power;

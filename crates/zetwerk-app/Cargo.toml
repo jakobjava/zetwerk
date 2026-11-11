@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+zetwerk-core.workspace = true
 zetwerk-typst.workspace = true
 zetwerk-render.workspace = true
 zetwerk-vim.workspace = true

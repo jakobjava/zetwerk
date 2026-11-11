@@ -191,6 +191,14 @@ impl Project {
         Some(source.edit(range, text))
     }
 
+    /// Makes `source` the text of its file from now on. This is how text
+    /// that is edited elsewhere (with its own history) gets compiled: hand
+    /// it over before taking a [`Project::snapshot`]. A `Source` is shared
+    /// when cloned, so this copies nothing.
+    pub fn set_source(&mut self, source: Source) {
+        self.sources.insert(source.id(), source);
+    }
+
     /// Where the main file is on disk; `None` for an in-memory project.
     #[must_use]
     pub fn main_path(&self) -> Option<&Path> {
