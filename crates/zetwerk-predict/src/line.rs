@@ -4,12 +4,23 @@ use typst::layout::{Abs, Em, Frame, FrameItem, Point, Rect};
 use typst::syntax::Span;
 use typst::text::{Glyph, TextItem};
 
+use crate::Decline;
 use crate::shape::{Shaped, reproduces, shape};
-use crate::{Decline, map_items};
 
 /// How far a justified line's spaces may shrink, as a fraction of their
 /// natural width. Typst's default justification limit.
 const SPACE_SHRINK: f64 = 1.0 / 3.0;
+
+/// How far a justified line's spaces are stretched, as a fraction of
+/// their natural width, before the line is rather left short.
+const SPACE_STRETCH: f64 = 1.5;
+
+/// How far the blanks of a justified line are taken to give when words
+/// are fitted into it, as a fraction of their natural width. Typst lets
+/// them shrink by up to a third, but weighs that against the looks of the
+/// whole paragraph; of the values tried, a fifth came closest to the
+/// breaks it chooses.
+const LINE_SHRINK: f64 = 0.2;
 
 /// Lengths closer than this (in points) are equal. Typst positions items
 /// with full `f64` precision, so this only has to absorb rounding noise.
@@ -35,21 +46,31 @@ pub struct Line {
     justified: bool,
     /// For a ragged line: how far right it may reach, or why that is unknown.
     limit: Result<Abs, Decline>,
+    /// Items of the frame that were on the line and have left it for the
+    /// next one.
+    gone: Vec<usize>,
 }
 
 /// One item of the line.
 struct Member {
-    /// Index in the parent frame.
-    index: usize,
+    /// Index in the parent frame; `None` for an item that came down from
+    /// the line above and is not in the frame yet.
+    index: Option<usize>,
     x: Abs,
     width: Abs,
     /// Distance from the previous member's right edge. Kept as it is.
     gap: Abs,
     new_x: Abs,
+    /// How far below the line's baseline the item's origin is: nothing
+    /// for text on the line, less for superscripts and for boxes, which
+    /// hang from their top.
+    drop: Abs,
     /// `Some` for text we can reshape. `None` for everything that is moved
     /// along but never changed: inline math, boxes, and text whose glyphs
-    /// default shaping does not reproduce (math symbols, hyphenation marks).
+    /// default shaping does not reproduce (math symbols).
     run: Option<Run>,
+    /// The item itself, for those that are not reshaped.
+    rigid: Option<FrameItem>,
 }
 
 /// A text item with its glyphs as the shaper produced them.
@@ -61,9 +82,219 @@ struct Run {
     trimmed: usize,
     /// The bytes of the item's text that were typed in this prediction.
     typed: Option<std::ops::Range<usize>>,
+    /// The hyphen Typst put behind the text because it broke the line
+    /// inside a word.
+    hyphen: Option<Glyph>,
+}
+
+/// What was taken off the end of a line that no longer holds it, on its
+/// way to the start of the next line: words, and whatever stands among
+/// them.
+pub struct Carry {
+    pieces: Vec<Member>,
+    /// Whether the line it comes from was the last of its paragraph, so
+    /// that it has to make a line of its own.
+    pub ends_paragraph: bool,
 }
 
 impl Line {
+    /// Where the line's baseline is, and its left and right edge as they
+    /// were before the edit, in the coordinates of its frame.
+    pub fn baseline(&self) -> Abs {
+        self.baseline
+    }
+
+    pub fn span(&self) -> (Abs, Abs) {
+        (self.left, self.right)
+    }
+
+    /// The largest font size on the line.
+    pub fn font_size(&self) -> Abs {
+        self.members
+            .iter()
+            .filter_map(|member| member.run.as_ref())
+            .map(|run| run.item.size)
+            .fold(Abs::zero(), Abs::max)
+    }
+
+    /// Whether `parent` is a frame Typst made for this line alone, as it
+    /// does for lines of more than a few items. Short lines lie directly
+    /// among their neighbours.
+    pub fn has_own_frame(&self, parent: &Frame) -> bool {
+        parent.kind().is_soft() && parent.height() <= self.font_size() * 2.0
+    }
+
+    /// Whether the paragraph goes on in a next line: this one ends in a
+    /// blank that the line break swallowed, or in a hyphen.
+    pub fn continues(&self) -> bool {
+        self.members
+            .last()
+            .and_then(|member| member.run.as_ref())
+            .is_some_and(|run| run.trimmed > 0 || run.hyphen.is_some())
+    }
+
+    /// How far right the line may reach, in the coordinates of its frame.
+    pub fn right_limit(&self) -> Result<Abs, Decline> {
+        if self.justified {
+            Ok(self.right)
+        } else {
+            self.limit
+        }
+    }
+
+    /// Takes whole words off the end of the line until the rest fits, and
+    /// hands them over for the next line. A word is what stands between
+    /// two blanks, be it text in one font or several, or an equation.
+    ///
+    /// Declines if nothing of the line could stay.
+    pub fn shed(&mut self) -> Result<Carry, Decline> {
+        let available = if self.justified {
+            self.right - self.left
+        } else {
+            self.limit? - self.left
+        };
+        let ends_paragraph = !self.continues();
+        // A hyphen is there because the line was broken behind it. The
+        // word it is in goes to the next line, where its other half is.
+        if let Some(run) = self
+            .members
+            .last_mut()
+            .and_then(|member| member.run.as_mut())
+        {
+            run.hyphen = None;
+        }
+        let mut pieces: Vec<Member> = Vec::new();
+        loop {
+            let (last, before) = self.members.split_last_mut().ok_or(Decline::Break)?;
+            let mut fixed = last.gap;
+            // How much the blanks that stay may give in a justified line.
+            let mut give = Abs::zero();
+            for member in before.iter() {
+                fixed += member.gap + member.run.as_ref().map_or(member.width, Run::natural_width);
+                if let Some(run) = member.run.as_ref().filter(|_| self.justified) {
+                    give += run.space_width() * LINE_SHRINK;
+                }
+            }
+            let room = Room {
+                fixed,
+                give,
+                available,
+                justified: self.justified,
+            };
+            let cut = last
+                .run
+                .as_ref()
+                .and_then(|run| run.cut(pieces.is_empty(), before.is_empty(), &room));
+            let Some((cut, body, natural)) = cut else {
+                // Nothing of this item can stay: all of it goes.
+                let mut member = self.members.pop().ok_or(Decline::Break)?;
+                self.gone.extend(member.index.take());
+                if let Some(run) = &mut member.run {
+                    // Its last blank is no longer at the end of a line.
+                    run.trimmed = 0;
+                }
+                pieces.push(member);
+                continue;
+            };
+            let run = last.run.as_mut().ok_or(Decline::Inconsistent)?;
+            let text = run.item.text.to_string();
+            let typed = run.typed.take();
+            let (stays, goes) = match typed {
+                Some(typed) if typed.end > cut => {
+                    (None, Some(typed.start.saturating_sub(cut)..typed.end - cut))
+                }
+                typed => (typed, None),
+            };
+            if cut < text.len() {
+                let mut tail = Run {
+                    item: run.item.clone(),
+                    natural: shape(&run.item, &text[cut..]),
+                    trimmed: 0,
+                    typed: goes,
+                    hyphen: None,
+                };
+                tail.item.text = text[cut..].into();
+                pieces.push(Member {
+                    index: None,
+                    x: Abs::zero(),
+                    width: tail.natural_width(),
+                    gap: Abs::zero(),
+                    new_x: Abs::zero(),
+                    drop: last.drop,
+                    run: Some(tail),
+                    rigid: None,
+                });
+            }
+            run.typed = stays;
+            run.trimmed = natural
+                .iter()
+                .filter(|glyph| glyph.range.start >= body)
+                .count();
+            run.natural = natural;
+            run.item.text = text[..cut].into();
+            break;
+        }
+        pieces.reverse();
+        if let Some(first) = pieces.first_mut() {
+            first.gap = Abs::zero();
+        }
+        Ok(Carry {
+            pieces,
+            ends_paragraph,
+        })
+    }
+
+    /// Puts what the line before could not hold at the start of this
+    /// line.
+    pub fn prepend(&mut self, carry: Carry) -> Result<(), Decline> {
+        let mut pieces = carry.pieces;
+        // Text that goes on in the same font becomes one with the text
+        // it meets, as it was before a line break came between them.
+        let joined = match (
+            pieces.last().and_then(|piece| piece.run.as_ref()),
+            self.members
+                .first_mut()
+                .and_then(|member| member.run.as_mut()),
+        ) {
+            (Some(tail), Some(run)) if same_style(&tail.item, &run.item) => {
+                let mut text = tail.item.text.to_string();
+                text.push_str(&run.item.text);
+                if text.len() > usize::from(u16::MAX) {
+                    return Err(Decline::Inconsistent);
+                }
+                let natural = shape(&run.item, &text);
+                if natural.iter().any(|glyph| glyph.id == 0) {
+                    return Err(Decline::MissingGlyph);
+                }
+                run.item.text = text.into();
+                run.natural = natural;
+                run.typed.clone_from(&tail.typed);
+                true
+            }
+            _ => false,
+        };
+        if joined {
+            pieces.pop();
+        }
+        self.members.splice(0..0, pieces);
+        Ok(())
+    }
+
+    /// A line made of what the line before could not hold, with its left
+    /// edge at `left` and its baseline at `baseline`, that may be `width`
+    /// wide.
+    pub fn of(carry: Carry, left: Abs, baseline: Abs, width: Abs) -> Self {
+        Self {
+            members: carry.pieces,
+            baseline,
+            left,
+            right: left,
+            justified: false,
+            limit: Ok(left + width),
+            gone: Vec::new(),
+        }
+    }
+
     /// Finds the line containing item `item_index` of `parent`. The edited
     /// item itself must be reproducible by shaping; its neighbours are
     /// reshaped if they can be and otherwise kept rigid.
@@ -121,7 +352,8 @@ impl Line {
         let members = chain
             .iter()
             .map(|&(index, x, width)| {
-                let run = match &items[index].1 {
+                let (pos, item) = &items[index];
+                let run = match item {
                     FrameItem::Text(item) => Run::new(item),
                     _ => None,
                 };
@@ -131,11 +363,13 @@ impl Line {
                 let gap = x - previous_right;
                 previous_right = x + width;
                 Ok(Member {
-                    index,
+                    index: Some(index),
                     x,
                     width,
                     gap,
                     new_x: x,
+                    drop: pos.y - baseline,
+                    rigid: run.is_none().then(|| item.clone()),
                     run,
                 })
             })
@@ -150,6 +384,7 @@ impl Line {
             right,
             justified: false,
             limit: Err(Decline::Alignment),
+            gone: Vec::new(),
         };
         line.justified = line.detect_justification();
         line.limit = line.ragged_limit(parent);
@@ -176,7 +411,7 @@ impl Line {
 
     /// How far right a flush-left line may grow.
     fn ragged_limit(&self, parent: &Frame) -> Result<Abs, Decline> {
-        let is_member = |index: usize| self.members.iter().any(|m| m.index == index);
+        let is_member = |index: usize| self.members.iter().any(|m| m.index == Some(index));
         // A long line gets a frame of its own, as wide as the measure and
         // one line tall. Sub- and superscripts sit off the baseline, so the
         // test is the frame's height rather than "every item is a member".
@@ -214,30 +449,38 @@ impl Line {
             .ok_or(Decline::Alignment)
     }
 
-    /// Inserts `text` at byte `at` of the text item `item_index`.
-    pub fn insert(&mut self, item_index: usize, at: usize, text: &str) -> Result<(), Decline> {
+    /// Puts `text` in the place of bytes `range` of the text item
+    /// `item_index`.
+    pub fn replace(
+        &mut self,
+        item_index: usize,
+        range: std::ops::Range<usize>,
+        text: &str,
+    ) -> Result<(), Decline> {
         let run = self
             .members
             .iter_mut()
-            .find(|member| member.index == item_index)
+            .find(|member| member.index == Some(item_index))
             .and_then(|member| member.run.as_mut())
             .ok_or(Decline::Inconsistent)?;
 
         // Typing after trailing whitespace that was swallowed by the line
-        // break puts the text on the next line, or changes the break.
+        // break puts the text on the next line, or changes the break; and
+        // taking that whitespace out joins two words across the break.
         let kept = run.natural.len() - run.trimmed;
         if run
             .natural
             .get(kept)
-            .is_some_and(|trimmed| at > trimmed.range.start)
+            .is_some_and(|trimmed| range.end > trimmed.range.start)
         {
             return Err(Decline::Overflow);
         }
 
-        let mut new_text = String::with_capacity(run.item.text.len() + text.len());
-        new_text.push_str(run.item.text.get(..at).ok_or(Decline::Inconsistent)?);
+        let old = &run.item.text;
+        let mut new_text = String::with_capacity(old.len() + text.len());
+        new_text.push_str(old.get(..range.start).ok_or(Decline::Inconsistent)?);
         new_text.push_str(text);
-        new_text.push_str(run.item.text.get(at..).ok_or(Decline::Inconsistent)?);
+        new_text.push_str(old.get(range.end..).ok_or(Decline::Inconsistent)?);
         if new_text.len() > usize::from(u16::MAX) {
             return Err(Decline::Inconsistent);
         }
@@ -249,7 +492,7 @@ impl Line {
 
         run.item.text = new_text.into();
         run.natural = natural;
-        run.typed = Some(at..at + text.len());
+        run.typed = Some(range.start..range.start + text.len());
         Ok(())
     }
 
@@ -293,14 +536,8 @@ impl Line {
                 natural_width += member.width;
                 continue;
             };
-            let kept = run.natural.len() - run.trimmed;
-            for glyph in &run.natural[..kept] {
-                let advance = glyph.x_advance.at(run.item.size);
-                natural_width += advance;
-                if is_space(&run.item.text, glyph) {
-                    space_width += advance;
-                }
-            }
+            natural_width += run.natural_width();
+            space_width += run.space_width();
         }
 
         let slack = (self.right - self.left) - natural_width;
@@ -314,6 +551,19 @@ impl Line {
             } else {
                 Err(Decline::Overflow)
             };
+        }
+        if slack > space_width * SPACE_STRETCH {
+            // Too little left on the line to spread it over the measure:
+            // Typst would bring words up from the next line. Until the
+            // compile shows that, the line is set as it comes.
+            for run in self
+                .members
+                .iter_mut()
+                .filter_map(|member| member.run.as_mut())
+            {
+                run.set_glyphs(|_| Em::zero());
+            }
+            return Ok(());
         }
         // Typst stretches and shrinks spaces in proportion to their width.
         let ratio = slack / space_width;
@@ -368,27 +618,37 @@ impl Line {
         ))
     }
 
-    /// A copy of `parent` with this line's items replaced and repositioned.
-    pub fn apply(self, parent: &Frame) -> Frame {
+    /// A copy of `parent` with this line's items replaced and repositioned,
+    /// those that left the line taken out, and those that came to it put
+    /// in.
+    pub fn apply(&self, parent: &Frame) -> Frame {
         let shift_at = |x: Abs| {
             // Decorations and link areas follow the item they sit on.
             self.members
                 .iter()
                 .rev()
-                .find(|member| member.x <= x + Abs::pt(TOLERANCE_PT))
+                .find(|member| member.index.is_some() && member.x <= x + Abs::pt(TOLERANCE_PT))
                 .map_or(Abs::zero(), |member| member.new_x - member.x)
         };
         let on_line = |pos: Point| {
             pos.x >= self.left - Abs::pt(TOLERANCE_PT)
                 && pos.x <= self.right + Abs::pt(TOLERANCE_PT)
         };
-        map_items(parent, |index, pos, item| {
-            if let Some(member) = self.members.iter().find(|m| m.index == index) {
+        let mut out = Frame::new(parent.size(), parent.kind());
+        if parent.has_baseline() {
+            out.set_baseline(parent.baseline());
+        }
+        for (index, (pos, item)) in parent.items().enumerate() {
+            if self.gone.contains(&index) {
+                continue;
+            }
+            if let Some(member) = self.members.iter().find(|m| m.index == Some(index)) {
                 let pos = Point::new(member.new_x, pos.y);
-                return match &member.run {
-                    Some(run) => (pos, FrameItem::Text(run.item.clone())),
-                    None => (pos, item.clone()),
-                };
+                match &member.run {
+                    Some(run) => out.push(pos, FrameItem::Text(run.item.clone())),
+                    None => out.push(pos, item.clone()),
+                }
+                continue;
             }
             let attached = match item {
                 FrameItem::Link(_, size) => {
@@ -397,23 +657,133 @@ impl Line {
                 FrameItem::Shape(..) => (pos.y - self.baseline).to_pt().abs() < 4.0,
                 _ => false,
             };
-            if attached && on_line(pos) {
-                (Point::new(pos.x + shift_at(pos.x), pos.y), item.clone())
+            if attached && on_line(*pos) {
+                out.push(Point::new(pos.x + shift_at(pos.x), pos.y), item.clone());
             } else {
-                (pos, item.clone())
+                out.push(*pos, item.clone());
             }
-        })
+        }
+        self.put_new(&mut out);
+        out
+    }
+
+    /// Puts the items that came to this line from the one above into
+    /// `frame`.
+    pub fn put_new(&self, frame: &mut Frame) {
+        for member in self.members.iter().filter(|member| member.index.is_none()) {
+            let pos = Point::new(member.new_x, self.baseline + member.drop);
+            match (&member.run, &member.rigid) {
+                (Some(run), _) => frame.push(pos, FrameItem::Text(run.item.clone())),
+                (None, Some(item)) => frame.push(pos, item.clone()),
+                (None, None) => {}
+            }
+        }
     }
 }
 
+/// Whether two text items are set alike, so that text of one can go on
+/// in the other.
+fn same_style(a: &TextItem, b: &TextItem) -> bool {
+    a.font == b.font
+        && a.size == b.size
+        && a.fill == b.fill
+        && a.stroke == b.stroke
+        && a.lang == b.lang
+        && a.region == b.region
+}
+
+/// What a line has room for when words are fitted into it.
+struct Room {
+    /// The width of everything on the line before the text looked at.
+    fixed: Abs,
+    /// How much the blanks before it may give.
+    give: Abs,
+    /// The width the line may have.
+    available: Abs,
+    justified: bool,
+}
+
 impl Run {
+    /// The latest place in the run's text behind which a line can end so
+    /// that what stays fits `room`: behind a blank. Returns the byte the
+    /// text is cut at, where what stays ends without its last blanks,
+    /// and what stays as shaped.
+    ///
+    /// For the `first` piece looked at, the blanks at its very end do not
+    /// count: ending behind them would move nothing. If the run is
+    /// `alone` on its line, something of it has to stay.
+    fn cut(&self, first: bool, alone: bool, room: &Room) -> Option<(usize, usize, Vec<Shaped>)> {
+        let text = self.item.text.as_str();
+        let mut body = if first {
+            text.trim_end_matches(' ').len()
+        } else {
+            text.len()
+        };
+        loop {
+            let cut = text[..body].rfind(' ')? + 1;
+            body = text[..cut].trim_end_matches(' ').len();
+            if body == 0 && alone {
+                return None;
+            }
+            let natural = shape(&self.item, &text[..cut]);
+            let kept = || natural.iter().filter(|glyph| glyph.range.start < body);
+            let width: Abs = kept().map(|glyph| glyph.x_advance.at(self.item.size)).sum();
+            let spaces: Abs = kept()
+                .filter(|glyph| is_space(&text[..cut], glyph))
+                .map(|glyph| glyph.x_advance.at(self.item.size))
+                .sum();
+            let give = if room.justified {
+                room.give + spaces * LINE_SHRINK
+            } else {
+                Abs::zero()
+            };
+            if room.fixed + width - give <= room.available + Abs::pt(TOLERANCE_PT) {
+                return Some((cut, body, natural));
+            }
+        }
+    }
+
+    /// The width of the run's blanks as shaped, without what the line
+    /// break swallowed.
+    fn space_width(&self) -> Abs {
+        let kept = self.natural.len() - self.trimmed;
+        self.natural[..kept]
+            .iter()
+            .filter(|glyph| is_space(&self.item.text, glyph))
+            .map(|glyph| glyph.x_advance.at(self.item.size))
+            .sum()
+    }
+
+    /// The width of the run as shaped, without what the line break
+    /// swallowed.
+    fn natural_width(&self) -> Abs {
+        let kept = self.natural.len() - self.trimmed;
+        let hyphen = self
+            .hyphen
+            .as_ref()
+            .map_or(Em::zero(), |glyph| glyph.x_advance);
+        self.natural[..kept]
+            .iter()
+            .map(|glyph| glyph.x_advance.at(self.item.size))
+            .sum::<Abs>()
+            + hyphen.at(self.item.size)
+    }
+
     /// `None` if shaping the item's text does not give back its glyphs, or
     /// if anything but a space has a different width than shaped: then
     /// tracking, an italic correction or a justification mode we do not
     /// model is in play.
     fn new(item: &TextItem) -> Option<Self> {
         let natural = shape(item, &item.text);
-        if !reproduces(item, &natural) {
+        // One glyph more than the text gives, standing behind all of it:
+        // the hyphen of a word broken at the end of its line.
+        let hyphen = (item.glyphs.len() == natural.len() + 1)
+            .then(|| item.glyphs.last())
+            .flatten()
+            .filter(|glyph| glyph.range().start >= item.text.trim_end().len())
+            .cloned();
+        let text_glyphs = item.glyphs.len() - usize::from(hyphen.is_some());
+        if !reproduces(&item.glyphs[..text_glyphs], &natural) {
             return None;
         }
         let odd_width = |(glyph, natural): (&Glyph, &Shaped)| {
@@ -438,6 +808,7 @@ impl Run {
             natural,
             trimmed,
             typed: None,
+            hyphen,
         })
     }
 
@@ -471,6 +842,7 @@ impl Run {
                     span,
                 }
             })
+            .chain(self.hyphen.clone())
             .collect();
     }
 }

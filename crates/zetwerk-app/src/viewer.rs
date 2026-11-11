@@ -17,7 +17,7 @@ use typst::syntax::{LinkedNode, Side, Source, SyntaxKind};
 use typst::utils::hash128;
 use typst_layout::{Page, PagedDocument};
 use zetwerk_core::{DiskError, DiskStatus, Opened};
-use zetwerk_predict::{Insertion, predict_insertion};
+use zetwerk_predict::{Replacement, predict};
 use zetwerk_render::{PixelRegion, Tile, TileKey, page_size_px, tile_origins, tiles};
 use zetwerk_typst::{CompileOutput, Environment, PageMap, Project, ProjectWorld};
 use zetwerk_vim::Effect;
@@ -101,39 +101,51 @@ struct Predicted {
 /// How the text differs from the text the pages were compiled from.
 enum Difference<'a> {
     Nothing,
-    /// `text` was put in at byte `offset`, and nothing else changed.
-    Insertion {
+    /// `removed` bytes from byte `offset` on were replaced by `text`, and
+    /// nothing else changed.
+    Replacement {
         offset: usize,
+        removed: usize,
         text: &'a str,
     },
-    Other,
 }
 
-/// Compares `new` with `old`.
+/// Compares `new` with `old`: what lies between the start they have in
+/// common and the end they have in common.
 fn difference<'a>(old: &str, new: &'a str) -> Difference<'a> {
     if old == new {
         return Difference::Nothing;
     }
-    let Some(longer) = new.len().checked_sub(old.len()).filter(|by| *by > 0) else {
-        return Difference::Other;
-    };
     let mut prefix = old
         .bytes()
         .zip(new.bytes())
         .take_while(|(a, b)| a == b)
         .count();
-    while !new.is_char_boundary(prefix) || !new.is_char_boundary(prefix + longer) {
+    while !(old.is_char_boundary(prefix) && new.is_char_boundary(prefix)) {
         prefix -= 1;
     }
-    if old.get(prefix..) == new.get(prefix + longer..) {
-        Difference::Insertion {
-            offset: prefix,
-            text: &new[prefix..prefix + longer],
-        }
-    } else {
-        Difference::Other
+    let (old_rest, new_rest) = (&old[prefix..], &new[prefix..]);
+    let mut suffix = old_rest
+        .bytes()
+        .rev()
+        .zip(new_rest.bytes().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !(old_rest.is_char_boundary(old_rest.len() - suffix)
+        && new_rest.is_char_boundary(new_rest.len() - suffix))
+    {
+        suffix -= 1;
+    }
+    Difference::Replacement {
+        offset: prefix,
+        removed: old_rest.len() - suffix,
+        text: &new_rest[..new_rest.len() - suffix],
     }
 }
+
+/// More than this many bytes taken out or put in since the last compile
+/// are not worked out on the page: that is no longer typing.
+const MAX_PREDICTED: usize = 400;
 
 /// Whether bytes `offset..offset + len` of `source` are plain text of a
 /// paragraph: nothing Typst reads as markup, math or code. Only such text
@@ -893,17 +905,44 @@ impl Viewer {
         let base = world
             .source(file)
             .map_err(|_| "the compiled source is gone".to_owned())?;
-        let (offset, text) = match difference(base.text(), editor.text()) {
+        let (offset, removed, text) = match difference(base.text(), editor.text()) {
             Difference::Nothing => {
                 // Back at the text the pages show.
                 self.document_revision = Some(self.revision);
                 self.compiled_revision = Some(self.revision);
                 return Ok(());
             }
-            Difference::Insertion { offset, text } => (offset, text),
-            Difference::Other => return Err("more than text typed in one place".to_owned()),
+            Difference::Replacement {
+                offset,
+                removed,
+                text,
+            } => (offset, removed, text),
         };
-        if !is_plain_text(editor.source(), offset, text.len()) {
+        if removed > MAX_PREDICTED || text.len() > MAX_PREDICTED {
+            return Err("too much changed".to_owned());
+        }
+        // Blanks typed at the end of a line show nowhere on the page.
+        let end = offset + text.len();
+        let line_ends = matches!(editor.text()[end..].chars().next(), None | Some('\n'));
+        let text = if line_ends {
+            text.trim_end_matches(' ')
+        } else {
+            text
+        };
+        // What is put in has to be plain text; and where text was taken
+        // out, what now meets there has to be one piece of plain text,
+        // not, say, two blanks or the two halves of a dash.
+        let now = editor.text();
+        let until = offset + text.len();
+        let (mut from, mut to) = (offset, until);
+        if removed > 0 {
+            // One character further on either side, within the line.
+            let before = now[..offset].chars().next_back().filter(|c| *c != '\n');
+            let after = now[until..].chars().next().filter(|c| *c != '\n');
+            from -= before.map_or(0, char::len_utf8);
+            to += after.map_or(0, char::len_utf8);
+        }
+        if to > from && !is_plain_text(editor.source(), from, to - from) {
             return Err("not plain text of a paragraph".to_owned());
         }
         // The page is that of the text next to the insertion. While typing
@@ -924,9 +963,13 @@ impl Viewer {
             .maps
             .entry(index)
             .or_insert_with(|| PageMap::build(world, &page.frame));
-        let insertion = Insertion { file, offset, text };
-        let prediction =
-            predict_insertion(&page.frame, map, insertion).map_err(|why| format!("{why:?}"))?;
+        let edit = Replacement {
+            file,
+            offset,
+            removed,
+            text,
+        };
+        let prediction = predict(&page.frame, map, edit).map_err(|why| format!("{why:?}"))?;
         self.planned.retain(|(planned, _, _), _| *planned != index);
         self.predicted = Some(Predicted {
             index,
@@ -935,7 +978,7 @@ impl Viewer {
                 ..page.clone()
             },
             typed: prediction.typed,
-            end: offset + text.len(),
+            end,
         });
         Ok(())
     }
@@ -2040,6 +2083,117 @@ mod tests {
         viewer.click((gutter + 7.5 * cell, 2.5 * row_height));
         let editing = viewer.state().editing.unwrap();
         assert_eq!((editing.line, editing.column), (3, 8));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn typing_past_the_end_of_a_line_moves_words_down() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    The quick brown fox jumps over the lazy dog and runs on \
+                    through the wood until the line is full, and then some \
+                    more of it follows here to make a few lines of text.\n\n\
+                    Second paragraph.\n";
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "/brown<CR>i");
+        // Far more than the first line has room for.
+        let typed = "very very very very very ";
+        let mut shown = 0;
+        for key in keys::parse(typed).unwrap() {
+            viewer.key(key);
+            shown += usize::from(viewer.is_predicted());
+        }
+        assert_eq!(shown, typed.len(), "{:?}", viewer.declined);
+        // In ragged text Typst breaks lines the same way: first fit.
+        let predicted = viewer
+            .predicted
+            .as_ref()
+            .map(|predicted| predicted.page.clone());
+        let predicted = zetwerk_render::render_page(&predicted.unwrap(), 2.0);
+        compile(&mut viewer);
+        let document = viewer.document().unwrap();
+        let compiled = zetwerk_render::render_page(&document.pages()[0], 2.0);
+        assert!(
+            predicted.data() == compiled.data(),
+            "the prediction differs from the compile"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn typing_at_the_end_of_a_paragraph_adds_lines() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    The quick brown fox jumps over the lazy dog and runs on \
+                    through the wood until the line is full, and then some.\n\n\
+                    Second paragraph, which is also long enough to be broken \
+                    into two lines of the page.\n\n\
+                    Third.\n";
+        let (mut viewer, directory) = editing(text);
+        // At the end of the first paragraph: enough for two more lines.
+        press(&mut viewer, "/some<CR>A");
+        let typed = " More and more words are typed here, and the paragraph grows by a line and by another.";
+        let mut shown = 0;
+        for key in keys::parse(typed).unwrap() {
+            viewer.key(key);
+            shown += usize::from(viewer.is_predicted());
+        }
+        assert_eq!(shown, typed.len(), "{:?}", viewer.declined);
+        let predicted = viewer
+            .predicted
+            .as_ref()
+            .map(|predicted| predicted.page.clone());
+        let predicted = zetwerk_render::render_page(&predicted.unwrap(), 2.0);
+        compile(&mut viewer);
+        let document = viewer.document().unwrap();
+        let compiled = zetwerk_render::render_page(&document.pages()[0], 2.0);
+        assert!(
+            predicted.data() == compiled.data(),
+            "the prediction differs from the compile"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn deleting_and_typing_over_show_on_the_page_too() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    The quick brown fox jumps over the lazy dog and runs on \
+                    through the wood until the line is full, and then some.\n\n\
+                    A short one here.\n";
+        let (mut viewer, directory) = editing(text);
+        let same_as_compiled = |viewer: &mut Viewer| {
+            let predicted = viewer
+                .predicted
+                .as_ref()
+                .map(|predicted| predicted.page.clone());
+            let predicted = zetwerk_render::render_page(&predicted.unwrap(), 2.0);
+            compile(viewer);
+            let document = viewer.document().unwrap();
+            let compiled = zetwerk_render::render_page(&document.pages()[0], 2.0);
+            predicted.data() == compiled.data()
+        };
+        // A character out of the last paragraph.
+        press(&mut viewer, "/short<CR>x");
+        assert!(viewer.is_predicted(), "{:?}", viewer.declined);
+        assert!(same_as_compiled(&mut viewer));
+        // Backspace over text that was there before typing began.
+        press(&mut viewer, "A<BS><BS><BS>");
+        assert!(viewer.is_predicted(), "{:?}", viewer.declined);
+        assert_eq!(
+            viewer.text().map(|text| text.contains("A hort one he\n")),
+            Some(true)
+        );
+        assert!(same_as_compiled(&mut viewer));
+        // A word changed into another.
+        press(&mut viewer, "<Esc>/one<CR>cwtwo");
+        assert!(viewer.is_predicted(), "{:?}", viewer.declined);
+        assert!(same_as_compiled(&mut viewer));
+        // A word with the blank behind it.
+        press(&mut viewer, "<Esc>/hort<CR>dw");
+        assert!(viewer.is_predicted(), "{:?}", viewer.declined);
+        assert!(same_as_compiled(&mut viewer));
+        // A word from between two blanks leaves two blanks, which Typst
+        // sets as one: that is for the compiler.
+        press(&mut viewer, "/brown<CR>diw");
+        assert!(!viewer.is_predicted());
         let _ = std::fs::remove_dir_all(directory);
     }
 

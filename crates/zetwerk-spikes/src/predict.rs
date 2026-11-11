@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use typst::layout::Frame;
 use typst::syntax::FileId;
 use typst_layout::Page;
-use zetwerk_predict::{Decline, Insertion, predict_insertion};
+use zetwerk_predict::{Decline, Insertion, Replacement, predict, predict_insertion};
 use zetwerk_typst::{Origin, PageMap, Project};
 
 use crate::support::{self, Doc, ms, percentile};
@@ -37,13 +37,244 @@ pub fn run() {
             text: zetwerk_corpus::thesis(5),
         },
     ];
-    for doc in docs {
+    for doc in &docs {
         let mut project = support::project(&env, &doc.text);
         match measure(&mut project) {
             Some(stats) => stats.print(doc.name),
             None => println!("{}: could not be measured", doc.name),
         }
     }
+    println!(
+        "\n   Typing on: {BURSTS} places per document, {} characters typed at each",
+        PHRASE.len()
+    );
+    println!("   (levels A and B: the paragraph is re-broken when a line is full)\n");
+    for doc in &docs {
+        let mut project = support::project(&env, &doc.text);
+        if bursts(&mut project, doc.name).is_none() {
+            println!("{}: could not be measured", doc.name);
+        }
+    }
+    println!(
+        "\n   Deleting: {BURSTS} places per document, {DELETED} characters deleted backwards at each\n"
+    );
+    for doc in &docs {
+        let mut project = support::project(&env, &doc.text);
+        if deletions(&mut project, doc.name).is_none() {
+            println!("{}: could not be measured", doc.name);
+        }
+    }
+}
+
+/// Deletes [`DELETED`] characters backwards, one at a time, at random
+/// places in prose and reports how often the predictor shows that, and how
+/// close the page then is to the compile's.
+fn deletions(project: &mut Project, name: &str) -> Option<()> {
+    let main = project.main();
+    let base = support::compile(project)?;
+    let world = project.snapshot();
+    let pages = base.pages();
+    let maps: Vec<PageMap> = pages
+        .iter()
+        .map(|page| PageMap::build(&world, &page.frame))
+        .collect();
+    let mut rng = Rng(0x632B_E59B_D9B4_E019);
+    let (mut samples, mut shown, mut complete, mut exact) = (0_usize, 0_usize, 0_usize, 0_usize);
+    let mut wrong = Vec::new();
+    let mut attempts = 0;
+    while samples < BURSTS && attempts < BURSTS * 30 {
+        attempts += 1;
+        let page_index = rng.below(pages.len());
+        let (page, map) = (&pages[page_index], &maps[page_index]);
+        let Some((end, _)) = pick_keystroke(project, main, map, &mut rng) else {
+            continue;
+        };
+        let text = project.source(main)?.text().to_owned();
+        let Some(start) = end
+            .checked_sub(DELETED)
+            .filter(|start| text.is_char_boundary(*start))
+        else {
+            continue;
+        };
+        // Only what is plain prose on one line of the source.
+        if !text[start..end]
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == ' ')
+            || text[start..end].contains("  ")
+        {
+            continue;
+        }
+        samples += 1;
+        let mut last = None;
+        for removed in 1..=DELETED {
+            let edit = Replacement {
+                file: main,
+                offset: end - removed,
+                removed,
+                text: "",
+            };
+            if let Ok(prediction) = predict(&page.frame, map, edit) {
+                shown += 1;
+                last = (removed == DELETED).then_some(prediction);
+            }
+        }
+        let Some(prediction) = last else {
+            continue;
+        };
+        complete += 1;
+        project.edit(main, start..end, "")?;
+        let truth = support::compile(project);
+        project.edit(main, start..start, &text[start..end])?;
+        let truth = truth?;
+        let Some(true_page) = truth.pages().get(page_index) else {
+            continue;
+        };
+        let off = wrong_pixels(true_page, prediction.frame);
+        if off == 0.0 {
+            exact += 1;
+        } else {
+            wrong.push(off);
+        }
+    }
+    let percent = |part: usize, whole: usize| 100.0 * part as f64 / whole.max(1) as f64;
+    println!("{name}");
+    println!(
+        "  deletions shown without a compile    {:5.1} %",
+        percent(shown, samples * DELETED)
+    );
+    println!(
+        "  …then the same pixels as the compile {:5.1} %  (else {:.2} % of the page differs, median)",
+        percent(exact, complete),
+        percentile(&mut wrong, 50.0)
+    );
+    Some(())
+}
+
+/// How many characters are deleted at each place.
+const DELETED: usize = 8;
+
+/// For a look at what differs: with `ZETWERK_DUMP=dir`, saves a predicted
+/// page next to the compiled one.
+fn dump(name: &str, number: usize, predicted: &Frame, real: &Page) {
+    let Some(dir) = std::env::var_os("ZETWERK_DUMP").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let ours = Page {
+        frame: predicted.clone(),
+        ..real.clone()
+    };
+    let tag = name.split_whitespace().next().unwrap_or("doc");
+    for (kind, page) in [("predicted", &ours), ("compiled", real)] {
+        if let Ok(png) = zetwerk_render::render_page(page, 1.5).encode_png() {
+            let _ = std::fs::write(dir.join(format!("{tag}-{number}-{kind}.png")), png);
+        }
+    }
+}
+
+/// Places tried per document for typing on.
+const BURSTS: usize = 120;
+
+/// What is typed at each place, one character at a time.
+const PHRASE: &str = "ed and so on it goes for a while";
+
+/// Types [`PHRASE`] at random places in prose and reports how much of it
+/// the predictor shows, and how close the page is to the compile's once
+/// all of it is typed.
+fn bursts(project: &mut Project, name: &str) -> Option<()> {
+    let main = project.main();
+    let base = support::compile(project)?;
+    let world = project.snapshot();
+    let pages = base.pages();
+    let maps: Vec<PageMap> = pages
+        .iter()
+        .map(|page| PageMap::build(&world, &page.frame))
+        .collect();
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+    let (mut samples, mut shown, mut complete, mut exact) = (0_usize, 0_usize, 0_usize, 0_usize);
+    let mut stopped: BTreeMap<Decline, usize> = BTreeMap::new();
+    let mut wrong = Vec::new();
+    let mut costs = Vec::new();
+    let mut attempts = 0;
+    while samples < BURSTS && attempts < BURSTS * 30 {
+        attempts += 1;
+        let page_index = rng.below(pages.len());
+        let (page, map) = (&pages[page_index], &maps[page_index]);
+        let Some((offset, _)) = pick_keystroke(project, main, map, &mut rng) else {
+            continue;
+        };
+        samples += 1;
+        let mut last = None;
+        let mut reason = None;
+        for end in 1..=PHRASE.len() {
+            let insertion = Insertion {
+                file: main,
+                offset,
+                text: &PHRASE[..end],
+            };
+            let (prediction, cost) =
+                support::measure(|| predict_insertion(&page.frame, map, insertion));
+            costs.push(ms(cost.wall));
+            match prediction {
+                Ok(prediction) => {
+                    shown += 1;
+                    last = (end == PHRASE.len()).then_some(prediction);
+                }
+                Err(why) => {
+                    reason.get_or_insert(why);
+                }
+            }
+        }
+        if let Some(why) = reason {
+            *stopped.entry(why).or_default() += 1;
+        }
+        let Some(prediction) = last else {
+            continue;
+        };
+        complete += 1;
+        project.edit(main, offset..offset, PHRASE)?;
+        let truth = support::compile(project);
+        project.edit(main, offset..offset + PHRASE.len(), "")?;
+        let truth = truth?;
+        let Some(true_page) = truth.pages().get(page_index) else {
+            continue;
+        };
+        if complete <= 3 {
+            dump(name, complete, &prediction.frame, true_page);
+        }
+        let off = wrong_pixels(true_page, prediction.frame);
+        if off == 0.0 {
+            exact += 1;
+        } else {
+            wrong.push(off);
+        }
+    }
+    let percent = |part: usize, whole: usize| 100.0 * part as f64 / whole.max(1) as f64;
+    println!("{name}");
+    println!(
+        "  characters shown without a compile  {:5.1} %",
+        percent(shown, samples * PHRASE.len())
+    );
+    println!(
+        "  all {} characters shown              {:5.1} %  of places",
+        PHRASE.len(),
+        percent(complete, samples)
+    );
+    println!(
+        "  …then the same pixels as the compile {:5.1} %  (else {:.2} % of the page differs, median)",
+        percent(exact, complete),
+        percentile(&mut wrong, 50.0)
+    );
+    println!(
+        "  a prediction costs                    {:.2} ms (median)",
+        percentile(&mut costs, 50.0)
+    );
+    for (why, count) in stopped {
+        println!(
+            "  first not shown because: {why:?}  {:.1} % of places",
+            percent(count, samples)
+        );
+    }
+    Some(())
 }
 
 #[derive(Default)]

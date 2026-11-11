@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use rustybuzz::{BufferFlags, Direction, UnicodeBuffer};
 use typst::layout::Em;
-use typst::text::TextItem;
+use typst::text::{Glyph, TextItem};
 
 /// One glyph as the shaper produced it, before justification or tracking.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,13 +71,13 @@ pub fn shape(item: &TextItem, text: &str) -> Vec<Shaped> {
         .collect()
 }
 
-/// Whether shaping `item`'s own text gave back `item`'s own glyphs, in
+/// Whether shaping an item's own text gave back the item's own `glyphs`, in
 /// identity and text coverage. Advances are allowed to differ: that is where
 /// justification and tracking live.
-pub fn reproduces(item: &TextItem, shaped: &[Shaped]) -> bool {
-    shaped.len() == item.glyphs.len()
+pub fn reproduces(glyphs: &[Glyph], shaped: &[Shaped]) -> bool {
+    shaped.len() == glyphs.len()
         && shaped
             .iter()
-            .zip(&item.glyphs)
+            .zip(glyphs)
             .all(|(ours, theirs)| ours.id == theirs.id && ours.range == theirs.range())
 }
