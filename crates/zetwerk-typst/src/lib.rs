@@ -11,6 +11,6 @@ mod world;
 pub use compile::{Compiled, compile, forget_unused};
 pub use diagnostics::describe;
 pub use locate::{PagePosition, locate};
-pub use pagemap::{Atomic, Caret, MappedGlyph, Origin, PageMap, TextRun};
+pub use pagemap::{Atomic, Caret, MappedGlyph, Origin, PageLines, PageMap, TextRun};
 pub use service::{CompileOutput, Compiler, Scheduler, Urgency};
 pub use world::{Environment, FontSet, OpenError, Project, ProjectWorld};

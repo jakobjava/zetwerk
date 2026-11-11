@@ -42,6 +42,7 @@ vim.o.expandtab = true
 -- fed past mappings, but the keys of a macro are not.
 vim.cmd("mapclear | mapclear!")
 vim.o.formatoptions = ""
+vim.o.wrap = false
 vim.o.comments = ""
 vim.o.textwidth = 0
 vim.o.wrap = false
@@ -382,9 +383,9 @@ fn count(random: &mut Random) -> String {
 }
 
 const MOTIONS: &[&str] = &[
-    "h", "l", "j", "k", "w", "W", "b", "B", "e", "E", "ge", "gE", "0", "^", "$", "gg", "G", "{",
-    "}", "fa", "fo", "Fa", "t.", "T(", "f ", ";", ",", "%", "g_", "+", "-", "_", "|", "<Space>",
-    "<BS>", "<CR>",
+    "h", "l", "j", "k", "gj", "gk", "w", "W", "b", "B", "e", "E", "ge", "gE", "0", "^", "$", "gg",
+    "G", "{", "}", "fa", "fo", "Fa", "t.", "T(", "f ", ";", ",", "%", "g_", "+", "-", "_", "|",
+    "<Space>", "<BS>", "<CR>",
 ];
 
 fn motion(random: &mut Random) -> String {

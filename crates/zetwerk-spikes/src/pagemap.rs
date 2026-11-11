@@ -73,6 +73,10 @@ impl Counts {
             Origin::Text { .. } => self.text += 1,
             Origin::Space { .. } => self.space += 1,
             Origin::Math { .. } => self.math += 1,
+            Origin::Object { kind, .. } => {
+                self.atomic += 1;
+                *self.reasons.entry(format!("object: {kind:?}")).or_default() += 1;
+            }
             Origin::Atomic(reason) => {
                 self.atomic += 1;
                 let reason = match reason {

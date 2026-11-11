@@ -35,6 +35,20 @@ pub trait Host {
     /// Makes one undone step again. Returns the part of the text, as it is
     /// afterwards, that the step changed.
     fn redo(&mut self) -> Option<Range<usize>>;
+
+    /// Where the cursor comes to when it goes `rows` rows down (up, if
+    /// negative) from byte `from` on what the host shows: the rows of a
+    /// wrapped line, or the lines of a typeset page. `across` is how far
+    /// from the left the cursor is aiming, in the host's own measure; if
+    /// it is `None`, that is where `from` is shown. Returns the byte and
+    /// how far across the cursor aimed.
+    ///
+    /// `None` if the host shows no rows, or does not show `from`. `gj`
+    /// and `gk` then go by lines of the text.
+    fn row(&self, from: usize, rows: isize, across: Option<f64>) -> Option<(usize, f64)> {
+        let _ = (from, rows, across);
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +311,13 @@ pub struct Engine {
     /// The last search: what for, which way, and whether only as a whole
     /// word (`*`, `#`).
     last_search: Option<Search>,
+    /// Whether `j` and `k` go by the rows the host shows instead of by
+    /// lines of the text, as `gj` and `gk` always do where it shows any.
+    rows_first: bool,
+    /// How far across the cursor aimed when it last went by rows, and the
+    /// column it came to: the aim holds while that is still the column
+    /// the cursor is aiming at.
+    row_goal: Option<(usize, f64)>,
     /// How many lines `Ctrl-F` moves; `Ctrl-D` moves half as many.
     page_lines: usize,
     /// The first and the last line the view shows, counted from 0, for
@@ -369,6 +390,8 @@ impl Engine {
             prompt: ':',
             prompt_return: Mode::Normal,
             last_search: None,
+            rows_first: false,
+            row_goal: None,
             page_lines: 40,
             view_lines: (0, 0),
             record: Vec::new(),
@@ -418,6 +441,12 @@ impl Engine {
     /// `Ctrl-F` and `Ctrl-B` move.
     pub fn set_page_lines(&mut self, lines: usize) {
         self.page_lines = lines.max(2);
+    }
+
+    /// Makes `j` and `k` go by the rows the host shows (see
+    /// [`Host::row`]), as they should where only typeset pages are shown.
+    pub fn set_rows_first(&mut self, on: bool) {
+        self.rows_first = on;
     }
 
     /// Tells the engine which lines (counted from 0) the view shows, which
@@ -716,6 +745,7 @@ impl Engine {
     }
 
     fn move_to(&mut self, text: Text, pos: usize, column: Column) {
+        self.row_goal = None;
         self.cursor = clamp(text, pos, self.mode != Mode::Normal);
         match column {
             Column::Reset => self.wanted_column = None,
@@ -1292,6 +1322,7 @@ impl Engine {
         };
         match c {
             'g' | 'e' | 'E' | '_' => self.motion_key_g(c, host),
+            'j' | 'k' => self.row_key(c == 'j', host),
             '~' => self.operator_key(Operator::ToggleCase, host),
             'u' => self.operator_key(Operator::Lower, host),
             'U' => self.operator_key(Operator::Upper, host),
@@ -1482,8 +1513,44 @@ impl Engine {
     // ---- Motions -----------------------------------------------------------
 
     fn motion_key(&mut self, c: char, host: &mut impl Host) {
+        if matches!(c, 'j' | 'k') && self.rows_first && self.pending.operator.is_none() {
+            return self.row_key(c == 'j', host);
+        }
         let moved = self.motion(c, host);
         self.finish_motion(moved, host);
+    }
+
+    /// Up and down by the rows the host shows: `gj` and `gk`, and `j` and
+    /// `k` where rows come first. Where the host shows none, a row is a
+    /// line of the text and these are `j` and `k`, as in Vim where lines
+    /// do not wrap.
+    fn row_key(&mut self, down: bool, host: &mut impl Host) {
+        let count =
+            (self.pending.operator_count.unwrap_or(1) * self.pending.count.unwrap_or(1)).max(1);
+        let rows = isize::try_from(count).unwrap_or(isize::MAX);
+        let goal = self
+            .row_goal
+            .filter(|(column, _)| self.wanted_column == Some(*column))
+            .map(|(_, across)| across);
+        let Some((to, across)) = host.row(self.cursor, if down { rows } else { -rows }, goal)
+        else {
+            let moved = self.motion(if down { 'j' } else { 'k' }, host);
+            return self.finish_motion(moved, host);
+        };
+        self.take_count();
+        let text = Text(host.text());
+        let to = clamp(text, to, self.selecting());
+        if to == self.cursor {
+            return self.fail();
+        }
+        let column = text.column(to);
+        let moved = Moved {
+            to,
+            kind: Kind::Exclusive,
+            column: Column::Exact(column),
+        };
+        self.finish_motion(Some(moved), host);
+        self.row_goal = Some((column, across));
     }
 
     fn motion_key_g(&mut self, c: char, host: &mut impl Host) {

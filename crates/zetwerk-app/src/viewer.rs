@@ -5,7 +5,9 @@
 //! should look like. That keeps the whole behaviour of the program testable
 //! without opening a window.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,17 +15,17 @@ use std::time::Instant;
 use tiny_skia::{Color, Pixmap};
 use typst::World;
 use typst::layout::Rect;
-use typst::syntax::{LinkedNode, Side, Source, SyntaxKind};
+use typst::syntax::{FileId, LinkedNode, Side, Source, SyntaxKind};
 use typst::utils::hash128;
 use typst_layout::{Page, PagedDocument};
 use zetwerk_core::{DiskError, DiskStatus, Opened};
 use zetwerk_predict::{Replacement, predict};
 use zetwerk_render::{PixelRegion, Tile, TileKey, page_size_px, tile_origins, tiles};
-use zetwerk_typst::{CompileOutput, Environment, PageMap, Project, ProjectWorld};
+use zetwerk_typst::{CompileOutput, Environment, PageLines, PageMap, Project, ProjectWorld};
 use zetwerk_vim::Effect;
 
 use crate::chrome::{self, Chrome, Image, ROW_HEIGHT, RowText, STATUS_HEIGHT, Status};
-use crate::editor::{self, Editor};
+use crate::editor::{self, Editor, Rows};
 use crate::gpu::{Quad, TextureId};
 use crate::keys::{Key, KeyPress};
 use crate::view::{Layout, MAX_ZOOM, MIN_ZOOM, Viewport};
@@ -56,6 +58,15 @@ const PAGE_BAR: [u8; 4] = [0x28, 0x28, 0x28, 0xff];
 const PAGE_SELECTION: [u8; 4] = [0x45, 0x85, 0x88, 0x55];
 /// How many rows stay visible beyond the cursor when the source scrolls.
 const SCROLL_MARGIN: usize = 3;
+/// The lens: its edge, how many rows and cells of source it shows at
+/// most, how many cells wide it is at least, and its padding and its
+/// distance from the cursor's line in points.
+const LENS_EDGE: [u8; 3] = [0x66, 0x5c, 0x54];
+const LENS_ROWS: usize = 7;
+const LENS_COLUMNS: usize = 72;
+const LENS_MIN_CELLS: f64 = 12.0;
+const LENS_PADDING: f64 = 5.0;
+const LENS_GAP: f64 = 4.0;
 
 /// What the window shows of a document that is being edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +152,141 @@ fn difference<'a>(old: &str, new: &'a str) -> Difference<'a> {
         removed: old_rest.len() - suffix,
         text: &new_rest[..new_rest.len() - suffix],
     }
+}
+
+/// How the text differs from the text the pages were compiled from, if by
+/// one replacement: what the places of the one are in the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Change {
+    offset: usize,
+    removed: usize,
+    inserted: usize,
+}
+
+impl Change {
+    /// No difference.
+    const NONE: Self = Self {
+        offset: 0,
+        removed: 0,
+        inserted: 0,
+    };
+
+    /// Where byte `now` of the text was in the compiled text. `None` if it
+    /// was not: it is part of what was put in.
+    fn back(self, now: usize) -> Option<usize> {
+        if now < self.offset {
+            Some(now)
+        } else if now >= self.offset + self.inserted {
+            Some(now - self.inserted + self.removed)
+        } else {
+            None
+        }
+    }
+
+    /// Like [`Change::back`], with what was put in counting as the place
+    /// it was put in at.
+    fn back_or_edge(self, now: usize) -> usize {
+        self.back(now).unwrap_or(self.offset)
+    }
+
+    /// Where byte `then` of the compiled text is now; what was taken out
+    /// is where it was taken out.
+    fn forth(self, then: usize) -> usize {
+        if then < self.offset {
+            then
+        } else if then >= self.offset + self.removed {
+            then - self.removed + self.inserted
+        } else {
+            self.offset
+        }
+    }
+}
+
+/// Whether the page shows what is at byte `offset` of `source` the way it
+/// is written: the words of a paragraph, a heading or a list item. Markup,
+/// math and code show as something else or not at all.
+fn is_prose(source: &Source, offset: usize) -> bool {
+    let Some(leaf) = LinkedNode::new(source.root()).leaf_at(offset, Side::After) else {
+        // Beyond the last leaf: the end of the text.
+        return true;
+    };
+    match leaf.kind() {
+        SyntaxKind::Text => true,
+        SyntaxKind::Space
+        | SyntaxKind::Parbreak
+        | SyntaxKind::SmartQuote
+        | SyntaxKind::Shorthand
+        | SyntaxKind::Linebreak
+        | SyntaxKind::Escape => leaf.parent_kind().is_some_and(|parent| {
+            matches!(
+                parent,
+                SyntaxKind::Markup
+                    | SyntaxKind::Strong
+                    | SyntaxKind::Emph
+                    | SyntaxKind::Heading
+                    | SyntaxKind::ListItem
+                    | SyntaxKind::EnumItem
+                    | SyntaxKind::TermItem
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// The part of `source` the lens shows for a cursor at `offset`: the whole
+/// lines of the equation or raw block it is in, or else of the innermost
+/// piece of code, or else its line.
+fn lens_block(source: &Source, offset: usize) -> Range<usize> {
+    let text = source.text();
+    let mut block = offset..offset;
+    let mut node = LinkedNode::new(source.root()).leaf_at(offset, Side::After);
+    let mut code = None;
+    while let Some(at) = node {
+        match at.kind() {
+            SyntaxKind::Equation | SyntaxKind::Raw => block = at.range(),
+            SyntaxKind::FuncCall
+            | SyntaxKind::SetRule
+            | SyntaxKind::ShowRule
+            | SyntaxKind::LetBinding
+            | SyntaxKind::CodeBlock
+                if code.is_none() =>
+            {
+                code = Some(at.range());
+            }
+            _ => {}
+        }
+        node = at.parent().cloned();
+    }
+    if block.is_empty() {
+        block = code.unwrap_or(block);
+    }
+    let start = text[..block.start].rfind('\n').map_or(0, |at| at + 1);
+    let end = text[block.end..]
+        .find('\n')
+        .map_or(text.len(), |at| block.end + at);
+    start..end
+}
+
+/// Where to put a lens of `size` for a cursor at `anchor` (how far across
+/// it is, its top and its bottom), inside `within` (left, top, right,
+/// bottom): `gap` under the cursor's line; above it where there is no
+/// room below; and in the bottom-left corner where the cursor is on
+/// nothing the page shows.
+fn lens_place(
+    anchor: Option<(f64, f64, f64)>,
+    (width, height): (f64, f64),
+    (left, top, right, bottom): (f64, f64, f64, f64),
+    gap: f64,
+) -> (f64, f64) {
+    let (x, y) = match anchor {
+        Some((x, _, below)) if below + gap + height <= bottom => (x, below + gap),
+        Some((x, above, _)) => (x, above - gap - height),
+        None => (left, bottom - height),
+    };
+    (
+        x.min(right - width).max(left).round(),
+        y.min(bottom - height).max(top).round(),
+    )
 }
 
 /// More than this many bytes taken out or put in since the last compile
@@ -252,6 +398,142 @@ struct Shown {
     tiles: Vec<(TileKey, PixelRegion)>,
 }
 
+/// The lines of the typeset pages, for a cursor that moves up and down on
+/// them.
+struct PageRows<'a> {
+    document: &'a PagedDocument,
+    world: &'a ProjectWorld,
+    file: FileId,
+    lines: &'a RefCell<HashMap<usize, PageLines>>,
+    /// The page the cursor was last found on.
+    cursor_page: &'a Cell<usize>,
+    /// How the text differs from the text the pages were compiled from.
+    change: Change,
+    /// The page, the line and the byte of the compiled text the cursor
+    /// last came to here. What a call put on the page is many lines for
+    /// one place in the source: the place alone does not say which.
+    landed: &'a Cell<Option<(usize, usize, usize)>>,
+}
+
+impl PageRows<'_> {
+    /// Runs `ask` on the lines of page `index`.
+    fn on<T>(&self, index: usize, ask: impl FnOnce(&PageLines) -> T) -> Option<T> {
+        let page = self.document.pages().get(index)?;
+        let mut lines = self.lines.borrow_mut();
+        let lines = lines
+            .entry(index)
+            .or_insert_with(|| PageMap::build(self.world, &page.frame).lines(self.file));
+        Some(ask(lines))
+    }
+}
+
+/// A line of a page and where on it a cursor aims.
+struct Place {
+    page: usize,
+    line: usize,
+    across: f64,
+}
+
+impl PageRows<'_> {
+    /// Moves `place` a line down (up, if not `down`), to the next page
+    /// with text on it where its page ends. Returns whether there was a
+    /// line to go to.
+    fn step(&self, place: &mut Place, down: bool) -> bool {
+        let Place { page, line, across } = *place;
+        if let Some(Some((line, across))) = self.on(page, |lines| lines.step(line, down, across)) {
+            (place.line, place.across) = (line, across);
+            return true;
+        }
+        let mut other = page;
+        loop {
+            other = if down {
+                other + 1
+            } else if let Some(before) = other.checked_sub(1) {
+                before
+            } else {
+                return false;
+            };
+            match self.on(other, |lines| lines.enter(down)) {
+                Some(Some(first)) => {
+                    // From the last column of a page to the first of the
+                    // next, the cursor stays as far into the column as it
+                    // was; down a single column it goes straight on.
+                    let extents = self
+                        .on(page, |lines| lines.extent(line))
+                        .flatten()
+                        .zip(self.on(other, |lines| lines.extent(first)).flatten());
+                    if let Some((old, new)) = extents
+                        && (new.0 > old.1 || new.1 < old.0)
+                    {
+                        place.across += new.0 - old.0;
+                    }
+                    (place.page, place.line) = (other, first);
+                    return true;
+                }
+                // A page with no text of the file on it.
+                Some(None) => {}
+                None => return false,
+            }
+        }
+    }
+}
+
+impl Rows for PageRows<'_> {
+    fn row(&self, from: usize, rows: isize, across: Option<f64>) -> Option<(usize, f64)> {
+        let source = self.world.source(self.file).ok()?;
+        let from = self.change.back_or_edge(from);
+        let (page, line, shown_at) = match self.landed.get() {
+            Some((page, line, at)) if at == from => (
+                page,
+                line,
+                self.on(page, |lines| lines.across(line, from))??,
+            ),
+            _ => {
+                // On the page it was last found on, if that shows it:
+                // the same text may be on many pages (a heading and the
+                // table of contents), and what a call made is found by
+                // no search.
+                let near = self.cursor_page.get();
+                let page = match self.on(near, |lines| lines.shows(from)) {
+                    Some(true) => near,
+                    _ => zetwerk_typst::locate(self.document, &source, from, near)?.page,
+                };
+                let (line, shown_at) = self.on(page, |lines| lines.find(from))??;
+                (page, line, shown_at)
+            }
+        };
+        let across = across.unwrap_or(shown_at);
+        let down = rows > 0;
+        let mut place = Place { page, line, across };
+        let stay = Some((self.change.forth(from), across));
+        for row in 0..rows.unsigned_abs() {
+            if !self.step(&mut place, down) {
+                if row == 0 {
+                    // The first or the last line there is.
+                    return stay;
+                }
+                break;
+            }
+        }
+        // The cursor has to come to something else than it is on. Where a
+        // line shows nothing else (it is more of what one call made, all
+        // of which is one place in the source), it goes on.
+        let to = loop {
+            let Place { page, line, across } = place;
+            if let Some(to) = self.on(page, |lines| lines.at(line, across, from))? {
+                break to;
+            }
+            if !self.step(&mut place, down) {
+                return stay;
+            }
+        };
+        let Place { page, line, across } = place;
+        self.cursor_page.set(page);
+        self.landed.set(Some((page, line, to)));
+        Some((self.change.forth(to), across))
+    }
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent switches of the interface, not states of one thing"
@@ -280,10 +562,22 @@ pub struct Viewer {
     /// that have been asked about, where their glyphs come from in them.
     compiled_world: Option<Arc<ProjectWorld>>,
     maps: HashMap<usize, PageMap>,
+    /// The lines of text of the pages the cursor has moved up or down on.
+    page_lines: RefCell<HashMap<usize, PageLines>>,
+    /// The page the cursor was last found on: where to look for it first.
+    cursor_page: Cell<usize>,
+    /// See [`PageRows::landed`].
+    landed: Cell<Option<(usize, usize, usize)>>,
     /// The revision that document was compiled from. Differs from
     /// `compiled_revision` while the newest text has errors.
     document_revision: Option<u64>,
     predicted: Option<Predicted>,
+    /// How the text of a revision differs from the compiled text, where
+    /// that is one replacement.
+    changed: Option<(u64, Change)>,
+    /// Where the cursor is on the pages as last drawn, in device pixels:
+    /// how far across, and its top and bottom.
+    cursor_at: Option<(f64, f64, f64)>,
     /// Where in the compiled text the last insertion was worked out for,
     /// and the page it is on.
     predicted_at: Option<(usize, usize)>,
@@ -337,8 +631,13 @@ impl Viewer {
             document: None,
             compiled_world: None,
             maps: HashMap::new(),
+            page_lines: RefCell::default(),
+            cursor_page: Cell::new(0),
+            landed: Cell::new(None),
             document_revision: None,
             predicted: None,
+            changed: None,
+            cursor_at: None,
             predicted_at: None,
             declined: None,
             problems: Vec::new(),
@@ -606,18 +905,46 @@ impl Viewer {
     }
 
     /// Scrolls the pages to where the text under the cursor is set, if the
-    /// pages show the current text and that place is out of view.
+    /// pages say where that is and it is out of view.
     fn follow_cursor(&mut self) {
-        if self.document_revision != Some(self.revision) || self.panes == Panes::Source {
+        if self.panes == Panes::Source {
             return;
         }
-        let (Some(editor), Some(document)) = (&self.editor, &self.document) else {
+        let (Some(change), Some(editor), Some(document), Some(world)) = (
+            self.places(),
+            &self.editor,
+            &self.document,
+            &self.compiled_world,
+        ) else {
             return;
         };
-        let Some(position) = zetwerk_typst::locate(document, editor.source(), editor.cursor())
+        let Ok(source) = world.source(self.project.main()) else {
+            return;
+        };
+        let cursor = change.back_or_edge(editor.cursor());
+        // Where it was last found, if it is there still: that page shows
+        // it for certain, and may show it by something no search finds.
+        let near = self.cursor_page.get();
+        let file = self.project.main();
+        let there = document.pages().get(near).and_then(|page| {
+            let map = self
+                .maps
+                .entry(near)
+                .or_insert_with(|| PageMap::build(world, &page.frame));
+            let caret = map.caret(file, cursor).map(|caret| caret.cell);
+            let cell = caret.or_else(|| map.object(file, cursor).first().copied())?;
+            Some(zetwerk_typst::PagePosition {
+                page: near,
+                x: cell.min.x.to_pt(),
+                y: cell.min.y.to_pt(),
+            })
+        });
+        let Some(position) =
+            there.or_else(|| zetwerk_typst::locate(document, &source, cursor, near))
         else {
             return;
         };
+        self.cursor_page.set(position.page);
         let Some(page) = self.layout.pages.get(position.page) else {
             return;
         };
@@ -656,6 +983,8 @@ impl Viewer {
             self.predicted = None;
             self.predicted_at = None;
             self.maps.clear();
+            self.page_lines.get_mut().clear();
+            self.landed.set(None);
             self.planned.clear();
             self.relayout();
             self.follow_cursor();
@@ -786,9 +1115,7 @@ impl Viewer {
                 let offset = editor.offset_at(columns, row, across);
                 editor.set_cursor(offset);
             }
-        } else if self.document_revision == Some(self.revision) && self.predicted.is_none() {
-            // Only a page of the current text says where its glyphs come
-            // from.
+        } else if let Some(change) = self.places() {
             let (Some(document), Some(world)) = (&self.document, &self.compiled_world) else {
                 return;
             };
@@ -822,7 +1149,7 @@ impl Viewer {
                     (map.source_at(point), &mut self.editor)
                     && found == file
                 {
-                    editor.set_cursor(offset);
+                    editor.set_cursor(change.forth(offset));
                 }
                 return;
             }
@@ -831,14 +1158,35 @@ impl Viewer {
 
     /// A key for the source text.
     fn editor_key(&mut self, press: KeyPress) {
+        let places = self.places();
         let Some(editor) = &mut self.editor else {
             return;
         };
         let was_typing = editor.mode() == editor::Mode::Insert;
-        let line = editor.position().0;
-        let typed = editor.key(press);
+        let cursor = editor.cursor();
+        let pages = match (&self.document, &self.compiled_world, places) {
+            (Some(document), Some(world), Some(change)) => Some(PageRows {
+                document,
+                world,
+                file: self.project.main(),
+                lines: &self.page_lines,
+                cursor_page: &self.cursor_page,
+                change,
+                landed: &self.landed,
+            }),
+            _ => None,
+        };
+        let shown = match self.panes {
+            Panes::Page => editor::Shown::Pages(pages.as_ref().map(|pages| pages as &dyn Rows)),
+            Panes::Split | Panes::Source => editor::Shown::Source {
+                columns: self.source_size.0,
+            },
+        };
+        let typed = editor.key(press, &shown);
         let typing = editor.mode() == editor::Mode::Insert;
-        let moved = editor.position().0 != line;
+        // A paragraph is one line of the source and may fill pages: the
+        // view follows the cursor, not the line it is in.
+        let moved = editor.cursor() != cursor;
         if let Some(failure) = editor.take_failure() {
             self.alert(format!("not changed: {failure}"));
         }
@@ -918,6 +1266,12 @@ impl Viewer {
                 text,
             } => (offset, removed, text),
         };
+        let change = Change {
+            offset,
+            removed,
+            inserted: text.len(),
+        };
+        self.changed = Some((self.revision, change));
         if removed > MAX_PREDICTED || text.len() > MAX_PREDICTED {
             return Err("too much changed".to_owned());
         }
@@ -950,9 +1304,14 @@ impl Viewer {
         // for again.
         let index = match self.predicted_at {
             Some((at, index)) if at == offset => index,
-            _ => zetwerk_typst::locate(document, &base, offset.saturating_sub(1))
-                .map(|position| position.page)
-                .ok_or("the text is on no page")?,
+            _ => zetwerk_typst::locate(
+                document,
+                &base,
+                offset.saturating_sub(1),
+                self.cursor_page.get(),
+            )
+            .map(|position| position.page)
+            .ok_or("the text is on no page")?,
         };
         self.predicted_at = Some((offset, index));
         let page = document
@@ -981,6 +1340,22 @@ impl Viewer {
             end,
         });
         Ok(())
+    }
+
+    /// How places in the text relate to places in the text the pages on
+    /// screen were compiled from. `None` if they do not in a simple way:
+    /// nothing is compiled, more than one thing changed since, or a page
+    /// is shown as worked out, not as compiled.
+    fn places(&self) -> Option<Change> {
+        if self.predicted.is_some() || self.document.is_none() {
+            return None;
+        }
+        if self.document_revision == Some(self.revision) {
+            return Some(Change::NONE);
+        }
+        self.changed
+            .filter(|(revision, _)| *revision == self.revision)
+            .map(|(_, change)| change)
     }
 
     /// Whether the pages show text that has not been compiled, worked out
@@ -1072,7 +1447,9 @@ impl Viewer {
         let mut scene = Scene::default();
         let (width, height) = (f64::from(self.window.0), f64::from(self.window.1));
         solid(&mut scene, has, BACKDROP, (0.0, 0.0, width, height));
+        self.cursor_at = None;
         self.pages(&mut scene, has);
+        self.lens(&mut scene, has);
         // Drawn after the pages: a page zoomed wider than its pane must
         // not reach over the source.
         self.source_pane(&mut scene, has);
@@ -1150,8 +1527,8 @@ impl Viewer {
     /// The cursor and the selection where the text they are on is set on
     /// page `index`, whose top-left corner is drawn at `origin`.
     ///
-    /// Only while the pages show the current text: after an edit the
-    /// glyphs on them no longer say where in the source they come from.
+    /// Only while the pages say where their glyphs come from in the text
+    /// as it is: see [`Viewer::places`].
     fn page_cursor(
         &mut self,
         scene: &mut Scene,
@@ -1170,12 +1547,13 @@ impl Viewer {
                 let y = origin.1 + cell.min.y.to_pt() * zoom;
                 let height = (cell.max.y - cell.min.y).to_pt() * zoom;
                 tint(scene, has, PAGE_BAR, (x.round(), y, bar, height));
+                self.cursor_at = Some((x, y, y + height));
             }
             return;
         }
-        if self.document_revision != Some(self.revision) {
+        let Some(change) = self.places() else {
             return;
-        }
+        };
         let (Some(editor), Some(document), Some(world)) =
             (&self.editor, &self.document, &self.compiled_world)
         else {
@@ -1198,11 +1576,37 @@ impl Viewer {
             )
         };
         if let Some(selection) = editor.selection() {
+            let selection =
+                change.back_or_edge(selection.start)..change.back_or_edge(selection.end);
             for rect in map.selection(file, &selection) {
                 tint(scene, has, PAGE_SELECTION, place(rect));
             }
         }
-        if let Some(caret) = map.caret(file, editor.cursor()) {
+        // Text put in since the compile is nowhere on the page; the place
+        // it was put in at is.
+        let cursor = change.back(editor.cursor());
+        let caret = map.caret(file, change.back_or_edge(editor.cursor()));
+        if let Some(caret) = &caret {
+            let (x, y, _, height) = place(caret.cell);
+            self.cursor_at = Some((x, y, y + height));
+        }
+        let Some(cursor) = cursor else {
+            return;
+        };
+        if caret.as_ref().is_none_or(|caret| caret.after) {
+            // No text of the source is shown here; something made of it
+            // may be, such as what a reference refers to by.
+            let object = map.object(file, cursor);
+            if let Some(first) = object.first() {
+                let (x, y, _, height) = place(*first);
+                self.cursor_at = Some((x, y, y + height));
+                for rect in object {
+                    tint(scene, has, PAGE_CURSOR, place(rect));
+                }
+                return;
+            }
+        }
+        if let Some(caret) = caret {
             let (x, y, width, height) = place(caret.cell);
             if editor.mode() == editor::Mode::Insert || caret.after {
                 let x = if caret.after { x + width } else { x };
@@ -1211,6 +1615,127 @@ impl Viewer {
                 tint(scene, has, PAGE_CURSOR, (x, y, width.max(bar), height));
             }
         }
+    }
+
+    /// Whether the pages alone do not show what the cursor is on: it is in
+    /// markup, math or code, or in text typed since the last compile that
+    /// no page shows yet.
+    fn wants_lens(&self) -> bool {
+        let Some(editor) = &self.editor else {
+            return false;
+        };
+        if self.panes != Panes::Page {
+            return false;
+        }
+        let unseen = match self.places() {
+            Some(change) => change.back(editor.cursor()).is_none(),
+            None => self.predicted.is_none(),
+        };
+        let typing_unseen = editor.mode() == editor::Mode::Insert
+            && self.predicted.is_none()
+            && self.document_revision != Some(self.revision);
+        unseen || typing_unseen || !is_prose(editor.source(), editor.cursor())
+    }
+
+    /// The source lens: where only pages are shown and they do not show
+    /// what the cursor is on, the source around the cursor, in a small
+    /// pane beside it.
+    fn lens(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {
+        if !self.wants_lens() {
+            return;
+        }
+        let scale = self.scale;
+        let (_, pane_left, pane_width) = self.split();
+        let bottom = f64::from(self.window.1.saturating_sub(self.status_height()));
+        let anchor = self.cursor_at;
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let cell = self.chrome.cell_width(scale).max(1.0);
+        let row_height = (ROW_HEIGHT * scale).round().max(1.0);
+        let margin = (PANEL_MARGIN * scale).round();
+        let pad = (LENS_PADDING * scale).round();
+        let room = f64::from(pane_width) - 2.0 * margin - 2.0 * pad;
+        let columns = ((room / cell).floor().max(8.0) as usize).min(LENS_COLUMNS);
+
+        let (cursor, selection, mode) = (editor.cursor(), editor.selection(), editor.mode());
+        let text = editor.text();
+        let block = lens_block(editor.source(), cursor);
+        let rows = editor::rows(&text[block.clone()], columns);
+        let cursor_row = editor::row_of(&rows, cursor - block.start);
+        let first = cursor_row
+            .saturating_sub(LENS_ROWS / 2)
+            .min(rows.len().saturating_sub(LENS_ROWS));
+        let shown: Vec<Range<usize>> = rows
+            .iter()
+            .skip(first)
+            .take(LENS_ROWS)
+            .map(|row| block.start + row.range.start..block.start + row.range.end)
+            .collect();
+        let widest = shown
+            .iter()
+            .map(|row| editor::cells(&text[row.clone()]))
+            .max()
+            .unwrap_or(0);
+        // One cell more: the cursor may stand behind the last character.
+        let width = ((widest + 1) as f64 * cell).max(LENS_MIN_CELLS * cell) + 2.0 * pad;
+        let height = shown.len() as f64 * row_height + 2.0 * pad;
+
+        let gap = (LENS_GAP * scale).round();
+        let left = f64::from(pane_left) + margin;
+        let right = f64::from(pane_left) + f64::from(pane_width) - margin;
+        let within = (left, margin, right, bottom - margin);
+        let (x, y) = lens_place(anchor, (width, height), within, gap);
+
+        let line = scale.round().max(1.0);
+        solid(
+            scene,
+            has,
+            LENS_EDGE,
+            (x - line, y - line, width + 2.0 * line, height + 2.0 * line),
+        );
+        solid(scene, has, PANE, (x, y, width, height));
+        let mut texts: Vec<(RowText, (f64, f64))> = Vec::new();
+        for (index, row) in shown.iter().enumerate() {
+            let top = y + pad + index as f64 * row_height;
+            let at = |offset: usize| {
+                let offset = offset.clamp(row.start, row.end);
+                x + pad + editor::cells(&text[row.start..offset]) as f64 * cell
+            };
+            if let Some(selection) = &selection
+                && selection.start <= row.end
+                && selection.end > row.start
+            {
+                let (from, to) = (at(selection.start), at(selection.end));
+                solid(scene, has, SELECTION, (from, top, to - from, row_height));
+            }
+            if first + index == cursor_row {
+                let width = match mode {
+                    editor::Mode::Insert => (2.0 * scale).round().max(1.0),
+                    _ => cell,
+                };
+                solid(
+                    scene,
+                    has,
+                    CURSOR,
+                    (at(cursor).round(), top, width, row_height),
+                );
+            }
+            let content = &text[row.clone()];
+            let body = content.trim_start_matches([' ', '\t']);
+            let indent = editor::cells(&content[..content.len() - body.len()]);
+            let body = body
+                .trim_end()
+                .replace('\t', &" ".repeat(editor::TAB_CELLS));
+            if !body.is_empty() {
+                let body = RowText {
+                    text: body,
+                    dim: false,
+                };
+                texts.push((body, (x + pad + indent as f64 * cell, top)));
+            }
+        }
+        row_images(&mut self.chrome, scene, has, &texts, scale);
     }
 
     /// The source text: line numbers, rows of text, selection and cursor.
@@ -1981,21 +2506,145 @@ mod tests {
         press(&mut viewer, "0vee");
         assert!(count(&mut viewer, PAGE_SELECTION) >= 1);
         press(&mut viewer, "<Esc>");
-        // After an edit the page is that of other text: no cursor on it
-        // until it is compiled again.
+        // After an edit the page is that of the text before it: the cursor
+        // is shown where its text stands on that.
         press(&mut viewer, "0x");
-        assert_eq!(count(&mut viewer, PAGE_CURSOR), 0);
+        assert!(!viewer.is_compiled());
+        assert_eq!(count(&mut viewer, PAGE_CURSOR), 1);
         compile(&mut viewer);
         assert_eq!(count(&mut viewer, PAGE_CURSOR), 1);
         // In insert mode the cursor is a bar.
         press(&mut viewer, "i");
         assert_eq!(count(&mut viewer, PAGE_BAR), 1);
-        // Text that does not compile leaves the old page, and that is not
-        // a page of this text.
+        // Text that does not compile leaves the old page, with the cursor
+        // on it as on any page that is behind.
         press(&mut viewer, "<Esc>f*x");
         compile(&mut viewer);
         assert!(viewer.is_compiled() && !viewer.state().problems.is_empty());
+        assert_eq!(count(&mut viewer, PAGE_CURSOR), 1);
+        // Two changes in two places: where things are is anyone's guess.
+        press(&mut viewer, "$x");
         assert_eq!(count(&mut viewer, PAGE_CURSOR), 0);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// The quads of one colour laid over the pages.
+    fn tints(viewer: &mut Viewer, rgba: [u8; 4]) -> Vec<Quad> {
+        let id = TextureId(hash128(&("tint", rgba)));
+        let scene = viewer.scene(&|_| false);
+        let of_colour = |quad: &&Quad| quad.texture == id;
+        scene.quads.iter().filter(of_colour).copied().collect()
+    }
+
+    #[test]
+    fn what_a_reference_shows_is_one_thing_under_the_cursor() {
+        let text = "#set heading(numbering: \"1.\")\n\
+                    = Start <start>\n\
+                    As @start says, more or less.\n";
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "/As<CR>");
+        let letter = tints(&mut viewer, PAGE_CURSOR);
+        assert_eq!(letter.len(), 1);
+        // On the reference: all of "Section 1", wherever in it.
+        press(&mut viewer, "/@<CR>");
+        let whole = tints(&mut viewer, PAGE_CURSOR);
+        assert_eq!(whole.len(), 1);
+        assert!(whole[0].width > 4.0 * letter[0].width, "{whole:?}");
+        press(&mut viewer, "lll");
+        assert_eq!(tints(&mut viewer, PAGE_CURSOR), whole);
+        // And past it, a letter again.
+        press(&mut viewer, "w");
+        let after = tints(&mut viewer, PAGE_CURSOR);
+        assert!(after[0].x > whole[0].x + whole[0].width && after[0].width < whole[0].width);
+        // A click on it goes to the reference.
+        let (x, y) = (f64::from(whole[0].x) + 3.0, f64::from(whole[0].y) + 3.0);
+        viewer.click((x, y));
+        let cursor = viewer.editor.as_ref().unwrap().cursor();
+        assert_eq!(&text[cursor..cursor + 6], "@start");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_cursor_moves_on_a_page_that_is_behind() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    The quick brown fox jumps over the lazy dog and runs on \
+                    through the wood until the line is full, and then some \
+                    more of it follows here to make a few lines of text, \
+                    the last of which is short.\n";
+        let (mut viewer, directory) = editing(text);
+        let cursor = |viewer: &Viewer| viewer.editor.as_ref().unwrap().cursor();
+        // A star makes the rest of the paragraph bold: nothing to work out
+        // without compiling.
+        press(&mut viewer, "gsgs/quick<CR>i*<Esc>");
+        assert!(!viewer.is_compiled() && !viewer.is_predicted());
+        // The star itself is on no page.
+        assert_eq!(tints(&mut viewer, PAGE_CURSOR).len(), 0);
+        press(&mut viewer, "l");
+        let before = tints(&mut viewer, PAGE_CURSOR);
+        assert_eq!(before.len(), 1, "the cursor is on the page as it was");
+        let start = cursor(&viewer);
+        press(&mut viewer, "j");
+        assert!(cursor(&viewer) > start + 20, "down a line of the page");
+        assert_eq!(viewer.editor.as_ref().unwrap().position().0, 2);
+        let below = tints(&mut viewer, PAGE_CURSOR);
+        assert!(below[0].y > before[0].y + 5.0);
+        assert!(
+            (below[0].x - before[0].x).abs() < 12.0,
+            "{before:?} {below:?}"
+        );
+        press(&mut viewer, "k");
+        assert_eq!(cursor(&viewer), start);
+        // A click finds the text that was under it before the star.
+        let (x, y) = (f64::from(below[0].x) + 1.0, f64::from(below[0].y) + 3.0);
+        press(&mut viewer, "j");
+        let below = cursor(&viewer);
+        press(&mut viewer, "gg");
+        viewer.click((x, y));
+        assert_eq!(cursor(&viewer), below);
+        compile(&mut viewer);
+        assert_eq!(tints(&mut viewer, PAGE_CURSOR).len(), 1);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_lens_shows_the_source_where_the_page_does_not() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    Some words and $x^2 + y^2$ in a line.\n\n\
+                    = A heading\n";
+        let (mut viewer, directory) = editing(text);
+        let lens = |viewer: &mut Viewer| {
+            let edge = TextureId(hash128(&("solid", LENS_EDGE)));
+            let scene = viewer.scene(&|_| false);
+            let quads = scene.quads;
+            quads.into_iter().find(|quad| quad.texture == edge)
+        };
+        // Beside the source it has nothing to add.
+        press(&mut viewer, "/x<CR>");
+        assert_eq!(lens(&mut viewer), None);
+        // With only pages: none on the words of a paragraph, one on math.
+        press(&mut viewer, "gsgs/words<CR>");
+        assert_eq!(lens(&mut viewer), None);
+        press(&mut viewer, "/x<CR>");
+        let on_math = lens(&mut viewer).unwrap();
+        let cursor = tints(&mut viewer, PAGE_CURSOR);
+        assert_eq!(cursor.len(), 1);
+        assert!(on_math.y > cursor[0].y, "under the cursor's line");
+        let (width, height) = viewer.window;
+        assert!(on_math.x >= 0.0 && on_math.x + on_math.width <= width as f32);
+        assert!(on_math.y + on_math.height <= height as f32);
+        // On code that shows nowhere, in the corner.
+        press(&mut viewer, "gg");
+        assert!(lens(&mut viewer).is_some());
+        // While typing what the page cannot show yet, and no longer once
+        // it does.
+        press(&mut viewer, "/heading<CR>");
+        assert_eq!(lens(&mut viewer), None);
+        press(&mut viewer, "inew ");
+        assert!(!viewer.is_predicted(), "a heading is not worked out");
+        assert!(lens(&mut viewer).is_some());
+        press(&mut viewer, "<Esc>");
+        compile(&mut viewer);
+        assert_eq!(lens(&mut viewer), None);
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -2198,6 +2847,218 @@ mod tests {
     }
 
     #[test]
+    fn deleting_brings_words_up_from_the_next_line() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    The quick brown fox jumps over the lazy dog and runs on \
+                    through the wood until the line is full, and then some \
+                    more of it follows here to make a few lines of text, \
+                    the last of which is short.\n\n\
+                    Second paragraph.\n";
+        let (mut viewer, directory) = editing(text);
+        let same_as_compiled = |viewer: &mut Viewer| {
+            let predicted = viewer
+                .predicted
+                .as_ref()
+                .map(|predicted| predicted.page.clone());
+            let predicted = zetwerk_render::render_page(&predicted.unwrap(), 2.0);
+            compile(viewer);
+            let document = viewer.document().unwrap();
+            let compiled = zetwerk_render::render_page(&document.pages()[0], 2.0);
+            if let Some(dir) = std::env::var_os("ZETWERK_DUMP").map(PathBuf::from) {
+                let _ = predicted.save_png(dir.join("predicted.png"));
+                let _ = compiled.save_png(dir.join("compiled.png"));
+            }
+            predicted.data() == compiled.data()
+        };
+        // Two words out of the first line: the lines below move up a bit.
+        press(&mut viewer, "/quick<CR>dw");
+        assert!(viewer.is_predicted(), "{:?}", viewer.declined);
+        assert!(same_as_compiled(&mut viewer), "after one word");
+        press(&mut viewer, "dw");
+        assert!(viewer.is_predicted(), "{:?}", viewer.declined);
+        assert!(same_as_compiled(&mut viewer), "after two words");
+        // Enough out of it that the paragraph loses its last line.
+        press(&mut viewer, "d4w");
+        assert!(viewer.is_predicted(), "{:?}", viewer.declined);
+        assert!(same_as_compiled(&mut viewer), "after a line's worth");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// Where the cursor is drawn on the first page, in points.
+    fn caret_on_page(viewer: &Viewer) -> (f64, f64) {
+        let document = viewer.document.as_ref().unwrap();
+        let world = viewer.compiled_world.as_ref().unwrap();
+        let map = PageMap::build(world, &document.pages()[0].frame);
+        let cursor = viewer.editor.as_ref().unwrap().cursor();
+        let cell = map.caret(viewer.project.main(), cursor).unwrap().cell;
+        (cell.min.x.to_pt(), cell.min.y.to_pt())
+    }
+
+    #[test]
+    fn on_the_page_the_cursor_goes_up_and_down_by_its_lines() {
+        // The paragraph is one line of the source and five on the page.
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    The quick brown fox jumps over the lazy dog and runs on \
+                    through the wood until the line is full, and then some \
+                    more of it follows here to make a few lines of text, \
+                    the last of which is short.\n\n\
+                    Second paragraph.\n";
+        let (mut viewer, directory) = editing(text);
+        let cursor = |viewer: &Viewer| viewer.editor.as_ref().unwrap().cursor();
+        let line = |viewer: &Viewer| viewer.editor.as_ref().unwrap().position().0;
+        press(&mut viewer, "gsgs/brown<CR>");
+        assert_eq!(viewer.panes(), Panes::Page);
+        let start = cursor(&viewer);
+        let (x, y) = caret_on_page(&viewer);
+
+        press(&mut viewer, "j");
+        assert_eq!(line(&viewer), 2, "still in the paragraph's one line");
+        assert!(cursor(&viewer) > start);
+        let (below_x, below_y) = caret_on_page(&viewer);
+        assert!(below_y > y + 5.0, "a line further down: {y} to {below_y}");
+        assert!(
+            (below_x - x).abs() < 8.0,
+            "below where it was: {x} to {below_x}"
+        );
+        press(&mut viewer, "k");
+        assert_eq!(cursor(&viewer), start);
+
+        // A count, and the aim holds across a line too short for it.
+        press(&mut viewer, "$");
+        let (end_x, _) = caret_on_page(&viewer);
+        press(&mut viewer, "/full<CR>");
+        let (x, y) = caret_on_page(&viewer);
+        assert!(x > end_x + 20.0, "beyond the end of the last line");
+        press(&mut viewer, "2j");
+        assert_eq!(line(&viewer), 2);
+        let (_, last_y) = caret_on_page(&viewer);
+        assert!(last_y > y + 15.0, "two lines down: {y} to {last_y}");
+        press(&mut viewer, "j");
+        assert_eq!(line(&viewer), 4, "into the next paragraph");
+        press(&mut viewer, "3k");
+        let (back_x, back_y) = caret_on_page(&viewer);
+        assert!((back_y - y).abs() < 0.5 && (back_x - x).abs() < 8.0);
+
+        // With an operator, `j` is still about lines of the text.
+        press(&mut viewer, "dj");
+        assert_eq!(
+            viewer.text(),
+            Some("#set page(width: 300pt, height: 300pt)\nSecond paragraph.\n")
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn on_the_page_the_cursor_goes_through_columns_and_pages_in_reading_order() {
+        let words: Vec<String> = (0..150).map(|i| format!("w{i}")).collect();
+        let text = format!(
+            "#set page(width: 300pt, height: 120pt, columns: 2)\n{}\n",
+            words.join(" ")
+        );
+        let (mut viewer, directory) = editing(&text);
+        assert!(viewer.document().unwrap().pages().len() > 1);
+        let cursor = |viewer: &Viewer| viewer.editor.as_ref().unwrap().cursor();
+        press(&mut viewer, "gsgsjw");
+        // Down every line: each is further on in the text, to the last.
+        let mut places = vec![cursor(&viewer)];
+        loop {
+            press(&mut viewer, "j");
+            let now = cursor(&viewer);
+            if places.last() == Some(&now) {
+                break;
+            }
+            assert!(places.last() < Some(&now), "{places:?} then {now}");
+            places.push(now);
+        }
+        assert!(places.len() > 12, "{places:?}");
+        assert!(
+            text[cursor(&viewer)..].split(' ').count() < 8,
+            "the last line"
+        );
+        // The cursor is as far into each column as it was into the first.
+        let words_in = |place: &usize| text[..*place].matches(' ').count();
+        let per_line = words_in(&places[1]) - words_in(&places[0]);
+        assert!(places.windows(2).all(|pair| {
+            let step = words_in(&pair[1]) - words_in(&pair[0]);
+            step.abs_diff(per_line) <= 2
+        }));
+        // And back up the same way.
+        for place in places.iter().rev().skip(1) {
+            press(&mut viewer, "k");
+            assert_eq!(cursor(&viewer), *place);
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn on_the_page_no_line_is_passed_over() {
+        // A centred equation under a short line, the cells of a table,
+        // a line at the right margin: none straight below the other.
+        let text = "#set page(width: 300pt, height: 400pt)\n\
+                    Short.\n\n\
+                    $ a + b = c $\n\n\
+                    After it the text goes on.\n\n\
+                    #table(columns: 2, [one], [two], [three], [four])\n\n\
+                    #align(right)[End.]\n";
+        let (mut viewer, directory) = editing(text);
+        let word = |viewer: &Viewer| {
+            let cursor = viewer.editor.as_ref().unwrap().cursor();
+            let blank = |c: char| c.is_whitespace() || "[]$".contains(c);
+            let start = text[..cursor].rfind(blank).map_or(0, |at| at + 1);
+            let end = text[cursor..]
+                .find(blank)
+                .map_or(text.len(), |at| cursor + at);
+            &text[start..end]
+        };
+        let walk = |viewer: &mut Viewer, key: &str| {
+            let mut words = vec![word(viewer)];
+            for _ in 0..12 {
+                press(viewer, key);
+                if words.last() == Some(&word(viewer)) {
+                    break;
+                }
+                words.push(word(viewer));
+            }
+            words
+        };
+        press(&mut viewer, "gsgs/Short<CR>");
+        assert_eq!(
+            walk(&mut viewer, "j"),
+            ["Short.", "a", "After", "one", "three", "End."]
+        );
+        // And up again along the right-hand side.
+        press(&mut viewer, "$");
+        assert_eq!(
+            walk(&mut viewer, "k"),
+            ["End.", "four", "two", "on.", "c", "Short."]
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn in_the_source_gj_goes_down_a_row_of_a_wrapped_line() {
+        let words = "word ".repeat(40);
+        let (mut viewer, directory) = editing(&format!("{words}\nshort\n"));
+        let cursor = |viewer: &Viewer| viewer.editor.as_ref().unwrap().cursor();
+        let columns = viewer.source_size.0;
+        assert!(columns < 200);
+        press(&mut viewer, "llgj");
+        let row = columns / 5 * 5;
+        assert_eq!(cursor(&viewer), row + 2, "the same place in the next row");
+        press(&mut viewer, "gj");
+        assert_eq!(cursor(&viewer), 2 * row + 2);
+        press(&mut viewer, "2gk");
+        assert_eq!(cursor(&viewer), 2);
+        // `j` goes by lines of the text there.
+        press(&mut viewer, "j");
+        assert_eq!(cursor(&viewer), 203);
+        // With an operator `gj` takes the text up to that place.
+        press(&mut viewer, "ggdgj");
+        assert_eq!(viewer.text().map(str::len), Some(200 - row + 7));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn the_panes_can_be_switched() {
         let (mut viewer, directory) = editing("one\ntwo\n");
         press(&mut viewer, "gs");
@@ -2240,6 +3101,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    /// Whether `j` and `k` get through a whole document on its pages:
+    /// `ZETWERK_BENCH=file.typ cargo test --release -p zetwerk-app walking_the_pages -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a test"]
+    fn walking_the_pages() {
+        let Ok(file) = std::env::var("ZETWERK_BENCH") else {
+            return;
+        };
+        let directory = directory(&std::fs::read_to_string(file).unwrap());
+        let (mut viewer, _) = open(&directory);
+        let cursor = |viewer: &Viewer| viewer.editor.as_ref().unwrap().cursor();
+        let lines: usize = {
+            let document = viewer.document.as_ref().unwrap();
+            let world = viewer.compiled_world.as_ref().unwrap();
+            let file = viewer.project.main();
+            let count = |page: &Page| PageMap::build(world, &page.frame).lines(file).len();
+            document.pages().iter().map(count).sum()
+        };
+        let pages = viewer.document().unwrap().pages().len();
+        press(&mut viewer, "gsgs");
+        for key in ["j", "k"] {
+            let start = std::time::Instant::now();
+            let mut seen = HashSet::from([cursor(&viewer)]);
+            let (mut steps, mut again) = (0, 0);
+            let mut trail = Vec::new();
+            loop {
+                let before = cursor(&viewer);
+                press(&mut viewer, key);
+                if cursor(&viewer) == before {
+                    break;
+                }
+                steps += 1;
+                again += usize::from(!seen.insert(cursor(&viewer)));
+                trail.push((viewer.cursor_page.get() + 1, cursor(&viewer)));
+                if steps > 4 * lines + 100 {
+                    let text = viewer.text().unwrap();
+                    for (page, at) in &trail[trail.len() - 40..] {
+                        let shown: String = text[*at..].chars().take(30).collect();
+                        println!("page {page}: {at} {shown:?}");
+                    }
+                    panic!("going round in circles");
+                }
+            }
+            println!(
+                "{key}: {steps} steps over {lines} lines, {again} to a place seen before, \
+                 ends on page {} of {pages}, {:.3} ms a step",
+                viewer.cursor_page.get() + 1,
+                start.elapsed().as_secs_f64() * 1000.0 / steps.max(1) as f64
+            );
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     /// What a keystroke costs before the compositor gets the frame:
     /// `ZETWERK_BENCH=file.typ cargo test --release -p zetwerk-app typing_cost -- --ignored --nocapture`
     #[test]
@@ -2278,6 +3192,13 @@ mod tests {
                 images as f64 / keys.len() as f64
             );
         };
+        press(&mut viewer, "gsgs");
+        report(
+            "lines on the page",
+            "jjjjjjjjjjkkkkkkkkkkjjjjjjjjjj",
+            &mut viewer,
+        );
+        press(&mut viewer, "gs");
         report(
             "typing",
             "ithe quick brown fox jumps over the lazy dog and on",

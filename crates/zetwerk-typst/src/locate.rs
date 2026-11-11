@@ -6,6 +6,7 @@
 //! code that puts no glyph of its own on a page, the nearest text does.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use typst::layout::{Frame, FrameItem, Point, Transform};
 use typst::syntax::{LinkedNode, Side, Source, Span};
@@ -28,8 +29,18 @@ pub struct PagePosition {
 ///
 /// `source` has to be the very source the document was compiled from: an
 /// edit gives its syntax nodes new numbers, and the glyphs carry the old.
+///
+/// The search begins at page `near` and goes outwards from it, and ends
+/// at the first page that shows the very place: a cursor is mostly near
+/// where it was, and of text that is on many pages (a heading and its
+/// running title) the nearest is the one meant.
 #[must_use]
-pub fn locate(document: &PagedDocument, source: &Source, offset: usize) -> Option<PagePosition> {
+pub fn locate(
+    document: &PagedDocument,
+    source: &Source,
+    offset: usize,
+    near: usize,
+) -> Option<PagePosition> {
     // The leaves around the cursor, the nearest first.
     let root = LinkedNode::new(source.root());
     let at = root.leaf_at(offset.min(source.text().len()), Side::After)?;
@@ -47,15 +58,40 @@ pub fn locate(document: &PagedDocument, source: &Source, offset: usize) -> Optio
         }
     }
 
-    let mut best: Option<(usize, PagePosition)> = None;
-    for (page, laid_out) in document.pages().iter().enumerate() {
+    // The text under the cursor may be one leaf that is set on many lines
+    // and pages (a paragraph of plain words is): of its pieces, the one
+    // that shows the cursor's place, or the one nearest to that.
+    let within = offset.saturating_sub(at.offset());
+    let mut best: Option<((usize, usize), PagePosition)> = None;
+    let pages = document.pages();
+    let near = near.min(pages.len().saturating_sub(1));
+    // `near`, the page after it, the page before it, two after it, ...
+    let outwards = (0..pages.len()).flat_map(|distance| {
+        let after = near
+            .checked_add(distance)
+            .filter(|page| *page < pages.len());
+        let before = near.checked_sub(distance).filter(|_| distance > 0);
+        after.into_iter().chain(before)
+    });
+    for page in outwards {
+        let Some(laid_out) = pages.get(page) else {
+            continue;
+        };
         search(
             &laid_out.frame,
             Transform::identity(),
-            &mut |span, point| {
+            &mut |span, shown: Range<usize>, point| {
                 let Some(&rank) = wanted.get(&span) else {
                     return;
                 };
+                let miss = if rank > 0 {
+                    0
+                } else if within < shown.start {
+                    shown.start - within
+                } else {
+                    within.saturating_sub(shown.end)
+                };
+                let rank = (rank, miss);
                 if best.is_none_or(|(found, _)| rank < found) {
                     let position = PagePosition {
                         page,
@@ -66,16 +102,18 @@ pub fn locate(document: &PagedDocument, source: &Source, offset: usize) -> Optio
                 }
             },
         );
-        if matches!(best, Some((0, _))) {
+        if matches!(best, Some(((0, 0), _))) {
             break;
         }
     }
     best.map(|(_, position)| position)
 }
 
-/// Calls `found` with the span and the page position of the first glyph of
-/// every text item in `frame`.
-fn search(frame: &Frame, transform: Transform, found: &mut impl FnMut(Span, Point)) {
+/// Calls `found` for every stretch of glyphs from one syntax node in the
+/// text items of `frame`: with the node's span, the bytes of the node the
+/// stretch shows (from the first byte of its first glyph to that of its
+/// last) and the page position of the item.
+fn search(frame: &Frame, transform: Transform, found: &mut impl FnMut(Span, Range<usize>, Point)) {
     for (pos, item) in frame.items() {
         let transform = transform.pre_concat(Transform::translate(pos.x, pos.y));
         match item {
@@ -84,13 +122,22 @@ fn search(frame: &Frame, transform: Transform, found: &mut impl FnMut(Span, Poin
             }
             FrameItem::Text(text) => {
                 let origin = Point::zero().transform(transform);
-                let mut last = None;
+                let mut stretch: Option<(Span, Range<usize>)> = None;
                 for glyph in &text.glyphs {
-                    // One report per run of glyphs from the same node.
-                    if last != Some(glyph.span.0) {
-                        found(glyph.span.0, origin);
-                        last = Some(glyph.span.0);
+                    let (span, at) = (glyph.span.0, usize::from(glyph.span.1));
+                    match &mut stretch {
+                        Some((of, shown)) if *of == span => {
+                            *shown = shown.start.min(at)..shown.end.max(at);
+                        }
+                        _ => {
+                            if let Some((of, shown)) = stretch.replace((span, at..at)) {
+                                found(of, shown, origin);
+                            }
+                        }
                     }
+                }
+                if let Some((of, shown)) = stretch {
+                    found(of, shown, origin);
                 }
             }
             FrameItem::Shape(..)
@@ -120,12 +167,42 @@ mod tests {
         let source = project.source(project.main()).expect("the main source");
         let page_of = |needle: &str| {
             let offset = text.find(needle).expect("the needle is in the text");
-            locate(&document, source, offset).map(|position| position.page)
+            locate(&document, source, offset, 0).map(|position| position.page)
         };
         assert_eq!(page_of("First"), Some(0));
         assert_eq!(page_of("page* here"), Some(1));
         assert_eq!(page_of("Third"), Some(2));
         // In code that sets no glyph: the nearest text.
         assert!(page_of("#pagebreak").is_some());
+    }
+
+    #[test]
+    fn a_paragraph_over_several_pages_is_found_where_the_cursor_is() {
+        // Plain words are one leaf of the syntax tree, however many pages
+        // they fill.
+        let words: Vec<String> = (0..200).map(|i| format!("w{i}")).collect();
+        let text = format!(
+            "#set page(width: 200pt, height: 100pt)\n{}\n",
+            words.join(" ")
+        );
+        let env = Environment::new(FontSet::Embedded);
+        let project = Project::in_memory(env, PathBuf::from("/"), "main.typ", text.clone())
+            .expect("a valid name");
+        let world = project.snapshot();
+        let document = compile(&world).document.expect("it compiles");
+        assert!(document.pages().len() > 3);
+        let source = project.source(project.main()).expect("the main source");
+        let mut last = (0, 0.0);
+        for word in ["w0 ", "w40 ", "w80 ", "w120 ", "w160 ", "w199"] {
+            let offset = text.find(word).expect("the word is in the text");
+            // Wherever the search begins.
+            let from_end = locate(&document, source, offset, usize::MAX);
+            let position = locate(&document, source, offset, 0).expect("it is on a page");
+            assert_eq!(from_end, Some(position));
+            let now = (position.page, position.y);
+            assert!(now > last, "{word} at {now:?} after {last:?}");
+            last = now;
+        }
+        assert_eq!(last.0, document.pages().len() - 1);
     }
 }

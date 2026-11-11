@@ -47,6 +47,22 @@ pub struct Editor {
     top: usize,
 }
 
+/// Something that shows the text in rows other than the source pane's:
+/// the lines of typeset pages.
+pub trait Rows {
+    /// See [`zetwerk_vim::Host::row`].
+    fn row(&self, from: usize, rows: isize, across: Option<f64>) -> Option<(usize, f64)>;
+}
+
+/// What the cursor moves on when it moves by rows.
+pub enum Shown<'a> {
+    /// The source pane, whose rows are `columns` cells wide.
+    Source { columns: usize },
+    /// Typeset pages; `None` while they are not those of the text as it
+    /// is.
+    Pages(Option<&'a dyn Rows>),
+}
+
 /// What a key did.
 pub struct Typed {
     /// Commands for the window: what was entered on the command line.
@@ -83,12 +99,27 @@ impl Editor {
         Ok((editor, opened))
     }
 
-    /// Handles a key press.
-    pub fn key(&mut self, press: KeyPress) -> Typed {
+    /// Handles a key press. `shown` is what the user sees the text on.
+    pub fn key(&mut self, press: KeyPress, shown: &Shown) -> Typed {
         let before = self.document.revision();
+        // Only pages take the place of lines for `j` and `k`: in the
+        // source, a line of the text is what they have always gone by.
+        self.engine.set_rows_first(matches!(shown, Shown::Pages(_)));
+        let rows = match shown {
+            Shown::Pages(pages) => RowsOf::Pages(*pages),
+            Shown::Source { columns } => {
+                self.rows(*columns);
+                match &self.rows {
+                    Some((_, _, rows)) => RowsOf::Source(rows),
+                    None => RowsOf::Pages(None),
+                }
+            }
+        };
         let mut host = DocumentHost {
             document: &mut self.document,
             failure: &mut self.failure,
+            rows,
+            shown_revision: before,
         };
         let effects = self.engine.key(press, &mut host);
         if self.failure.is_some() {
@@ -304,6 +335,15 @@ impl Editor {
 struct DocumentHost<'a> {
     document: &'a mut Document<SourceBuffer>,
     failure: &'a mut Option<String>,
+    rows: RowsOf<'a>,
+    /// The revision of the text those rows are of.
+    shown_revision: u64,
+}
+
+/// The rows the cursor moves by.
+enum RowsOf<'a> {
+    Source(&'a [Row]),
+    Pages(Option<&'a dyn Rows>),
 }
 
 impl Host for DocumentHost<'_> {
@@ -330,6 +370,35 @@ impl Host for DocumentHost<'_> {
                 None
             }
         }
+    }
+
+    fn row(&self, from: usize, rows: isize, across: Option<f64>) -> Option<(usize, f64)> {
+        if self.document.revision() != self.shown_revision {
+            // The key has changed the text: the rows are those of what it
+            // was before.
+            return None;
+        }
+        let shown = match &self.rows {
+            RowsOf::Pages(pages) => return pages.as_ref()?.row(from, rows, across),
+            RowsOf::Source(shown) => shown,
+        };
+        let text = self.document.text();
+        let here = row_of(shown, from);
+        let row = shown.get(here)?;
+        let across =
+            across.unwrap_or_else(|| cells(text.get(row.range.start..from).unwrap_or("")) as f64);
+        let target = here
+            .saturating_add_signed(rows)
+            .min(shown.len().saturating_sub(1));
+        let range = shown.get(target)?.range.clone();
+        let mut before = 0.0;
+        for (at, c) in text.get(range.clone())?.char_indices() {
+            before += cells_of(c) as f64;
+            if before > across {
+                return Some((range.start + at, across));
+            }
+        }
+        Some((range.end, across))
     }
 
     fn redo(&mut self) -> Option<Range<usize>> {

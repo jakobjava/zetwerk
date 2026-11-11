@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use typst::World;
+use typst::introspection::{Location, Tag};
 use typst::layout::{Abs, Frame, FrameItem, Point, Rect, Transform};
+use typst::pdf::ArtifactElem;
 use typst::syntax::{FileId, Source, Span, SyntaxKind, SyntaxNode};
 use typst::text::TextItem;
 
@@ -49,6 +51,9 @@ pub struct MappedGlyph {
     pub origin: Origin,
     /// Index of the glyph's run in [`PageMap::runs`].
     pub run: usize,
+    /// Whether the glyph is part of what every page has around its text:
+    /// a header, a footer, a background.
+    pub furniture: bool,
 }
 
 /// What a glyph on the page corresponds to in the source.
@@ -63,7 +68,17 @@ pub enum Origin {
     /// Part of an equation the editor owns. `range` is the syntax node the
     /// glyph came from; math is edited through its source, not on the page.
     Math { file: FileId, range: Range<usize> },
-    /// Not editable on the page. Selected and handled as a unit.
+    /// What a piece of markup or code put on the page: a reference, a
+    /// citation, a quotation mark, the result of a call. Not the bytes of
+    /// the source, but with a place in it: `range` is the syntax node, and
+    /// all glyphs that came of it are handled as one.
+    Object {
+        file: FileId,
+        range: Range<usize>,
+        kind: SyntaxKind,
+    },
+    /// Not editable on the page, and with no place of its own in the
+    /// source.
     Atomic(Atomic),
 }
 
@@ -76,8 +91,8 @@ pub enum Atomic {
     /// The glyph comes from a file the editor does not own, such as a
     /// package or template.
     ForeignFile,
-    /// The glyph comes from syntax that is not plain text: a function call,
-    /// a reference, a heading marker, a shorthand, an escape sequence.
+    /// The glyph is an ornament of a piece of markup that holds text of
+    /// its own: the number of a heading, the marker of a list item.
     Markup(SyntaxKind),
     /// The glyph points at a text node but does not show that node's bytes,
     /// because the text was transformed (case change, hyphenation, a `show`
@@ -96,6 +111,9 @@ impl PageMap {
             path: Vec::new(),
             resolved: None,
             indexes: HashMap::new(),
+            open: Vec::new(),
+            furniture: None,
+            enclosing: Enclosing::Unknown,
         };
         builder.frame(frame, Transform::identity());
         Self {
@@ -124,6 +142,10 @@ impl PageMap {
         let mut inside = None;
         let mut behind = None;
         for glyph in &self.glyphs {
+            if matches!(glyph.origin, Origin::Object { .. }) {
+                // Those are for `object` to find, whole.
+                continue;
+            }
             let Some(range) = glyph.origin.range_in(file) else {
                 continue;
             };
@@ -145,6 +167,33 @@ impl PageMap {
             .or(behind.map(|cell| Caret { cell, after: true }))
     }
 
+    /// The object that byte `offset` of `file` is in the source of, as
+    /// the stretches of the page it takes up: of a reference, what it
+    /// refers to by. The innermost, if objects are nested; nothing, if
+    /// the byte is in no object that shows on this page.
+    #[must_use]
+    pub fn object(&self, file: FileId, offset: usize) -> Vec<Rect> {
+        let objects = || {
+            self.glyphs.iter().filter_map(|glyph| match &glyph.origin {
+                Origin::Object {
+                    file: of, range, ..
+                } if *of == file && range.contains(&offset) => Some((range, glyph.rect)),
+                _ => None,
+            })
+        };
+        let Some(innermost) = objects()
+            .map(|(range, _)| range)
+            .min_by_key(|range| range.len())
+        else {
+            return Vec::new();
+        };
+        let mut rects = Vec::new();
+        for (_, cell) in objects().filter(|(range, _)| *range == innermost) {
+            join(&mut rects, cell);
+        }
+        rects
+    }
+
     /// The place in the source that `point` on the page stands for: the
     /// file and byte of the nearest glyph that shows source text, before
     /// or behind it depending on which half of it the point is in. Glyphs
@@ -155,9 +204,9 @@ impl PageMap {
         for glyph in &self.glyphs {
             let (file, range, splits) = match &glyph.origin {
                 Origin::Text { file, range } => (*file, range, true),
-                Origin::Space { file, range } | Origin::Math { file, range } => {
-                    (*file, range, false)
-                }
+                Origin::Space { file, range }
+                | Origin::Math { file, range }
+                | Origin::Object { file, range, .. } => (*file, range, false),
                 Origin::Atomic(_) => continue,
             };
             let cell = glyph.rect;
@@ -177,6 +226,48 @@ impl PageMap {
         best.map(|(_, file, offset)| (file, offset))
     }
 
+    /// The lines of text on the page, as far as they show text of `file`.
+    #[must_use]
+    pub fn lines(&self, file: FileId) -> PageLines {
+        let mut lines: Vec<PageLine> = Vec::new();
+        // Not what stands around the text on every page: a cursor that
+        // goes down the text does not go through the running titles.
+        for glyph in self.glyphs.iter().filter(|glyph| !glyph.furniture) {
+            let cell = glyph.rect;
+            let (left, right) = (cell.min.x.to_pt(), cell.max.x.to_pt());
+            let (top, bottom) = (cell.min.y.to_pt(), cell.max.y.to_pt());
+            // Text the document makes itself (a number, a reference) is
+            // no place for the cursor, but part of its line: without it
+            // the line would fall into pieces.
+            let entry = glyph.origin.range_in(file).map(|range| LineGlyph {
+                left,
+                right,
+                offset: range.start,
+                end: range.end,
+            });
+            match lines
+                .iter_mut()
+                .rev()
+                .find(|line| line.takes(left, right, top, bottom))
+            {
+                Some(line) => {
+                    line.left = line.left.min(left);
+                    line.right = line.right.max(right);
+                    line.glyphs.extend(entry);
+                }
+                None => lines.push(PageLine {
+                    top,
+                    bottom,
+                    left,
+                    right,
+                    glyphs: entry.into_iter().collect(),
+                }),
+            }
+        }
+        lines.retain(|line| !line.glyphs.is_empty());
+        PageLines { lines }
+    }
+
     /// The cells of the glyphs that show bytes `range` of `file`, joined
     /// where they stand side by side on a line.
     #[must_use]
@@ -190,22 +281,306 @@ impl PageMap {
             if !selected {
                 continue;
             }
-            let cell = glyph.rect;
-            let slack = Abs::pt(0.5);
-            match rects.last_mut() {
-                Some(last)
-                    if (last.min.y - cell.min.y).abs() < slack
-                        && (last.max.y - cell.max.y).abs() < slack
-                        && cell.min.x >= last.min.x
-                        && cell.min.x <= last.max.x + slack =>
-                {
-                    last.max.x = last.max.x.max(cell.max.x);
-                }
-                _ => rects.push(cell),
-            }
+            join(&mut rects, glyph.rect);
         }
         rects
     }
+}
+
+/// Adds `cell` to `rects`: to the last of them, if it goes on where that
+/// ends.
+fn join(rects: &mut Vec<Rect>, cell: Rect) {
+    let slack = Abs::pt(0.5);
+    match rects.last_mut() {
+        Some(last)
+            if (last.min.y - cell.min.y).abs() < slack
+                && (last.max.y - cell.max.y).abs() < slack
+                && cell.min.x >= last.min.x
+                && cell.min.x <= last.max.x + slack =>
+        {
+            last.max.x = last.max.x.max(cell.max.x);
+        }
+        _ => rects.push(cell),
+    }
+}
+
+/// The lines of text of a page, in the order the page has them (the
+/// order of reading, but for what stands in the margins): what moving up
+/// and down on a page goes by. All measures are points from the page's
+/// top-left corner.
+#[derive(Debug)]
+pub struct PageLines {
+    lines: Vec<PageLine>,
+}
+
+/// A stretch of glyphs side by side with no gap to speak of. The lines of
+/// two columns that stand at the same height are two of these, and so are
+/// the cells of a table's row.
+#[derive(Debug)]
+struct PageLine {
+    top: f64,
+    bottom: f64,
+    left: f64,
+    right: f64,
+    /// In the order the page has them.
+    glyphs: Vec<LineGlyph>,
+}
+
+#[derive(Debug)]
+struct LineGlyph {
+    left: f64,
+    right: f64,
+    /// The byte of the source the glyph begins to show, and the byte
+    /// after the last it shows.
+    offset: usize,
+    end: usize,
+}
+
+impl LineGlyph {
+    /// The middle of the glyph: an aim that does not flip to the glyph
+    /// before it when it comes back a hair off.
+    fn middle(&self) -> f64 {
+        self.left + (self.right - self.left) / 2.0
+    }
+}
+
+impl PageLine {
+    fn height(&self) -> f64 {
+        self.bottom - self.top
+    }
+
+    fn middle(&self) -> f64 {
+        self.top + self.height() / 2.0
+    }
+
+    /// Whether a glyph with this cell is one of this line's.
+    fn takes(&self, left: f64, right: f64, top: f64, bottom: f64) -> bool {
+        let middle = top + (bottom - top) / 2.0;
+        if middle < self.top || middle > self.bottom {
+            return false;
+        }
+        // Blanks are glyphs too, so what belongs together stands close:
+        // closer than the columns of a page do.
+        let gap = (left - self.right).max(self.left - right);
+        gap <= self.height().max(bottom - top) * 0.75
+    }
+
+    /// Whether `other` stands above or below this line and not in a
+    /// column next to it.
+    fn in_column_with(&self, other: &PageLine) -> bool {
+        let slack = self.height() / 2.0;
+        other.left <= self.right + slack && other.right >= self.left - slack
+    }
+
+    /// How far `across` is from the line, sideways.
+    fn aside(&self, across: f64) -> f64 {
+        (self.left - across).max(across - self.right).max(0.0)
+    }
+}
+
+impl PageLines {
+    /// How many lines of the page show text of the file.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Whether the page shows no text of the file.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Whether a line of the page shows byte `offset` of the source.
+    #[must_use]
+    pub fn shows(&self, offset: usize) -> bool {
+        self.lines
+            .iter()
+            .flat_map(|line| &line.glyphs)
+            .any(|glyph| glyph.offset <= offset && offset < glyph.end)
+    }
+
+    /// The line that shows byte `offset` of the source, or the text
+    /// nearest before it (after it, if there is none before), and how far
+    /// across the page the middle of that is.
+    #[must_use]
+    pub fn find(&self, offset: usize) -> Option<(usize, f64)> {
+        let glyphs = || {
+            self.lines
+                .iter()
+                .enumerate()
+                .flat_map(|(index, line)| line.glyphs.iter().map(move |glyph| (index, glyph)))
+        };
+        // Of several that begin at the same byte (all that one call put
+        // on the page), the first.
+        let mut before: Option<(usize, &LineGlyph)> = None;
+        for (index, glyph) in glyphs().filter(|(_, glyph)| glyph.offset <= offset) {
+            if before.is_none_or(|(_, best)| glyph.offset > best.offset) {
+                before = Some((index, glyph));
+            }
+        }
+        before
+            .or_else(|| glyphs().min_by_key(|(_, glyph)| glyph.offset))
+            .map(|(index, glyph)| (index, glyph.middle()))
+    }
+
+    /// How far across the page line `line` shows byte `offset`, or else
+    /// begins.
+    #[must_use]
+    pub fn across(&self, line: usize, offset: usize) -> Option<f64> {
+        let line = self.lines.get(line)?;
+        let shown = line
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.offset <= offset && offset < glyph.end);
+        Some(shown.map_or(line.left, LineGlyph::middle))
+    }
+
+    /// The line below `line` (above it, if not `down`) for a cursor that
+    /// aims `across`, and where the cursor aims from there on. `None` if
+    /// the line is on another page.
+    ///
+    /// That is the line the page has next, if it lies below: so the
+    /// cursor reads on, also where the next line stands to the side (a
+    /// centred equation after a short line). Otherwise it is the nearest
+    /// line straight below, or else the line the page has next if that
+    /// begins a column further right; the cursor then aims as far into
+    /// that column as it did into this one.
+    #[must_use]
+    pub fn step(&self, line: usize, down: bool, across: f64) -> Option<(usize, f64)> {
+        let from = self.lines.get(line)?;
+        // How far beyond `from` a line is, the way the cursor goes.
+        let beyond = |other: &PageLine| {
+            if down {
+                other.middle() - from.bottom
+            } else {
+                from.top - other.middle()
+            }
+        };
+        let others = || {
+            self.lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != line)
+        };
+        let aimed_at = |a: &(usize, &PageLine), b: &(usize, &PageLine)| {
+            order(a.1.aside(across), b.1.aside(across))
+        };
+        // The nearest line beyond `from`, of those that `count`; of
+        // several at one height, the one the cursor aims at.
+        let nearest = |count: &dyn Fn(&PageLine) -> bool| {
+            let beyond_it = || others().filter(|(_, other)| count(other) && beyond(other) > 0.0);
+            let least = beyond_it()
+                .map(|(_, other)| beyond(other))
+                .reduce(f64::min)?;
+            beyond_it()
+                .filter(|(_, other)| beyond(other) <= least + from.height() / 2.0)
+                .min_by(aimed_at)
+                .map(|(index, _)| index)
+        };
+        // The line the page has next, not counting what stands beside
+        // this one (the number of an equation, the next cell of a row).
+        let beside = |other: &PageLine| other.middle() >= from.top && other.middle() <= from.bottom;
+        let next = if down {
+            (line + 1..self.lines.len()).find(|index| !beside(&self.lines[*index]))
+        } else {
+            (0..line).rev().find(|index| !beside(&self.lines[*index]))
+        };
+        let next = next.and_then(|index| Some((index, self.lines.get(index)?)));
+
+        if let Some((index, next)) = next
+            && beyond(next) > 0.0
+        {
+            let level =
+                |other: &PageLine| (other.middle() - next.middle()).abs() <= next.height() / 2.0;
+            return others()
+                .filter(|(at, other)| *at == index || (level(other) && from.in_column_with(other)))
+                .min_by(aimed_at)
+                .map(|(index, _)| (index, across));
+        }
+        if let Some(index) = nearest(&|other| from.in_column_with(other)) {
+            return Some((index, across));
+        }
+        if let Some((index, next)) = next {
+            let slack = from.height() / 2.0;
+            let further = if down {
+                next.left > from.right
+            } else {
+                next.right < from.left
+            };
+            // A column begins level with the ones before it and ends
+            // level with the ones after it. What stands above or below
+            // all the text (a running title) is not one.
+            let column = self.lines.iter().enumerate().any(|(at, other)| {
+                if down {
+                    at <= line && other.top <= next.top + slack
+                } else {
+                    at >= line && other.bottom >= next.bottom - slack
+                }
+            });
+            if further && column {
+                return Some((index, across - from.left + next.left));
+            }
+        }
+        nearest(&|_| true).map(|index| (index, across))
+    }
+
+    /// From where to where across the page line `line` reaches.
+    #[must_use]
+    pub fn extent(&self, line: usize) -> Option<(f64, f64)> {
+        self.lines.get(line).map(|line| (line.left, line.right))
+    }
+
+    /// The line a cursor comes to first when it enters the page from
+    /// above (from below, if not `down`): the first the page has (the
+    /// last, unless that stands above all the others, as a running title
+    /// does: then the lowest).
+    #[must_use]
+    pub fn enter(&self, down: bool) -> Option<usize> {
+        let last = self.lines.len().checked_sub(1)?;
+        if down {
+            return Some(0);
+        }
+        let top = self.lines.get(last)?.top;
+        let above_all = self.lines.iter().take(last).all(|other| other.top > top);
+        if last == 0 || !above_all {
+            return Some(last);
+        }
+        self.lines
+            .iter()
+            .enumerate()
+            .min_by(|a, b| order(b.1.bottom, a.1.bottom).then(order(b.1.right, a.1.right)))
+            .map(|(index, _)| index)
+    }
+
+    /// The byte of the source shown `across` on line `line`: that of the
+    /// glyph there, or of the nearest one. Glyphs that show byte `not` do
+    /// not count: `None` if the line has no others.
+    #[must_use]
+    pub fn at(&self, line: usize, across: f64, not: usize) -> Option<usize> {
+        let aside = |glyph: &LineGlyph| {
+            if across < glyph.left {
+                glyph.left - across
+            } else if across >= glyph.right {
+                // Where two glyphs meet, the place belongs to the right
+                // one.
+                across - glyph.right + 0.001
+            } else {
+                0.0
+            }
+        };
+        self.lines
+            .get(line)?
+            .glyphs
+            .iter()
+            .filter(|glyph| !(glyph.offset <= not && not < glyph.end))
+            .min_by(|a, b| order(aside(a), aside(b)))
+            .map(|glyph| glyph.offset)
+    }
+}
+
+fn order(a: f64, b: f64) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
 /// Where a cursor is on a page.
@@ -225,10 +600,9 @@ impl Origin {
             Self::Text { file: of, range }
             | Self::Space { file: of, range }
             | Self::Math { file: of, range }
-                if *of == file =>
-            {
-                Some(range)
-            }
+            | Self::Object {
+                file: of, range, ..
+            } if *of == file => Some(range),
             _ => None,
         }
     }
@@ -325,6 +699,23 @@ struct Builder<'a> {
     /// always share a span, and finding a node means a tree search.
     resolved: Option<(Span, Resolved)>,
     indexes: HashMap<FileId, SpanIndex>,
+    /// The elements that have begun and not ended where the walk is, the
+    /// innermost last: what the glyphs there are part of.
+    open: Vec<(Location, Span)>,
+    /// Where among them the page's furniture begins, if the walk is in
+    /// it: Typst marks headers, footers and backgrounds as artifacts.
+    furniture: Option<usize>,
+    /// What a glyph with no place of its own in the source is taken to
+    /// come from there.
+    enclosing: Enclosing,
+}
+
+/// What the glyphs at one place of the walk are part of.
+enum Enclosing {
+    /// Not asked for yet since an element began or ended.
+    Unknown,
+    /// This, or nothing that has a place in the source.
+    Known(Option<Origin>),
 }
 
 /// What a span points at.
@@ -344,6 +735,7 @@ enum NodeKind {
     Text,
     Space,
     Math,
+    Object(SyntaxKind),
 }
 
 impl Builder<'_> {
@@ -356,10 +748,29 @@ impl Builder<'_> {
                     self.frame(&group.frame, transform.pre_concat(group.transform));
                 }
                 FrameItem::Text(text) => self.text(text, transform),
-                FrameItem::Shape(..)
-                | FrameItem::Image(..)
-                | FrameItem::Link(..)
-                | FrameItem::Tag(_) => {}
+                FrameItem::Tag(Tag::Start(element, _)) => {
+                    if let Some(location) = element.location() {
+                        if self.furniture.is_none() && element.is::<ArtifactElem>() {
+                            self.furniture = Some(self.open.len());
+                        }
+                        self.open.push((location, element.span()));
+                        self.enclosing = Enclosing::Unknown;
+                    }
+                }
+                FrameItem::Tag(Tag::End(location, ..)) => {
+                    // An element that began on an earlier page is not
+                    // among them.
+                    if let Some(at) = self.open.iter().rposition(|(open, _)| open == location) {
+                        self.open.remove(at);
+                        self.enclosing = Enclosing::Unknown;
+                        match self.furniture {
+                            Some(first) if first == at => self.furniture = None,
+                            Some(first) if first > at => self.furniture = Some(first - 1),
+                            _ => {}
+                        }
+                    }
+                }
+                FrameItem::Shape(..) | FrameItem::Image(..) | FrameItem::Link(..) => {}
             }
             self.path.pop();
         }
@@ -383,6 +794,7 @@ impl Builder<'_> {
                 rect: transform_rect(cell, transform),
                 origin,
                 run,
+                furniture: self.furniture.is_some(),
             });
         }
         self.runs.push(TextRun {
@@ -402,6 +814,9 @@ impl Builder<'_> {
             }
         };
         let (source, file, node, kind) = match resolved {
+            Resolved::Unmappable(reason @ (Atomic::Detached | Atomic::ForeignFile)) => {
+                return self.enclosing(reason);
+            }
             Resolved::Unmappable(reason) => return Origin::Atomic(reason),
             Resolved::Node {
                 source,
@@ -413,6 +828,11 @@ impl Builder<'_> {
         match kind {
             NodeKind::Space => Origin::Space { file, range: node },
             NodeKind::Math => Origin::Math { file, range: node },
+            NodeKind::Object(kind) => Origin::Object {
+                file,
+                range: node,
+                kind,
+            },
             NodeKind::Text => {
                 let Some(shown) = shown else {
                     return Origin::Atomic(Atomic::Transformed);
@@ -429,6 +849,33 @@ impl Builder<'_> {
                 }
             }
         }
+    }
+
+    /// What a glyph that says nothing of where it comes from is part of:
+    /// the innermost element around it that is written in a file of the
+    /// project. The text a reference shows has no place in the source,
+    /// but the reference has.
+    fn enclosing(&mut self, reason: Atomic) -> Origin {
+        if let Enclosing::Known(found) = &self.enclosing {
+            return found.clone().unwrap_or(Origin::Atomic(reason));
+        }
+        let mut origin = None;
+        for at in (0..self.open.len()).rev() {
+            let Resolved::Node {
+                file, range, kind, ..
+            } = self.resolve(self.open[at].1)
+            else {
+                continue;
+            };
+            match kind {
+                NodeKind::Object(kind) => origin = Some(Origin::Object { file, range, kind }),
+                NodeKind::Math => origin = Some(Origin::Math { file, range }),
+                NodeKind::Text | NodeKind::Space => continue,
+            }
+            break;
+        }
+        self.enclosing = Enclosing::Known(origin.clone());
+        origin.unwrap_or(Origin::Atomic(reason))
     }
 
     fn resolve(&mut self, span: Span) -> Resolved {
@@ -454,7 +901,14 @@ impl Builder<'_> {
             _ if in_equation => NodeKind::Math,
             SyntaxKind::Text => NodeKind::Text,
             SyntaxKind::Space => NodeKind::Space,
-            other => return Resolved::Unmappable(Atomic::Markup(other)),
+            // What these put on the page besides their text is a number
+            // or a marker; the cursor has no business there.
+            other @ (SyntaxKind::Markup
+            | SyntaxKind::Heading
+            | SyntaxKind::ListItem
+            | SyntaxKind::EnumItem
+            | SyntaxKind::TermItem) => return Resolved::Unmappable(Atomic::Markup(other)),
+            other => NodeKind::Object(other),
         };
         Resolved::Node {
             source: index.source.clone(),
