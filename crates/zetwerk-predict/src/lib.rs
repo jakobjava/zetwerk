@@ -154,10 +154,180 @@ pub fn predict(frame: &Frame, map: &PageMap, edit: Replacement) -> Result<Predic
         Err(Decline::Overflow) => return reflow(frame, parent_path, parent, to_page, line),
         Err(other) => return Err(other),
     }
+    // A line that lost text may have room for words of the next line.
+    // If that cannot be worked out, the line is left short.
+    if edit.removed > edit.text.len()
+        && let Ok(prediction) = pull_up(frame, parent_path, parent, to_page, line.clone())
+    {
+        return Ok(prediction);
+    }
     let cell = line.typed_cell().ok_or(Decline::Inconsistent)?;
     let typed = Rect::new(cell.min + to_page, cell.max + to_page);
     let frame = replace(frame, parent_path, line.apply(parent));
     Ok(Prediction { frame, typed })
+}
+
+/// The other way round from [`reflow`]: a line that has room takes words
+/// from the start of the next line, which then has room itself, and so
+/// on down the paragraph. If its last line is left with nothing, the
+/// paragraph has a line less and what follows in its column moves up.
+fn pull_up(
+    page: &Frame,
+    parent_path: &[usize],
+    parent: &Frame,
+    parent_origin: Point,
+    mut line: Line,
+) -> Result<Prediction, Decline> {
+    let (container_path, mut place) = match parent_path.split_last() {
+        Some((&index, rest)) if line.has_own_frame(parent) => (rest, Place::Group(index)),
+        _ => (parent_path, Place::Loose),
+    };
+    let container = descend(page, container_path).ok_or(Decline::Inconsistent)?;
+    let origin_of = |place: Place| match place {
+        Place::Loose => Some(Point::zero()),
+        Place::Group(index) => container.items().nth(index).map(|(pos, _)| *pos),
+    };
+    let container_origin = parent_origin - origin_of(place).ok_or(Decline::Inconsistent)?;
+    let put = |out: &Frame, place: Place, line: &Line| match place {
+        Place::Loose => line.apply(out),
+        Place::Group(index) => map_items(out, |at, pos, item| match item {
+            FrameItem::Group(group) if at == index => (
+                pos,
+                FrameItem::Group(GroupItem {
+                    frame: line.apply(&group.frame),
+                    ..group.clone()
+                }),
+            ),
+            _ => (pos, item.clone()),
+        }),
+    };
+
+    let mut out = container.clone();
+    let mut typed = None;
+    let mut column: Option<(Abs, Abs)> = None;
+    for _ in 0..MAX_LINES {
+        let origin = origin_of(place).ok_or(Decline::Inconsistent)?;
+        let (left, right) = line.span();
+        let below = Below {
+            baseline: origin.y + line.baseline(),
+            left: origin.x + left,
+            right: origin.x + right,
+            reach: line.font_size() * 2.5,
+        };
+        let limit = line.right_limit().map(|limit| origin.x + limit);
+        column = Some(match (column, limit) {
+            (Some((start, end)), limit) => {
+                (start.min(below.left), end.max(limit.unwrap_or(below.right)))
+            }
+            (None, limit) => (below.left, limit.unwrap_or(below.right)),
+        });
+        // Words of the next line that fit behind this one's.
+        let taken = line.room().and_then(|room| {
+            let (next_place, mut next) = next_line(container, &below).ok()?;
+            let last = !next.continues();
+            let words = next.take_front(room, last)?;
+            Some((next_place, next, words))
+        });
+        let mut following = None;
+        if let Some((next_place, next, words)) = taken {
+            line.append(words)?;
+            line.settle()?;
+            following = Some((next_place, next));
+        }
+        if let Some(cell) = line.typed_cell() {
+            let to_page = container_origin + origin;
+            typed = Some(Rect::new(cell.min + to_page, cell.max + to_page));
+        }
+        out = put(&out, place, &line);
+        let Some((next_place, mut next)) = following else {
+            break;
+        };
+        if next.is_empty() {
+            // The paragraph's last line is gone: what follows moves up.
+            let next_origin = origin_of(next_place).ok_or(Decline::Inconsistent)?;
+            let gone = Below {
+                baseline: next_origin.y + next.baseline(),
+                ..below
+            };
+            out = put(&out, next_place, &next);
+            let column = column.ok_or(Decline::Inconsistent)?;
+            out = close_room(
+                &out,
+                &gone,
+                column,
+                gone.baseline - below.baseline,
+                container.height(),
+            );
+            break;
+        }
+        next.settle()?;
+        line = next;
+        place = next_place;
+    }
+    let typed = typed.ok_or(Decline::Inconsistent)?;
+    let frame = replace(page, container_path, out);
+    Ok(Prediction { frame, typed })
+}
+
+/// Moves what follows the line that was at `gone` in its column up by
+/// `pitch`, into the room that line left. As in [`make_room`], what
+/// follows is what comes below without a large gap, and what stands in
+/// the margin below the column stays.
+fn close_room(frame: &Frame, gone: &Below, column: (Abs, Abs), pitch: Abs, height: Abs) -> Frame {
+    let top_of = |pos: Point, item: &FrameItem| match item {
+        FrameItem::Text(text) => pos.y - text.size,
+        _ => pos.y,
+    };
+    let bottom_of = |pos: Point, item: &FrameItem| match item {
+        FrameItem::Text(text) => pos.y + text.size * 0.3,
+        FrameItem::Group(group) => pos.y + group.frame.height(),
+        FrameItem::Link(_, size) => pos.y + size.y,
+        _ => pos.y,
+    };
+    let right_of = |pos: Point, item: &FrameItem| match item {
+        FrameItem::Text(text) => pos.x + text.width(),
+        FrameItem::Group(group) => pos.x + group.frame.width(),
+        FrameItem::Link(_, size) => pos.x + size.x,
+        _ => pos.x,
+    };
+    let top_margin = frame
+        .items()
+        .filter(|(pos, _)| pos.x <= column.1)
+        .map(|(pos, item)| top_of(*pos, item))
+        .fold(height, Abs::min)
+        .max(Abs::zero());
+    let bottom = height - top_margin;
+    let mut following: Vec<(usize, Abs, Abs)> = frame
+        .items()
+        .enumerate()
+        .filter_map(|(index, (pos, item))| {
+            let top = top_of(*pos, item);
+            let lower = match item {
+                FrameItem::Text(_) => pos.y > gone.baseline + Abs::pt(1.0),
+                _ => top > gone.baseline - Abs::pt(1.0),
+            };
+            let in_column = right_of(*pos, item) >= column.0 && pos.x <= column.1;
+            let in_margin = top >= bottom - Abs::pt(1.0);
+            (lower && in_column && !in_margin).then_some((index, top, bottom_of(*pos, item)))
+        })
+        .collect();
+    following.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut moved = Vec::new();
+    let mut flow_bottom = gone.baseline;
+    for (index, top, bottom_edge) in following {
+        if top - flow_bottom > pitch * 2.5 {
+            break;
+        }
+        flow_bottom = flow_bottom.max(bottom_edge);
+        moved.push(index);
+    }
+    map_items(frame, |index, pos, item| {
+        if moved.contains(&index) {
+            (Point::new(pos.x, pos.y - pitch), item.clone())
+        } else {
+            (pos, item.clone())
+        }
+    })
 }
 
 /// How many lines a paragraph may be re-broken over before the predictor

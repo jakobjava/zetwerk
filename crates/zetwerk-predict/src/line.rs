@@ -1,6 +1,6 @@
 //! One typeset line, taken apart so that it can be changed and put back.
 
-use typst::layout::{Abs, Em, Frame, FrameItem, Point, Rect};
+use typst::layout::{Abs, Em, Frame, FrameItem, GroupItem, Point, Rect, Size};
 use typst::syntax::Span;
 use typst::text::{Glyph, TextItem};
 
@@ -36,6 +36,7 @@ const TOLERANCE_EM: f64 = 1e-7;
 const MAX_GAP_EM: f64 = 0.75;
 
 /// A line: the unbroken left-to-right chain of items around the edited one.
+#[derive(Clone)]
 pub struct Line {
     members: Vec<Member>,
     baseline: Abs,
@@ -52,6 +53,7 @@ pub struct Line {
 }
 
 /// One item of the line.
+#[derive(Clone)]
 struct Member {
     /// Index in the parent frame; `None` for an item that came down from
     /// the line above and is not in the frame yet.
@@ -74,6 +76,7 @@ struct Member {
 }
 
 /// A text item with its glyphs as the shaper produced them.
+#[derive(Clone)]
 struct Run {
     item: TextItem,
     natural: Vec<Shaped>,
@@ -280,6 +283,177 @@ impl Line {
         Ok(())
     }
 
+    /// Whether nothing is left on the line.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// How much more the line could hold if it did not end where it
+    /// does: its measure less what is on it, counting the blank that the
+    /// line break swallowed. `None` if it ends in a hyphen or in
+    /// something that is not plain text: nothing can be put behind those.
+    pub fn room(&self) -> Option<Abs> {
+        let available = if self.justified {
+            self.right - self.left
+        } else {
+            self.limit.ok()? - self.left
+        };
+        let last = self.members.last()?.run.as_ref()?;
+        if last.hyphen.is_some() || last.trimmed == 0 {
+            return None;
+        }
+        let kept = last.natural.len() - last.trimmed;
+        let swallowed: Abs = last.natural[kept..]
+            .iter()
+            .map(|glyph| glyph.x_advance.at(last.item.size))
+            .sum();
+        let (mut used, mut blanks) = (swallowed, swallowed);
+        for member in &self.members {
+            used += member.gap + member.run.as_ref().map_or(member.width, Run::natural_width);
+            blanks += member.run.as_ref().map_or(Abs::zero(), Run::space_width);
+        }
+        let give = if self.justified {
+            blanks * LINE_SHRINK
+        } else {
+            Abs::zero()
+        };
+        Some(available - used + give)
+    }
+
+    /// Takes whole words off the start of the line, as many as fit into
+    /// `room`, for the end of the line above. All of the line only if it
+    /// `may_empty`: if the paragraph ends with it.
+    pub fn take_front(&mut self, room: Abs, may_empty: bool) -> Option<Carry> {
+        let mut used = Abs::zero();
+        let mut pieces: Vec<Member> = Vec::new();
+        loop {
+            let only = self.members.len() == 1;
+            let Some(first) = self.members.first_mut() else {
+                break;
+            };
+            let gap = first.gap;
+            let Some(run) = first.run.as_mut() else {
+                break;
+            };
+            let text = run.item.text.to_string();
+            let width = |upto: usize| -> Abs {
+                shape(&run.item, &text[..upto])
+                    .iter()
+                    .map(|glyph| glyph.x_advance.at(run.item.size))
+                    .sum()
+            };
+            // The furthest blank behind which the words before it still
+            // fit; a blank at the end of the line above is swallowed.
+            let mut cut = 0;
+            let mut search = 0;
+            while let Some(found) = text[search..].find(' ') {
+                let behind = search + found + 1;
+                search = behind;
+                let body = text[..behind].trim_end_matches(' ').len();
+                if body == 0 {
+                    continue;
+                }
+                if used + gap + width(body) > room + Abs::pt(TOLERANCE_PT) {
+                    break;
+                }
+                cut = behind;
+            }
+            // Or all of it, where that is all there is left of the line.
+            let all_fits = used + gap + width(text.trim_end_matches(' ').len())
+                <= room + Abs::pt(TOLERANCE_PT);
+            if only && may_empty && all_fits && !text.trim_end_matches(' ').is_empty() {
+                cut = text.len();
+            }
+            if cut == 0 || (cut == text.len() && only && !may_empty) {
+                break;
+            }
+            if cut == text.len() {
+                // The whole item goes up.
+                used += gap + width(cut);
+                let mut member = self.members.remove(0);
+                self.gone.extend(member.index.take());
+                if let Some(run) = &mut member.run {
+                    run.trimmed = 0;
+                }
+                pieces.push(member);
+                continue;
+            }
+            let mut head = Run {
+                item: run.item.clone(),
+                natural: shape(&run.item, &text[..cut]),
+                trimmed: 0,
+                typed: None,
+                hyphen: None,
+            };
+            head.item.text = text[..cut].into();
+            let piece = Member {
+                index: None,
+                x: Abs::zero(),
+                width: head.natural_width(),
+                gap,
+                new_x: Abs::zero(),
+                drop: first.drop,
+                run: Some(head),
+                rigid: None,
+            };
+            run.natural = shape(&run.item, &text[cut..]);
+            run.item.text = text[cut..].into();
+            first.gap = Abs::zero();
+            pieces.push(piece);
+            break;
+        }
+        (!pieces.is_empty()).then_some(Carry {
+            pieces,
+            ends_paragraph: false,
+        })
+    }
+
+    /// Puts words that came up from the line below at the end of this
+    /// line.
+    pub fn append(&mut self, carry: Carry) -> Result<(), Decline> {
+        let mut pieces = carry.pieces.into_iter().peekable();
+        let last = self
+            .members
+            .last_mut()
+            .and_then(|member| member.run.as_mut())
+            .ok_or(Decline::Break)?;
+        // The blank the line ended in stands between words again.
+        last.trimmed = 0;
+        if let Some(head) = pieces
+            .peek()
+            .and_then(|piece| piece.run.as_ref())
+            .filter(|head| same_style(&head.item, &last.item))
+        {
+            let mut text = last.item.text.to_string();
+            text.push_str(&head.item.text);
+            if text.len() > usize::from(u16::MAX) {
+                return Err(Decline::Inconsistent);
+            }
+            let natural = shape(&last.item, &text);
+            if natural.iter().any(|glyph| glyph.id == 0) {
+                return Err(Decline::MissingGlyph);
+            }
+            last.item.text = text.into();
+            last.natural = natural;
+            pieces.next();
+        }
+        self.members.extend(pieces);
+        // And the blanks the line ends in now are the ones swallowed.
+        if let Some(run) = self
+            .members
+            .last_mut()
+            .and_then(|member| member.run.as_mut())
+        {
+            let body = run.item.text.trim_end_matches(' ').len();
+            run.trimmed = run
+                .natural
+                .iter()
+                .filter(|glyph| glyph.range.start >= body)
+                .count();
+        }
+        Ok(())
+    }
+
     /// A line made of what the line before could not hold, with its left
     /// edge at `left` and its baseline at `baseline`, that may be `width`
     /// wide.
@@ -433,8 +607,8 @@ impl Line {
         }
         // A short line is placed directly among its neighbours. Lines that
         // start at the same left edge belong to the same column; the widest
-        // of them is the best available bound on the measure.
-        parent
+        // of them, or this line itself, is a lower bound on the measure.
+        let widest = parent
             .items()
             .enumerate()
             .filter(|(index, (pos, _))| !is_member(*index) && close(pos.x, self.left))
@@ -446,7 +620,30 @@ impl Line {
                 _ => None,
             })
             .reduce(Abs::max)
-            .ok_or(Decline::Alignment)
+            .ok_or(Decline::Alignment)?
+            .max(self.right);
+        // Ragged lines seldom reach the measure, so that bound is short
+        // of it. On a page of one column the measure ends as far from the
+        // right edge as the text begins from the left one, if the margins
+        // are equal, which is the best guess there is. Several lines that
+        // begin in the right half of the frame speak of a second column.
+        let starts = || {
+            parent.items().filter_map(|(pos, item)| match item {
+                FrameItem::Text(_) => Some(pos.x),
+                FrameItem::Group(group) if group.frame.kind().is_soft() => Some(pos.x),
+                _ => None,
+            })
+        };
+        let columns = starts().filter(|x| *x > parent.width() / 2.0).count() >= 3;
+        let margin = starts().fold(self.left, Abs::min);
+        let mirrored = parent.width() - margin;
+        Ok(
+            if !columns && !parent.kind().is_soft() && mirrored > widest {
+                mirrored
+            } else {
+                widest
+            },
+        )
     }
 
     /// Puts `text` in the place of bytes `range` of the text item
@@ -640,6 +837,10 @@ impl Line {
         }
         for (index, (pos, item)) in parent.items().enumerate() {
             if self.gone.contains(&index) {
+                // Nothing in its place, but something: the lines after
+                // this one know their items by their numbers.
+                let nothing = GroupItem::new(Frame::soft(Size::zero()));
+                out.push(*pos, FrameItem::Group(nothing));
                 continue;
             }
             if let Some(member) = self.members.iter().find(|m| m.index == Some(index)) {
