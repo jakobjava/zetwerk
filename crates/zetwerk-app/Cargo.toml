@@ -11,6 +11,7 @@ publish.workspace = true
 zetwerk-core.workspace = true
 zetwerk-typst.workspace = true
 zetwerk-render.workspace = true
+zetwerk-predict.workspace = true
 zetwerk-vim.workspace = true
 typst.workspace = true
 typst-layout.workspace = true

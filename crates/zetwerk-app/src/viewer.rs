@@ -11,14 +11,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tiny_skia::{Color, Pixmap};
+use typst::World;
+use typst::layout::Rect;
+use typst::syntax::{LinkedNode, Side, Source, SyntaxKind};
 use typst::utils::hash128;
-use typst_layout::PagedDocument;
+use typst_layout::{Page, PagedDocument};
 use zetwerk_core::{DiskError, DiskStatus, Opened};
+use zetwerk_predict::{Insertion, predict_insertion};
 use zetwerk_render::{PixelRegion, Tile, TileKey, page_size_px, tile_origins, tiles};
-use zetwerk_typst::{CompileOutput, Environment, Project, ProjectWorld};
+use zetwerk_typst::{CompileOutput, Environment, PageMap, Project, ProjectWorld};
 use zetwerk_vim::Effect;
 
-use crate::chrome::{self, Chrome, Image, ROW_HEIGHT, STATUS_HEIGHT, Status};
+use crate::chrome::{self, Chrome, Image, ROW_HEIGHT, RowText, STATUS_HEIGHT, Status};
 use crate::editor::{self, Editor};
 use crate::gpu::{Quad, TextureId};
 use crate::keys::{Key, KeyPress};
@@ -44,6 +48,12 @@ const PANE: [u8; 3] = [0x28, 0x28, 0x28];
 const SELECTION: [u8; 3] = [0x50, 0x49, 0x45];
 /// The colour of the cursor.
 const CURSOR: [u8; 3] = [0x7c, 0x6f, 0x64];
+/// The cursor on a page: a dark block over the character it is on, and
+/// in insert mode a bar before it. Colours are RGBA.
+const PAGE_CURSOR: [u8; 4] = [0x28, 0x28, 0x28, 0x66];
+const PAGE_BAR: [u8; 4] = [0x28, 0x28, 0x28, 0xff];
+/// The colour laid over selected text on a page.
+const PAGE_SELECTION: [u8; 4] = [0x45, 0x85, 0x88, 0x55];
 /// How many rows stay visible beyond the cursor when the source scrolls.
 const SCROLL_MARGIN: usize = 3;
 
@@ -60,12 +70,82 @@ pub enum Panes {
 /// What a key that changed the text means for compiling it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edited {
-    /// Text is being typed: compile once typing pauses.
+    /// Text is being typed, and the page shows it already or a compile
+    /// would take long: compile once typing pauses.
     Typing,
+    /// Text is being typed that the page cannot show without a compile,
+    /// and a compile is quick.
+    Unpredicted,
     /// A command changed the text.
     Command,
     /// Typing ended with changes not yet compiled.
     LeftInsert,
+}
+
+/// A compile shorter than this (in milliseconds) is run for every key
+/// that the page cannot show without one.
+const QUICK_COMPILE_MS: f64 = 12.0;
+
+/// A page as it should look with what was typed since the last compile,
+/// worked out without compiling. It is shown until the compile replaces it.
+struct Predicted {
+    /// Which page, counting from 0.
+    index: usize,
+    page: Page,
+    /// The cell of the typed text on the page, and where in the source it
+    /// ends: with the cursor there, the cursor is shown behind the cell.
+    typed: Rect,
+    end: usize,
+}
+
+/// How the text differs from the text the pages were compiled from.
+enum Difference<'a> {
+    Nothing,
+    /// `text` was put in at byte `offset`, and nothing else changed.
+    Insertion {
+        offset: usize,
+        text: &'a str,
+    },
+    Other,
+}
+
+/// Compares `new` with `old`.
+fn difference<'a>(old: &str, new: &'a str) -> Difference<'a> {
+    if old == new {
+        return Difference::Nothing;
+    }
+    let Some(longer) = new.len().checked_sub(old.len()).filter(|by| *by > 0) else {
+        return Difference::Other;
+    };
+    let mut prefix = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !new.is_char_boundary(prefix) || !new.is_char_boundary(prefix + longer) {
+        prefix -= 1;
+    }
+    if old.get(prefix..) == new.get(prefix + longer..) {
+        Difference::Insertion {
+            offset: prefix,
+            text: &new[prefix..prefix + longer],
+        }
+    } else {
+        Difference::Other
+    }
+}
+
+/// Whether bytes `offset..offset + len` of `source` are plain text of a
+/// paragraph: nothing Typst reads as markup, math or code. Only such text
+/// looks on the page like what was typed.
+fn is_plain_text(source: &Source, offset: usize, len: usize) -> bool {
+    LinkedNode::new(source.root())
+        .leaf_at(offset, Side::After)
+        .is_some_and(|leaf| {
+            leaf.kind() == SyntaxKind::Text
+                && leaf.range().start <= offset
+                && leaf.range().end >= offset + len
+        })
 }
 
 /// What the status line says instead of the file name.
@@ -116,6 +196,10 @@ pub struct Stats {
     /// Time from the last input event to its frame being submitted.
     pub latency_ms: f64,
     pub texture_bytes: u64,
+    /// Changes shown on the page without compiling, and changes that had
+    /// to wait for a compile.
+    pub predicted: u64,
+    pub declined: u64,
 }
 
 /// A summary of the viewer for the outside world.
@@ -171,12 +255,28 @@ pub struct Viewer {
     edited: Option<Edited>,
     /// The source pane's width in cells and height in rows, as last drawn.
     source_size: (usize, usize),
+    /// The width of its line numbers, of a cell and the height of a row,
+    /// in device pixels, as last drawn.
+    source_metrics: (f64, f64, f64),
     file: String,
     revision: u64,
     compiled_revision: Option<u64>,
     /// The last document that compiled. Stays on screen while a newer
     /// revision has errors.
     document: Option<Arc<PagedDocument>>,
+    /// The sources that document was compiled from, and for the pages
+    /// that have been asked about, where their glyphs come from in them.
+    compiled_world: Option<Arc<ProjectWorld>>,
+    maps: HashMap<usize, PageMap>,
+    /// The revision that document was compiled from. Differs from
+    /// `compiled_revision` while the newest text has errors.
+    document_revision: Option<u64>,
+    predicted: Option<Predicted>,
+    /// Where in the compiled text the last insertion was worked out for,
+    /// and the page it is on.
+    predicted_at: Option<(usize, usize)>,
+    /// Why the last change could not be shown without compiling.
+    declined: Option<String>,
     problems: Vec<String>,
     layout: Layout,
     view: Viewport,
@@ -218,10 +318,17 @@ impl Viewer {
             panes: Panes::Page,
             edited: None,
             source_size: (80, 40),
+            source_metrics: (0.0, 1.0, 1.0),
             file,
             revision: 0,
             compiled_revision: None,
             document: None,
+            compiled_world: None,
+            maps: HashMap::new(),
+            document_revision: None,
+            predicted: None,
+            predicted_at: None,
+            declined: None,
             problems: Vec::new(),
             layout: Layout::default(),
             view: Viewport {
@@ -489,7 +596,7 @@ impl Viewer {
     /// Scrolls the pages to where the text under the cursor is set, if the
     /// pages show the current text and that place is out of view.
     fn follow_cursor(&mut self) {
-        if !self.is_compiled() || self.panes == Panes::Source {
+        if self.document_revision != Some(self.revision) || self.panes == Panes::Source {
             return;
         }
         let (Some(editor), Some(document)) = (&self.editor, &self.document) else {
@@ -532,6 +639,11 @@ impl Viewer {
         };
         if let Some(document) = output.compiled.document {
             self.document = Some(Arc::new(document));
+            self.compiled_world = Some(Arc::clone(&output.world));
+            self.document_revision = Some(output.revision);
+            self.predicted = None;
+            self.predicted_at = None;
+            self.maps.clear();
             self.planned.clear();
             self.relayout();
             self.follow_cursor();
@@ -594,7 +706,7 @@ impl Viewer {
     /// A key was pressed.
     pub fn key(&mut self, press: KeyPress) {
         self.message = None;
-        if self.editor.is_some() && self.panes != Panes::Page {
+        if self.editor.is_some() {
             return self.editor_key(press);
         }
         if let Mode::Command(text) = &mut self.mode {
@@ -644,6 +756,67 @@ impl Viewer {
         }
     }
 
+    /// The pointer was pressed at this place in the window, in device
+    /// pixels: the cursor goes to the text there, in the source or on a
+    /// page.
+    pub fn click(&mut self, (x, y): (f64, f64)) {
+        let (source_width, page_left, _) = self.split();
+        let height = f64::from(self.window.1.saturating_sub(self.status_height()));
+        if self.editor.is_none() || y >= height {
+            return;
+        }
+        if x < f64::from(source_width) {
+            let (gutter, cell, row_height) = self.source_metrics;
+            let columns = self.source_size.0;
+            let row = (y / row_height).floor().max(0.0) as usize;
+            let across = ((x - gutter) / cell).floor().max(0.0) as usize;
+            if let Some(editor) = &mut self.editor {
+                let offset = editor.offset_at(columns, row, across);
+                editor.set_cursor(offset);
+            }
+        } else if self.document_revision == Some(self.revision) && self.predicted.is_none() {
+            // Only a page of the current text says where its glyphs come
+            // from.
+            let (Some(document), Some(world)) = (&self.document, &self.compiled_world) else {
+                return;
+            };
+            let zoom = self.view.zoom;
+            let file = self.project.main();
+            for visible in self.view.visible(&self.layout) {
+                let (Some(page), Some(page_box)) = (
+                    document.pages().get(visible.index),
+                    self.layout.pages.get(visible.index),
+                ) else {
+                    continue;
+                };
+                let left = f64::from(page_left) + visible.x as f64;
+                let top = visible.y as f64;
+                let inside = x >= left
+                    && x < left + f64::from(page_box.width)
+                    && y >= top
+                    && y < top + f64::from(page_box.height);
+                if !inside {
+                    continue;
+                }
+                let map = self
+                    .maps
+                    .entry(visible.index)
+                    .or_insert_with(|| PageMap::build(world, &page.frame));
+                let point = typst::layout::Point::new(
+                    typst::layout::Abs::pt((x - left) / zoom),
+                    typst::layout::Abs::pt((y - top) / zoom),
+                );
+                if let (Some((found, offset)), Some(editor)) =
+                    (map.source_at(point), &mut self.editor)
+                    && found == file
+                {
+                    editor.set_cursor(offset);
+                }
+                return;
+            }
+        }
+    }
+
     /// A key for the source text.
     fn editor_key(&mut self, press: KeyPress) {
         let Some(editor) = &mut self.editor else {
@@ -659,10 +832,13 @@ impl Viewer {
         }
         if typed.changed {
             self.revision += 1;
-            self.edited = Some(if typing {
+            let shown = self.predict();
+            self.edited = Some(if !typing {
+                Edited::Command
+            } else if shown || self.stats.compile_ms > QUICK_COMPILE_MS {
                 Edited::Typing
             } else {
-                Edited::Command
+                Edited::Unpredicted
             });
         } else if was_typing && !typing && !self.is_compiled() {
             self.edited = Some(Edited::LeftInsert);
@@ -681,6 +857,94 @@ impl Viewer {
         if moved {
             self.follow_cursor();
         }
+    }
+
+    /// Works out what the page looks like with the text as it is now, if
+    /// that can be done without compiling: if all that happened since the
+    /// last compile is plain text typed into one line of a paragraph.
+    /// Returns whether the pages show the current text afterwards.
+    fn predict(&mut self) -> bool {
+        if let Some(old) = self.predicted.take() {
+            self.planned.retain(|(index, _, _), _| *index != old.index);
+        }
+        match self.try_predict() {
+            Ok(()) => {
+                self.stats.predicted += 1;
+                self.declined = None;
+                true
+            }
+            Err(why) => {
+                self.stats.declined += 1;
+                self.declined = Some(why);
+                false
+            }
+        }
+    }
+
+    /// See [`Viewer::predict`]. The error says why the page cannot be
+    /// worked out.
+    fn try_predict(&mut self) -> Result<(), String> {
+        let (Some(editor), Some(document), Some(world)) =
+            (&self.editor, &self.document, &self.compiled_world)
+        else {
+            return Err("nothing compiled yet".to_owned());
+        };
+        let file = self.project.main();
+        let base = world
+            .source(file)
+            .map_err(|_| "the compiled source is gone".to_owned())?;
+        let (offset, text) = match difference(base.text(), editor.text()) {
+            Difference::Nothing => {
+                // Back at the text the pages show.
+                self.document_revision = Some(self.revision);
+                self.compiled_revision = Some(self.revision);
+                return Ok(());
+            }
+            Difference::Insertion { offset, text } => (offset, text),
+            Difference::Other => return Err("more than text typed in one place".to_owned()),
+        };
+        if !is_plain_text(editor.source(), offset, text.len()) {
+            return Err("not plain text of a paragraph".to_owned());
+        }
+        // The page is that of the text next to the insertion. While typing
+        // goes on in one place it stays the same page, and is not looked
+        // for again.
+        let index = match self.predicted_at {
+            Some((at, index)) if at == offset => index,
+            _ => zetwerk_typst::locate(document, &base, offset.saturating_sub(1))
+                .map(|position| position.page)
+                .ok_or("the text is on no page")?,
+        };
+        self.predicted_at = Some((offset, index));
+        let page = document
+            .pages()
+            .get(index)
+            .ok_or("the text is on no page")?;
+        let map = self
+            .maps
+            .entry(index)
+            .or_insert_with(|| PageMap::build(world, &page.frame));
+        let insertion = Insertion { file, offset, text };
+        let prediction =
+            predict_insertion(&page.frame, map, insertion).map_err(|why| format!("{why:?}"))?;
+        self.planned.retain(|(planned, _, _), _| *planned != index);
+        self.predicted = Some(Predicted {
+            index,
+            page: Page {
+                frame: prediction.frame,
+                ..page.clone()
+            },
+            typed: prediction.typed,
+            end: offset + text.len(),
+        });
+        Ok(())
+    }
+
+    /// Whether the pages show text that has not been compiled, worked out
+    /// from what was typed.
+    #[must_use]
+    pub fn is_predicted(&self) -> bool {
+        self.predicted.is_some()
     }
 
     fn execute(&mut self, command: &str) {
@@ -786,8 +1050,13 @@ impl Viewer {
         }
         let zoom = self.view.zoom;
         for visible in self.view.visible(&self.layout) {
+            let predicted = self
+                .predicted
+                .as_ref()
+                .filter(|predicted| predicted.index == visible.index)
+                .map(|predicted| predicted.page.clone());
             let (Some(page), Some(page_box)) = (
-                document.pages().get(visible.index),
+                predicted.as_ref().or(document.pages().get(visible.index)),
                 self.layout.pages.get(visible.index),
             ) else {
                 continue;
@@ -831,6 +1100,73 @@ impl Viewer {
                 let tiles = wanted.iter().map(|tile| (tile.key, tile.region)).collect();
                 self.shown.insert(visible.index, Shown { zoom, tiles });
             }
+            self.page_cursor(scene, has, visible.index, origin);
+        }
+    }
+
+    /// The cursor and the selection where the text they are on is set on
+    /// page `index`, whose top-left corner is drawn at `origin`.
+    ///
+    /// Only while the pages show the current text: after an edit the
+    /// glyphs on them no longer say where in the source they come from.
+    fn page_cursor(
+        &mut self,
+        scene: &mut Scene,
+        has: &dyn Fn(TextureId) -> bool,
+        index: usize,
+        origin: (f64, f64),
+    ) {
+        let zoom = self.view.zoom;
+        let bar = (1.5 * self.scale).round().max(1.0);
+        if let (Some(predicted), Some(editor)) = (&self.predicted, &self.editor) {
+            // The page is a predicted one: all that is known of it is
+            // where the typed text is.
+            if predicted.index == index && editor.cursor() == predicted.end {
+                let cell = predicted.typed;
+                let x = origin.0 + cell.max.x.to_pt() * zoom;
+                let y = origin.1 + cell.min.y.to_pt() * zoom;
+                let height = (cell.max.y - cell.min.y).to_pt() * zoom;
+                tint(scene, has, PAGE_BAR, (x.round(), y, bar, height));
+            }
+            return;
+        }
+        if self.document_revision != Some(self.revision) {
+            return;
+        }
+        let (Some(editor), Some(document), Some(world)) =
+            (&self.editor, &self.document, &self.compiled_world)
+        else {
+            return;
+        };
+        let Some(page) = document.pages().get(index) else {
+            return;
+        };
+        let map = self
+            .maps
+            .entry(index)
+            .or_insert_with(|| PageMap::build(world, &page.frame));
+        let file = self.project.main();
+        let place = |rect: Rect| {
+            (
+                origin.0 + rect.min.x.to_pt() * zoom,
+                origin.1 + rect.min.y.to_pt() * zoom,
+                (rect.max.x - rect.min.x).to_pt() * zoom,
+                (rect.max.y - rect.min.y).to_pt() * zoom,
+            )
+        };
+        if let Some(selection) = editor.selection() {
+            for rect in map.selection(file, &selection) {
+                tint(scene, has, PAGE_SELECTION, place(rect));
+            }
+        }
+        if let Some(caret) = map.caret(file, editor.cursor()) {
+            let (x, y, width, height) = place(caret.cell);
+            if editor.mode() == editor::Mode::Insert || caret.after {
+                let x = if caret.after { x + width } else { x };
+                tint(scene, has, PAGE_BAR, (x.round(), y, bar, height));
+            } else {
+                tint(scene, has, PAGE_CURSOR, (x, y, width.max(bar), height));
+            }
         }
     }
 
@@ -859,6 +1195,7 @@ impl Viewer {
         let columns = ((f64::from(width) - gutter - cell) / cell).floor().max(8.0) as usize;
         let visible = (height / row_height).floor().max(1.0) as usize;
         self.source_size = (columns, visible);
+        self.source_metrics = (gutter, cell, row_height);
         let top = editor.scroll_into_view(columns, visible, SCROLL_MARGIN);
         editor.set_view(columns, visible);
         let (cursor, selection, mode) = (editor.cursor(), editor.selection(), editor.mode());
@@ -870,6 +1207,7 @@ impl Viewer {
         let cursor_row = editor::row_of(rows, cursor);
         let text = editor.text();
 
+        let mut texts: Vec<(RowText, (f64, f64))> = Vec::new();
         for (index, row) in shown.iter().enumerate() {
             let y = index as f64 * row_height;
             let at = |offset: usize| {
@@ -902,8 +1240,11 @@ impl Viewer {
             if row.first {
                 let number = (row.line + 1).to_string();
                 let x = (digits - number.len().min(digits)) as f64 * cell + cell / 2.0;
-                let markup = chrome::row_markup(&number, true);
-                row_image(&mut self.chrome, scene, has, &markup, scale, (x, y));
+                let number = RowText {
+                    text: number,
+                    dim: true,
+                };
+                texts.push((number, (x, y)));
             }
             let content = &text[row.range.clone()];
             let body = content.trim_start_matches([' ', '\t']);
@@ -912,19 +1253,20 @@ impl Viewer {
                 .trim_end()
                 .replace('\t', &" ".repeat(editor::TAB_CELLS));
             if !body.is_empty() {
-                let markup = chrome::row_markup(&body, false);
                 let x = gutter + indent as f64 * cell;
-                row_image(&mut self.chrome, scene, has, &markup, scale, (x, y));
+                let body = RowText {
+                    text: body,
+                    dim: false,
+                };
+                texts.push((body, (x, y)));
             }
         }
+        row_images(&mut self.chrome, scene, has, &texts, scale);
     }
 
     fn status_line(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {
         let state = self.state();
-        let editing = match self.panes {
-            Panes::Page => None,
-            _ => state.editing.as_ref(),
-        };
+        let editing = state.editing.as_ref();
         let replacing = editing.is_some_and(|editing| editing.replacing);
         let mode = match (&self.mode, editing.map(|editing| editing.mode)) {
             (_, Some(editor::Mode::Insert)) if replacing => "REPLACE",
@@ -1001,6 +1343,18 @@ impl Viewer {
             ("compile", format!("{:.1} ms", stats.compile_ms)),
             ("compiles", stats.compiles.to_string()),
             ("tiles rasterized", stats.tiles.to_string()),
+            (
+                "shown uncompiled",
+                format!(
+                    "{} of {}",
+                    stats.predicted,
+                    stats.predicted + stats.declined
+                ),
+            ),
+            (
+                "last not shown",
+                self.declined.clone().unwrap_or_else(|| "–".to_owned()),
+            ),
             ("tile memory", format!("{megabytes:.0} MB")),
         ];
         let margin = PANEL_MARGIN * self.scale;
@@ -1067,37 +1421,63 @@ fn tiles_in(
     })
 }
 
-/// Draws the image of `markup` at `position`, making it only if the
-/// compositor does not hold it already.
-fn row_image(
+/// Draws the images of `rows` at their positions, making those the
+/// compositor does not hold already, all at once.
+fn row_images(
     chrome: &mut Chrome,
     scene: &mut Scene,
     has: &dyn Fn(TextureId) -> bool,
-    markup: &str,
+    rows: &[(RowText, (f64, f64))],
     scale: f64,
-    (x, y): (f64, f64),
 ) {
-    let id = Chrome::id(markup, scale);
-    let pending = scene.images.iter().any(|image| image.id == id);
-    let size = match chrome.size_of(id) {
-        Some(size) if pending || has(id) => size,
-        _ => {
-            let Some(image) = chrome.render_once(markup, scale) else {
-                return;
-            };
-            let size = (image.pixmap.width(), image.pixmap.height());
-            if !pending {
-                scene.images.push(image);
-            }
-            size
+    let mut missing: Vec<RowText> = Vec::new();
+    for (row, _) in rows {
+        let id = Chrome::row_id(row, scale);
+        let known = chrome.size_of(id).is_some() && has(id);
+        if !known && !missing.contains(row) {
+            missing.push(row.clone());
         }
-    };
+    }
+    scene.images.extend(chrome.render_rows(&missing, scale));
+    for (row, (x, y)) in rows {
+        let id = Chrome::row_id(row, scale);
+        let Some(size) = chrome.size_of(id) else {
+            continue;
+        };
+        scene.quads.push(Quad {
+            texture: id,
+            x: x.round() as f32,
+            y: y.round() as f32,
+            width: size.0 as f32,
+            height: size.1 as f32,
+        });
+    }
+}
+
+/// Lays a colour that may be partly transparent over a rectangle.
+fn tint(
+    scene: &mut Scene,
+    has: &dyn Fn(TextureId) -> bool,
+    rgba: [u8; 4],
+    (x, y, width, height): (f64, f64, f64, f64),
+) {
+    let id = TextureId(hash128(&("tint", rgba)));
+    if !has(id)
+        && !scene.images.iter().any(|image| image.id == id)
+        && let Some(mut pixmap) = Pixmap::new(1, 1)
+    {
+        pixmap.fill(Color::from_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]));
+        scene.images.push(Image {
+            id,
+            pixmap: Arc::new(pixmap),
+        });
+    }
     scene.quads.push(Quad {
         texture: id,
-        x: x.round() as f32,
-        y: y.round() as f32,
-        width: size.0 as f32,
-        height: size.1 as f32,
+        x: x as f32,
+        y: y as f32,
+        width: width as f32,
+        height: height as f32,
     });
 }
 
@@ -1378,7 +1758,9 @@ mod tests {
 
         press(&mut viewer, "iHello ");
         assert_eq!(viewer.text(), Some("Hello world\n"));
-        assert_eq!(viewer.take_edited(), Some(Edited::Typing));
+        // So short a text tells too little about its lines for the page
+        // to be worked out; it is quick to compile instead.
+        assert_eq!(viewer.take_edited(), Some(Edited::Unpredicted));
         assert!(!viewer.is_compiled());
         let editing = viewer.state().editing.unwrap();
         assert_eq!(editing.mode, editor::Mode::Insert);
@@ -1536,19 +1918,146 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_is_shown_on_the_page() {
+        let (mut viewer, directory) = editing("Hello *there* world.\n");
+        let held: HashSet<TextureId> = HashSet::new();
+        let count = |viewer: &mut Viewer, rgba: [u8; 4]| {
+            let id = TextureId(hash128(&("tint", rgba)));
+            let scene = viewer.scene(&|id| held.contains(&id));
+            scene.quads.iter().filter(|quad| quad.texture == id).count()
+        };
+        assert_eq!(count(&mut viewer, PAGE_CURSOR), 1);
+        assert_eq!(count(&mut viewer, PAGE_SELECTION), 0);
+        // On markup that sets no glyph of its own there is no cursor to
+        // show; on the text after it there is again.
+        press(&mut viewer, "f*");
+        assert_eq!(count(&mut viewer, PAGE_CURSOR), 0);
+        press(&mut viewer, "l");
+        assert_eq!(count(&mut viewer, PAGE_CURSOR), 1);
+        // A selection over two words and the markup between them.
+        press(&mut viewer, "0vee");
+        assert!(count(&mut viewer, PAGE_SELECTION) >= 1);
+        press(&mut viewer, "<Esc>");
+        // After an edit the page is that of other text: no cursor on it
+        // until it is compiled again.
+        press(&mut viewer, "0x");
+        assert_eq!(count(&mut viewer, PAGE_CURSOR), 0);
+        compile(&mut viewer);
+        assert_eq!(count(&mut viewer, PAGE_CURSOR), 1);
+        // In insert mode the cursor is a bar.
+        press(&mut viewer, "i");
+        assert_eq!(count(&mut viewer, PAGE_BAR), 1);
+        // Text that does not compile leaves the old page, and that is not
+        // a page of this text.
+        press(&mut viewer, "<Esc>f*x");
+        compile(&mut viewer);
+        assert!(viewer.is_compiled() && !viewer.state().problems.is_empty());
+        assert_eq!(count(&mut viewer, PAGE_CURSOR), 0);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn typing_shows_on_the_page_without_a_compile() {
+        // A paragraph of several lines tells how wide a line may get.
+        let text = "#set page(width: 300pt, height: 200pt)\n\
+                    The quick brown fox jumps.\n\n\
+                    Second paragraph here, which goes on for long enough to \
+                    be broken into more than one line of the page.\n";
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "/brown<CR>ivery ");
+        assert!(viewer.is_predicted(), "{:?}", viewer.declined);
+        assert_eq!(viewer.take_edited(), Some(Edited::Typing));
+        // The cursor is shown behind what was typed.
+        let held: HashSet<TextureId> = HashSet::new();
+        let bar = TextureId(hash128(&("tint", PAGE_BAR)));
+        let scene = viewer.scene(&|id| held.contains(&id));
+        assert_eq!(
+            scene
+                .quads
+                .iter()
+                .filter(|quad| quad.texture == bar)
+                .count(),
+            1
+        );
+        // What is shown is what the compile then makes of the text.
+        let predicted = viewer
+            .predicted
+            .as_ref()
+            .map(|predicted| predicted.page.clone());
+        let predicted = zetwerk_render::render_page(&predicted.unwrap(), 2.0);
+        compile(&mut viewer);
+        assert!(!viewer.is_predicted());
+        let document = viewer.document().unwrap();
+        let compiled = zetwerk_render::render_page(&document.pages()[0], 2.0);
+        assert!(
+            predicted.data() == compiled.data(),
+            "the prediction differs from the compile"
+        );
+
+        // Markup is not text to be shown as typed: that takes a compile,
+        // asked for at once where compiles are quick.
+        press(&mut viewer, "*");
+        assert!(!viewer.is_predicted());
+        assert_eq!(viewer.take_edited(), Some(Edited::Unpredicted));
+        // Taken back, the pages are those of the text again.
+        press(&mut viewer, "<BS>");
+        assert!(viewer.is_compiled());
+        // Typing on, then back over part of it, is one insertion still.
+        press(&mut viewer, "big<BS>");
+        assert!(viewer.is_predicted());
+        assert_eq!(
+            viewer.text().map(|text| text.contains("very bibrown")),
+            Some(true)
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_click_puts_the_cursor_on_the_text_under_it() {
+        let (mut viewer, directory) = editing("Hello there world.\n\nSecond paragraph.\n");
+        let held: HashSet<TextureId> = HashSet::new();
+        // Find where the cursor is drawn on the page for a word, move
+        // away, and click there.
+        press(&mut viewer, "/there<CR>");
+        let block = TextureId(hash128(&("tint", PAGE_CURSOR)));
+        let scene = viewer.scene(&|id| held.contains(&id));
+        let quad = scene
+            .quads
+            .iter()
+            .find(|quad| quad.texture == block)
+            .unwrap();
+        let on_the_t = (
+            f64::from(quad.x) + 1.0,
+            f64::from(quad.y) + f64::from(quad.height) / 2.0,
+        );
+        press(&mut viewer, "G");
+        assert_eq!(viewer.state().editing.unwrap().line, 3);
+        viewer.click(on_the_t);
+        let editing = viewer.state().editing.unwrap();
+        assert_eq!((editing.line, editing.column), (1, 7));
+        // And in the source: the third row, a few cells in.
+        let (gutter, cell, row_height) = viewer.source_metrics;
+        viewer.click((gutter + 7.5 * cell, 2.5 * row_height));
+        let editing = viewer.state().editing.unwrap();
+        assert_eq!((editing.line, editing.column), (3, 8));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn the_panes_can_be_switched() {
         let (mut viewer, directory) = editing("one\ntwo\n");
         press(&mut viewer, "gs");
         assert_eq!(viewer.panes(), Panes::Source);
         press(&mut viewer, "gs");
         assert_eq!(viewer.panes(), Panes::Page);
-        // With only pages shown, keys are for the pages.
+        // With only pages shown, keys still edit: the cursor is on the
+        // page.
         press(&mut viewer, "x");
-        assert_eq!(viewer.text(), Some("one\ntwo\n"));
+        assert_eq!(viewer.text(), Some("ne\ntwo\n"));
         press(&mut viewer, "gs");
         assert_eq!(viewer.panes(), Panes::Split);
         press(&mut viewer, "x");
-        assert_eq!(viewer.text(), Some("ne\ntwo\n"));
+        assert_eq!(viewer.text(), Some("e\ntwo\n"));
         press(&mut viewer, ":view source<CR>");
         assert_eq!(viewer.panes(), Panes::Source);
         let _ = std::fs::remove_dir_all(directory);

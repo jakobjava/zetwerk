@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use typst_layout::PagedDocument;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -366,6 +366,11 @@ impl Session {
                 });
                 self.after_keys();
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => self.viewer.click(self.cursor),
             WindowEvent::MouseWheel { delta, .. } => {
                 let line = 60.0 * self.window.scale_factor();
                 let (dx, dy) = match delta {
@@ -422,7 +427,7 @@ impl Session {
         let urgency = match edited {
             Edited::Typing => Urgency::WhenIdle,
             Edited::Command if rapid => Urgency::WhenIdle,
-            Edited::Command | Edited::LeftInsert => Urgency::Now,
+            Edited::Command | Edited::LeftInsert | Edited::Unpredicted => Urgency::Now,
         };
         if edited == Edited::Command {
             self.last_edit = Some(now);

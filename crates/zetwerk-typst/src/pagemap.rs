@@ -8,11 +8,12 @@
 //! classified here, and only glyphs that verifiably show the exact source
 //! bytes they point at count as editable.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use typst::World;
 use typst::layout::{Abs, Frame, FrameItem, Point, Rect, Transform};
-use typst::syntax::{FileId, LinkedNode, Source, Span, SyntaxKind};
+use typst::syntax::{FileId, Source, Span, SyntaxKind, SyntaxNode};
 use typst::text::TextItem;
 
 use crate::ProjectWorld;
@@ -94,6 +95,7 @@ impl PageMap {
             glyphs: Vec::new(),
             path: Vec::new(),
             resolved: None,
+            indexes: HashMap::new(),
         };
         builder.frame(frame, Transform::identity());
         Self {
@@ -113,6 +115,204 @@ impl PageMap {
     pub fn glyphs(&self) -> &[MappedGlyph] {
         &self.glyphs
     }
+
+    /// Where on the page the cursor at byte `offset` of `file` is: the
+    /// cell of the glyph that shows the text there. `None` if no glyph on
+    /// this page does, as for markup and code that set nothing themselves.
+    #[must_use]
+    pub fn caret(&self, file: FileId, offset: usize) -> Option<Caret> {
+        let mut inside = None;
+        let mut behind = None;
+        for glyph in &self.glyphs {
+            let Some(range) = glyph.origin.range_in(file) else {
+                continue;
+            };
+            if range.start == offset {
+                // The glyph that begins here: nothing fits better.
+                return Some(Caret {
+                    cell: glyph.rect,
+                    after: false,
+                });
+            }
+            if range.contains(&offset) {
+                inside.get_or_insert(glyph.rect);
+            } else if range.end == offset {
+                behind = Some(glyph.rect);
+            }
+        }
+        inside
+            .map(|cell| Caret { cell, after: false })
+            .or(behind.map(|cell| Caret { cell, after: true }))
+    }
+
+    /// The place in the source that `point` on the page stands for: the
+    /// file and byte of the nearest glyph that shows source text, before
+    /// or behind it depending on which half of it the point is in. Glyphs
+    /// on the point's line count as nearer than any on another line.
+    #[must_use]
+    pub fn source_at(&self, point: Point) -> Option<(FileId, usize)> {
+        let mut best: Option<(f64, FileId, usize)> = None;
+        for glyph in &self.glyphs {
+            let (file, range, splits) = match &glyph.origin {
+                Origin::Text { file, range } => (*file, range, true),
+                Origin::Space { file, range } | Origin::Math { file, range } => {
+                    (*file, range, false)
+                }
+                Origin::Atomic(_) => continue,
+            };
+            let cell = glyph.rect;
+            let beside = (cell.min.x - point.x)
+                .max(point.x - cell.max.x)
+                .max(Abs::zero());
+            let above = (cell.min.y - point.y)
+                .max(point.y - cell.max.y)
+                .max(Abs::zero());
+            let distance = above.to_pt() * 1000.0 + beside.to_pt();
+            if best.is_none_or(|(nearest, _, _)| distance < nearest) {
+                let behind = splits && point.x > cell.min.x + (cell.max.x - cell.min.x) / 2.0;
+                let offset = if behind { range.end } else { range.start };
+                best = Some((distance, file, offset));
+            }
+        }
+        best.map(|(_, file, offset)| (file, offset))
+    }
+
+    /// The cells of the glyphs that show bytes `range` of `file`, joined
+    /// where they stand side by side on a line.
+    #[must_use]
+    pub fn selection(&self, file: FileId, range: &Range<usize>) -> Vec<Rect> {
+        let mut rects: Vec<Rect> = Vec::new();
+        for glyph in &self.glyphs {
+            let selected = glyph
+                .origin
+                .range_in(file)
+                .is_some_and(|shown| shown.start < range.end && shown.end > range.start);
+            if !selected {
+                continue;
+            }
+            let cell = glyph.rect;
+            let slack = Abs::pt(0.5);
+            match rects.last_mut() {
+                Some(last)
+                    if (last.min.y - cell.min.y).abs() < slack
+                        && (last.max.y - cell.max.y).abs() < slack
+                        && cell.min.x >= last.min.x
+                        && cell.min.x <= last.max.x + slack =>
+                {
+                    last.max.x = last.max.x.max(cell.max.x);
+                }
+                _ => rects.push(cell),
+            }
+        }
+        rects
+    }
+}
+
+/// Where a cursor is on a page.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Caret {
+    /// The cell of a glyph, in page coordinates.
+    pub cell: Rect,
+    /// Whether the cursor is behind that glyph (at the end of the text it
+    /// shows) and not on it.
+    pub after: bool,
+}
+
+impl Origin {
+    /// The bytes of `file` this glyph stands for, if it stands for any.
+    fn range_in(&self, file: FileId) -> Option<&Range<usize>> {
+        match self {
+            Self::Text { file: of, range }
+            | Self::Space { file: of, range }
+            | Self::Math { file: of, range }
+                if *of == file =>
+            {
+                Some(range)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Finds the syntax node a span belongs to.
+///
+/// `Source::find` walks the children of the root one by one, which for a
+/// long file with thousands of paragraphs costs milliseconds per page.
+/// Span numbers grow along the tree, so the child of the root to look in
+/// can be found by bisection; below it the trees are small.
+struct SpanIndex {
+    source: Source,
+    /// The span number and the byte offset of every child of the root.
+    children: Vec<(u64, usize)>,
+}
+
+/// What a span was found to be: its bytes, its kind, and whether it is
+/// part of an equation.
+type Found = (Range<usize>, SyntaxKind, bool);
+
+impl SpanIndex {
+    fn new(source: Source) -> Self {
+        let mut offset = 0;
+        let children = source
+            .root()
+            .children()
+            .map(|child| {
+                let entry = (number(child.span()), offset);
+                offset += child.len();
+                entry
+            })
+            .collect();
+        Self { source, children }
+    }
+
+    fn find(&self, span: Span) -> Option<Found> {
+        let root = self.source.root();
+        if root.span() == span {
+            return Some((0..root.len(), root.kind(), false));
+        }
+        let target = number(span);
+        let index = self
+            .children
+            .partition_point(|(first, _)| *first <= target)
+            .checked_sub(1)?;
+        let child = root.children().as_slice().get(index)?;
+        descend(child, self.children[index].1, span, target, false)
+    }
+}
+
+/// A span's number within its file.
+fn number(span: Span) -> u64 {
+    span.into_raw().get() & ((1 << 48) - 1)
+}
+
+fn descend(
+    node: &SyntaxNode,
+    mut offset: usize,
+    span: Span,
+    target: u64,
+    in_equation: bool,
+) -> Option<Found> {
+    let in_equation = in_equation || node.kind() == SyntaxKind::Equation;
+    if node.span() == span {
+        return Some((offset..offset + node.len(), node.kind(), in_equation));
+    }
+    // A node has a smaller number than everything below it, and all of a
+    // child's subtree has smaller numbers than the next child.
+    if target < number(node.span()) {
+        return None;
+    }
+    let mut children = node.children().peekable();
+    while let Some(child) = children.next() {
+        if children
+            .peek()
+            .is_none_or(|next| number(next.span()) > target)
+            && let Some(found) = descend(child, offset, span, target, in_equation)
+        {
+            return Some(found);
+        }
+        offset += child.len();
+    }
+    None
 }
 
 struct Builder<'a> {
@@ -124,6 +324,7 @@ struct Builder<'a> {
     /// The node the previous glyph resolved to. Neighbouring glyphs nearly
     /// always share a span, and finding a node means a tree search.
     resolved: Option<(Span, Resolved)>,
+    indexes: HashMap<FileId, SpanIndex>,
 }
 
 /// What a span points at.
@@ -230,28 +431,33 @@ impl Builder<'_> {
         }
     }
 
-    fn resolve(&self, span: Span) -> Resolved {
+    fn resolve(&mut self, span: Span) -> Resolved {
         let Some(file) = span.id() else {
             return Resolved::Unmappable(Atomic::Detached);
         };
         if !self.world.is_editable(file) {
             return Resolved::Unmappable(Atomic::ForeignFile);
         }
-        let Ok(source) = self.world.source(file) else {
-            return Resolved::Unmappable(Atomic::ForeignFile);
+        let index = match self.indexes.entry(file) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let Ok(source) = self.world.source(file) else {
+                    return Resolved::Unmappable(Atomic::ForeignFile);
+                };
+                entry.insert(SpanIndex::new(source))
+            }
         };
-        let Some(node) = source.find(span) else {
+        let Some((range, kind, in_equation)) = index.find(span) else {
             return Resolved::Unmappable(Atomic::Detached);
         };
-        let kind = match node.kind() {
-            _ if in_equation(&node) => NodeKind::Math,
+        let kind = match kind {
+            _ if in_equation => NodeKind::Math,
             SyntaxKind::Text => NodeKind::Text,
             SyntaxKind::Space => NodeKind::Space,
             other => return Resolved::Unmappable(Atomic::Markup(other)),
         };
-        let range = node.range();
         Resolved::Node {
-            source: source.clone(),
+            source: index.source.clone(),
             file,
             range,
             kind,
@@ -259,18 +465,6 @@ impl Builder<'_> {
     }
 }
 
-fn in_equation(node: &LinkedNode) -> bool {
-    let mut current = Some(node);
-    while let Some(node) = current {
-        if node.kind() == SyntaxKind::Equation {
-            return true;
-        }
-        current = node.parent();
-    }
-    false
-}
-
-/// The axis-aligned box around `rect` after `transform`.
 fn transform_rect(rect: Rect, transform: Transform) -> Rect {
     let corners = [
         rect.min,

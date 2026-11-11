@@ -97,20 +97,55 @@ impl Chrome {
         ))
     }
 
-    /// Like [`Chrome::render`], without keeping the image: for the rows of
-    /// the source pane, which are many, and which the compositor keeps for
-    /// as long as they are drawn. Only the size is remembered.
-    pub fn render_once(&mut self, markup: &str, scale: f64) -> Option<Image> {
-        let id = Self::id(markup, scale);
-        let pixmap = Arc::new(self.rasterize(markup, scale)?);
+    /// The name of the image of a row of the source pane.
+    #[must_use]
+    pub fn row_id(row: &RowText, scale: f64) -> TextureId {
+        TextureId(hash128(&("row", &row.text, row.dim, scale.to_bits())))
+    }
+
+    /// Images of rows of the source pane, one for each of `rows`, typeset
+    /// together: a screenful of rows costs one compile, not one each.
+    ///
+    /// The images are not kept here. The rows are many, and the compositor
+    /// keeps them for as long as they are drawn; only their sizes are
+    /// remembered.
+    pub fn render_rows(&mut self, rows: &[RowText], scale: f64) -> Vec<Image> {
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let mut markup = row_preamble(false);
+        for (index, row) in rows.iter().enumerate() {
+            if index > 0 {
+                markup.push_str("#pagebreak()\n");
+            }
+            let color = if row.dim { DIM } else { FOREGROUND };
+            let _ = writeln!(
+                markup,
+                "#text(fill: rgb(\"{color}\"), {})",
+                string(&row.text)
+            );
+        }
+        self.project.set_main_text(&markup);
+        let document = zetwerk_typst::compile(&self.project.snapshot()).document;
+        zetwerk_typst::forget_unused(UNUSED_ROUNDS);
+        let Some(document) = document else {
+            return Vec::new();
+        };
         if self.sizes.len() >= SIZES_KEPT {
             self.sizes.clear();
         }
-        self.sizes.insert(id, (pixmap.width(), pixmap.height()));
-        Some(Image { id, pixmap })
+        rows.iter()
+            .zip(document.pages())
+            .map(|(row, page)| {
+                let id = Self::row_id(row, scale);
+                let pixmap = Arc::new(zetwerk_render::render_page(page, scale));
+                self.sizes.insert(id, (pixmap.width(), pixmap.height()));
+                Image { id, pixmap }
+            })
+            .collect()
     }
 
-    /// The size in pixels of an image made by [`Chrome::render_once`], if
+    /// The size in pixels of an image made by [`Chrome::render_rows`], if
     /// it is still known.
     #[must_use]
     pub fn size_of(&self, id: TextureId) -> Option<(u32, u32)> {
@@ -127,7 +162,7 @@ impl Chrome {
         {
             return width;
         }
-        let markup = row_markup(&"M".repeat(SAMPLE), false);
+        let markup = format!("{}#{}", row_preamble(false), string(&"M".repeat(SAMPLE)));
         let width = self.rasterize(&markup, scale).map_or(
             // Should the sample not render, a usual width for such a font.
             SOURCE_SIZE * 0.6 * scale,
@@ -198,18 +233,25 @@ pub fn status_markup(status: &Status, width: f64) -> String {
     )
 }
 
-/// Markup for one row of the source pane: `text` on one line, on nothing.
-/// The image is as wide as the text. Blanks at either end of `text` may get
-/// lost; the caller places the image where the first other character goes.
-#[must_use]
-pub fn row_markup(text: &str, dim: bool) -> String {
+/// The text of one row of the source pane. Blanks at either end may get
+/// lost in its image; the caller places the image where the first other
+/// character goes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowText {
+    pub text: String,
+    /// Whether it is set in the dimmer colour, as line numbers are.
+    pub dim: bool,
+}
+
+/// What the markup for rows of the source pane begins with: a page as wide
+/// as its text and one row high, on nothing.
+fn row_preamble(dim: bool) -> String {
     let color = if dim { DIM } else { FOREGROUND };
     format!(
         r#"#set page(width: auto, height: {ROW_HEIGHT}pt, margin: 0pt, fill: none)
 #set text(font: "{FONT}", size: {SOURCE_SIZE}pt, fill: rgb("{color}"), top-edge: "ascender", bottom-edge: "descender", ligatures: false, kerning: false, hyphenate: false)
 #set align(horizon)
-#{text}"#,
-        text = string(text),
+"#
     )
 }
 

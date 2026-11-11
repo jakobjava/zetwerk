@@ -184,6 +184,34 @@ impl Editor {
         self.engine.set_page_lines(visible.saturating_sub(2));
     }
 
+    /// Puts the cursor at byte `offset` of the text, or as near as it may
+    /// be.
+    pub fn set_cursor(&mut self, offset: usize) {
+        self.engine.set_cursor(offset, self.document.text());
+    }
+
+    /// The byte of the text shown at `cell` of row `row` of a pane
+    /// `columns` cells wide; past the end of a row, the row's end.
+    pub fn offset_at(&mut self, columns: usize, row: usize, cell: usize) -> usize {
+        let row = self.top + row;
+        let rows = self.rows(columns);
+        let Some(range) = rows
+            .get(row.min(rows.len().saturating_sub(1)))
+            .map(|row| row.range.clone())
+        else {
+            return 0;
+        };
+        let text = &self.text()[range.clone()];
+        let mut cells_before = 0;
+        for (at, c) in text.char_indices() {
+            cells_before += cells_of(c);
+            if cells_before > cell {
+                return range.start + at;
+            }
+        }
+        range.end
+    }
+
     /// Whether typing replaces the characters under the cursor (`R`).
     #[must_use]
     pub fn replacing(&self) -> bool {
