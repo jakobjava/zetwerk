@@ -29,6 +29,7 @@ const DIM: &str = "#928374";
 const ACCENT: &str = "#fabd2f";
 const ALERT: &str = "#fb4934";
 const ADDED: &str = "#b8bb26";
+const CHOSEN: &str = "#504945";
 const FONT: &str = "DejaVu Sans Mono";
 
 /// How many chrome renders a result in Typst's cache may go unused before
@@ -302,6 +303,61 @@ pub fn proposal_markup(title: &str, hint: &str, old: &[String], new: &[String]) 
 {lines})"#,
         title = string(title),
         hint = string(hint),
+    )
+}
+
+/// Markup for a list to choose from: `rows` of a name and a word about
+/// it, the `chosen` one set off; over it a `title`, under it a line of
+/// `detail` about the chosen one, where there are any.
+#[must_use]
+pub fn list_markup(
+    title: Option<&str>,
+    rows: &[(String, String)],
+    chosen: usize,
+    detail: Option<&str>,
+) -> String {
+    let mut lines = String::new();
+    if let Some(title) = title {
+        let _ = writeln!(lines, "  text(fill: rgb(\"{ACCENT}\"), {}),", string(title));
+    }
+    for (index, (name, about)) in rows.iter().enumerate() {
+        let (name, about) = (string(name), string(about));
+        let about = format!("h(16pt) + text(fill: rgb(\"{DIM}\"), {about})");
+        if index == chosen {
+            let _ = writeln!(
+                lines,
+                "  block(fill: rgb(\"{CHOSEN}\"), outset: (x: 4pt, y: 2.5pt), radius: 2pt, {name} + {about}),"
+            );
+        } else {
+            let _ = writeln!(lines, "  {name} + {about},");
+        }
+    }
+    if let Some(detail) = detail {
+        let _ = writeln!(lines, "  text(fill: rgb(\"{DIM}\"), {}),", string(detail));
+    }
+    format!(
+        r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
+#set text(font: "{FONT}", size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
+#stack(
+  spacing: 6pt,
+{lines})"#
+    )
+}
+
+/// Markup for a few lines of text in a panel.
+#[must_use]
+pub fn text_markup(lines: &[String]) -> String {
+    let mut stacked = String::new();
+    for line in lines {
+        // An empty line still takes its room.
+        let _ = writeln!(stacked, "  {} + h(0pt),", string(line));
+    }
+    format!(
+        r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
+#set text(font: "{FONT}", size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
+#stack(
+  spacing: 6pt,
+{stacked})"#
     )
 }
 

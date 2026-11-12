@@ -26,6 +26,17 @@ pub fn describe(world: &dyn World, diagnostic: &SourceDiagnostic) -> String {
     out
 }
 
+/// The file and the bytes of it that a diagnostic is about, if it is
+/// about a place in a file.
+#[must_use]
+pub fn place(
+    world: &dyn World,
+    diagnostic: &SourceDiagnostic,
+) -> Option<(typst::syntax::FileId, std::ops::Range<usize>)> {
+    let id = diagnostic.span.id()?;
+    Some((id, world.range(diagnostic.span)?))
+}
+
 fn locate(world: &dyn World, span: DiagSpan) -> Option<String> {
     let id = span.id()?;
     let range = world.range(span)?;

@@ -89,9 +89,11 @@ impl Editor {
     pub fn open(path: &Path, state_dir: &Path, id: FileId) -> Result<(Self, Opened), OpenError> {
         let (document, opened) =
             Document::open(path, state_dir, |text| SourceBuffer(Source::new(id, text)))?;
+        let mut engine = Engine::new();
+        engine.set_pairs(true);
         let editor = Self {
             document,
-            engine: Engine::new(),
+            engine,
             failure: None,
             rows: None,
             top: 0,
@@ -176,6 +178,18 @@ impl Editor {
                 Err(failure)
             }
         }
+    }
+
+    /// The key that, given to [`Editor::key`] in insert mode, puts `text`
+    /// in place of the `replaced` characters before the cursor, with the
+    /// cursor `within` bytes into it. See [`Engine::completed`].
+    pub fn completed(&mut self, replaced: usize, text: String, within: usize) -> KeyPress {
+        self.engine.completed(replaced, text, within)
+    }
+
+    /// Puts the cursor at byte `offset` as a jump: `` ` ` `` leads back.
+    pub fn jump(&mut self, offset: usize) {
+        self.engine.jump(offset, self.document.text());
     }
 
     /// Counts the changes made to the text.
@@ -449,6 +463,21 @@ impl Host for DocumentHost<'_> {
             }
         }
         Some((range.end, across))
+    }
+
+    fn format(&self, format: zetwerk_vim::Format, range: Range<usize>) -> Option<Vec<Edit>> {
+        let source = &self.document.buffer().0;
+        let edits = crate::typst_text::format(source, format, range)?;
+        let edit = |(range, text)| Edit { range, text };
+        Some(edits.into_iter().map(edit).collect())
+    }
+
+    fn object(&self, name: char, at: usize, around: bool) -> Option<Range<usize>> {
+        crate::typst_text::object(&self.document.buffer().0, name, at, around)
+    }
+
+    fn expand(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
+        crate::typst_text::snippet(&self.document.buffer().0, at)
     }
 
     fn redo(&mut self) -> Option<Range<usize>> {

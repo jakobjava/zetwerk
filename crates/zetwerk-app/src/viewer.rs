@@ -6,6 +6,7 @@
 //! without opening a window.
 
 pub mod agent;
+mod assist;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -68,6 +69,9 @@ const PAGE_PROPOSAL: [u8; 4] = [0xd7, 0x99, 0x21, 0x60];
 const STALE_PROPOSAL: [u8; 3] = [0x5c, 0x26, 0x22];
 const PAGE_STALE_PROPOSAL: [u8; 4] = [0xcc, 0x24, 0x1d, 0x45];
 const AGENT_MARK: [u8; 3] = [0x3c, 0x42, 0x1c];
+/// What the compiler complains about, in the source.
+const ERROR_MARK: [u8; 3] = [0x6b, 0x1f, 0x1b];
+const WARNING_MARK: [u8; 3] = [0x5a, 0x45, 0x10];
 const PAGE_AGENT_MARK: [u8; 4] = [0x98, 0x97, 0x1a, 0x50];
 /// How many lines of what goes and of what comes the panel of a proposal
 /// shows, and how many characters of each.
@@ -601,6 +605,10 @@ pub struct Viewer {
     /// Why the last change could not be shown without compiling.
     declined: Option<String>,
     problems: Vec<String>,
+    /// What the last compile complained about in the main file: the bytes
+    /// (of the text it compiled), whether it is an error, and the
+    /// complaint.
+    diagnostics: Vec<(Range<usize>, bool, String)>,
     layout: Layout,
     view: Viewport,
     window: (u32, u32),
@@ -624,6 +632,15 @@ pub struct Viewer {
     /// What an agent changed last, until the next key: shown, so that the
     /// user sees what was done.
     agent_mark: Option<Range<usize>>,
+    /// The list of what could be typed at the cursor, while it is up.
+    completion: Option<assist::Completion>,
+    /// What Typst says the thing under the cursor is, until the next key.
+    tooltip: Option<String>,
+    /// A list of places to go that keys are for, while it is up.
+    picker: Option<assist::Picker>,
+    /// Where the cursor is drawn in the source pane or the lens, in device
+    /// pixels: how far across, and its top and bottom.
+    caret_at: Option<(f64, f64, f64)>,
     /// Tiles of the current document at the current zoom, by page and tile
     /// origin, so that a frame does not crop and hash pages again.
     planned: HashMap<(usize, u32, u32), Tile>,
@@ -668,6 +685,7 @@ impl Viewer {
             predicted_at: None,
             declined: None,
             problems: Vec::new(),
+            diagnostics: Vec::new(),
             layout: Layout::default(),
             view: Viewport {
                 zoom: scale,
@@ -689,6 +707,10 @@ impl Viewer {
             next_proposal: 1,
             proposal_text: None,
             agent_mark: None,
+            completion: None,
+            tooltip: None,
+            picker: None,
+            caret_at: None,
             planned: HashMap::new(),
             shown: HashMap::new(),
             stats: Stats::default(),
@@ -1024,6 +1046,19 @@ impl Viewer {
             let describe = |error| zetwerk_typst::describe(world, error);
             output.compiled.errors.iter().map(describe).collect()
         };
+        let main = self.project.main();
+        let world = &*output.world;
+        let compiled = &output.compiled;
+        let errors = compiled.errors.iter().map(|error| (error, true));
+        let warnings = compiled.warnings.iter().map(|warning| (warning, false));
+        self.diagnostics = errors
+            .chain(warnings)
+            .filter_map(|(diagnostic, is_error)| {
+                let (file, range) = zetwerk_typst::place(world, diagnostic)?;
+                (file == main).then(|| (range, is_error, diagnostic.message.to_string()))
+            })
+            .collect();
+        self.diagnostics.sort_by_key(|(range, _, _)| range.start);
         if let Some(document) = output.compiled.document {
             self.document = Some(Arc::new(document));
             self.compiled_world = Some(Arc::clone(&output.world));
@@ -1096,7 +1131,11 @@ impl Viewer {
     pub fn key(&mut self, press: KeyPress) {
         self.message = None;
         if self.editor.is_some() {
-            return self.editor_key(press);
+            if !self.assist_key(press) {
+                self.editor_key(press);
+                self.complete(false);
+            }
+            return;
         }
         if let Mode::Command(text) = &mut self.mode {
             match press.key {
@@ -1436,6 +1475,12 @@ impl Viewer {
             "x" | "xit" => self.quit = !modified || self.save(false),
             "e!" | "edit!" => self.reload(),
             "perf" => self.performance_panel = !self.performance_panel,
+            "describe" => self.describe(),
+            "definition" => self.goto_definition(),
+            "outline" => self.pick(false),
+            "labels" => self.pick(true),
+            "diagnostic next" => self.goto_diagnostic(true),
+            "diagnostic previous" => self.goto_diagnostic(false),
             "proposal next" => self.goto_proposal(true),
             "proposal previous" => self.goto_proposal(false),
             "accept" => {
@@ -1482,6 +1527,35 @@ impl Viewer {
         }
     }
 
+    /// Puts the cursor on the next thing the compiler complained about
+    /// (`]d`), or the one before (`[d`), and says what the complaint is.
+    fn goto_diagnostic(&mut self, forward: bool) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let cursor = editor.cursor();
+        let starts = || self.diagnostics.iter().map(|(range, _, _)| range.start);
+        let target = if forward {
+            starts().position(|start| start > cursor).or(Some(0))
+        } else {
+            let before = starts().rposition(|start| start < cursor);
+            before.or(self.diagnostics.len().checked_sub(1))
+        };
+        let Some((range, is_error, message)) = target.and_then(|at| self.diagnostics.get(at))
+        else {
+            self.notice("the compiler has no complaints");
+            return;
+        };
+        editor.set_cursor(range.start);
+        let (is_error, message) = (*is_error, message.clone());
+        if is_error {
+            self.alert(format!("error: {message}"));
+        } else {
+            self.notice(format!("warning: {message}"));
+        }
+        self.follow_cursor();
+    }
+
     /// Writes the text to its file. Returns whether it is saved now.
     fn save(&mut self, overwrite: bool) -> bool {
         let Some(editor) = &mut self.editor else {
@@ -1526,6 +1600,7 @@ impl Viewer {
         let (width, height) = (f64::from(self.window.0), f64::from(self.window.1));
         solid(&mut scene, has, BACKDROP, (0.0, 0.0, width, height));
         self.cursor_at = None;
+        self.caret_at = None;
         self.pages(&mut scene, has);
         self.lens(&mut scene, has);
         // Drawn after the pages: a page zoomed wider than its pane must
@@ -1536,6 +1611,7 @@ impl Viewer {
             self.performance(&mut scene, has);
         }
         self.proposal_panel(&mut scene, has);
+        self.assist_panels(&mut scene, has);
         scene
     }
 
@@ -1661,6 +1737,7 @@ impl Viewer {
                 Mark::Changed => PAGE_AGENT_MARK,
                 Mark::Proposed => PAGE_PROPOSAL,
                 Mark::Stale => PAGE_STALE_PROPOSAL,
+                Mark::Error | Mark::Warning => continue,
             };
             marked.push((range, colour));
         }
@@ -1789,6 +1866,7 @@ impl Viewer {
         );
         solid(scene, has, PANE, (x, y, width, height));
         let mut texts: Vec<(RowText, (f64, f64))> = Vec::new();
+        let mut caret = None;
         for (index, row) in shown.iter().enumerate() {
             let top = y + pad + index as f64 * row_height;
             let at = |offset: usize| {
@@ -1813,6 +1891,7 @@ impl Viewer {
                     CURSOR,
                     (at(cursor).round(), top, width, row_height),
                 );
+                caret = Some((at(cursor).round(), top, top + row_height));
             }
             let content = &text[row.clone()];
             let body = content.trim_start_matches([' ', '\t']);
@@ -1829,6 +1908,25 @@ impl Viewer {
             }
         }
         row_images(&mut self.chrome, scene, has, &texts, scale);
+        self.caret_at = caret;
+    }
+
+    /// The stretches of the source shown in a colour of their own: what
+    /// agents did and want to do, and what the compiler complained about,
+    /// while the text is the text it complained about.
+    fn source_marks(&self) -> Vec<(Range<usize>, Mark)> {
+        let mut marked = self.agent_marks();
+        if self.compiled_revision == Some(self.revision) {
+            marked.extend(self.diagnostics.iter().map(|(range, is_error, _)| {
+                let mark = if *is_error {
+                    Mark::Error
+                } else {
+                    Mark::Warning
+                };
+                (range.clone(), mark)
+            }));
+        }
+        marked
     }
 
     /// The source text: line numbers, rows of text, selection and cursor.
@@ -1840,7 +1938,7 @@ impl Viewer {
         let width = self.split().0;
         let scale = self.scale;
         let height = f64::from(self.window.1.saturating_sub(self.status_height()));
-        let marked = self.agent_marks();
+        let marked = self.source_marks();
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -1884,6 +1982,8 @@ impl Viewer {
                         Mark::Changed => AGENT_MARK,
                         Mark::Proposed => PROPOSAL,
                         Mark::Stale => STALE_PROPOSAL,
+                        Mark::Error => ERROR_MARK,
+                        Mark::Warning => WARNING_MARK,
                     };
                     let (from, to) = (at(range.start), at(range.end));
                     // Text to be put in where there is none shows as a
@@ -1914,6 +2014,7 @@ impl Viewer {
                     CURSOR,
                     (at(cursor).round(), y, width, row_height),
                 );
+                self.caret_at = Some((at(cursor).round(), y, y + row_height));
             }
             if row.first {
                 let number = (row.line + 1).to_string();
@@ -2042,7 +2143,7 @@ impl Viewer {
         ];
         let margin = PANEL_MARGIN * self.scale;
         let right = f64::from(self.window.0) - margin;
-        self.panel(scene, has, &chrome::panel_markup(&rows), |width| {
+        self.panel(scene, has, &chrome::panel_markup(&rows), |(width, _)| {
             (right - width, margin)
         });
     }
@@ -2122,19 +2223,19 @@ impl Viewer {
     }
 
     /// Renders chrome `markup` and places it where `position` says, given
-    /// the rendered width in pixels.
+    /// the rendered width and height in pixels.
     fn panel(
         &mut self,
         scene: &mut Scene,
         has: &dyn Fn(TextureId) -> bool,
         markup: &str,
-        position: impl FnOnce(f64) -> (f64, f64),
+        position: impl FnOnce((f64, f64)) -> (f64, f64),
     ) {
         let Some(image) = self.chrome.render(markup, self.scale) else {
             return;
         };
         let (width, height) = (image.pixmap.width(), image.pixmap.height());
-        let (x, y) = position(f64::from(width));
+        let (x, y) = position((f64::from(width), f64::from(height)));
         scene.quads.push(Quad {
             texture: image.id,
             x: x.round() as f32,
@@ -3524,6 +3625,228 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    #[test]
+    fn formats_are_operators_and_typst_has_text_objects() {
+        let text = "= Title\nThe quick brown fox and $x + y$ here.\n\n== Sub\nMore text.\n";
+        let (mut viewer, directory) = editing(text);
+        let line = |viewer: &Viewer, number: usize| {
+            viewer
+                .text()
+                .unwrap()
+                .lines()
+                .nth(number - 1)
+                .unwrap()
+                .to_owned()
+        };
+        // On a motion, on a text object, on a selection; and again with `.`.
+        press(&mut viewer, "/quick<CR>gbiw");
+        assert_eq!(line(&viewer, 2), "The *quick* brown fox and $x + y$ here.");
+        press(&mut viewer, "/fox<CR>.");
+        assert_eq!(
+            line(&viewer, 2),
+            "The *quick* brown *fox* and $x + y$ here."
+        );
+        press(&mut viewer, "/brown<CR>vegm");
+        assert_eq!(
+            line(&viewer, 2),
+            "The *quick* _brown_ *fox* and $x + y$ here."
+        );
+        // Off again where it is on: one undo step each.
+        press(&mut viewer, "/quick<CR>gbi*");
+        assert_eq!(
+            line(&viewer, 2),
+            "The quick _brown_ *fox* and $x + y$ here."
+        );
+        press(&mut viewer, "u");
+        assert_eq!(
+            line(&viewer, 2),
+            "The *quick* _brown_ *fox* and $x + y$ here."
+        );
+        // In the equation bold is a function; the equation is an object.
+        press(&mut viewer, "/y<CR>gbl");
+        assert!(line(&viewer, 2).ends_with("$x + bold(y)$ here."));
+        press(&mut viewer, "ci$a = b<Esc>");
+        assert!(line(&viewer, 2).ends_with("and $a = b$ here."));
+        press(&mut viewer, "da$");
+        assert!(line(&viewer, 2).ends_with("and  here."));
+
+        // Lines: a comment, a list, a heading's level.
+        press(&mut viewer, "Ggcc");
+        assert_eq!(line(&viewer, 5), "// More text.");
+        press(&mut viewer, "gcc");
+        assert_eq!(line(&viewer, 5), "More text.");
+        press(&mut viewer, "gll");
+        assert_eq!(line(&viewer, 5), "- More text.");
+        press(&mut viewer, "u4Gg+");
+        assert_eq!(line(&viewer, 4), "=== Sub");
+        press(&mut viewer, "g-g-");
+        assert_eq!(line(&viewer, 4), "= Sub");
+        // A section goes as a whole.
+        press(&mut viewer, "Gdah");
+        assert_eq!(viewer.text().unwrap().lines().count(), 3);
+        assert!(!viewer.text().unwrap().contains("Sub"));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_cursor_goes_to_what_the_compiler_complains_about() {
+        // Slips of syntax: the compiler tells of all of them at once.
+        let text = "Fine.\n#(1 +)\nFine too.\n#(2 *)\n";
+        let (mut viewer, directory) = editing(text);
+        assert_eq!(viewer.state().problems.len(), 2);
+        let line = |viewer: &Viewer| viewer.editor.as_ref().unwrap().position().0;
+        let message = |viewer: &Viewer| viewer.message.as_ref().unwrap().text.clone();
+        press(&mut viewer, "]d");
+        assert_eq!(line(&viewer), 2);
+        assert!(
+            message(&viewer).starts_with("error: "),
+            "{}",
+            message(&viewer)
+        );
+        press(&mut viewer, "]d");
+        assert_eq!(line(&viewer), 4);
+        press(&mut viewer, "]d");
+        assert_eq!(line(&viewer), 2, "around the end");
+        press(&mut viewer, "[d");
+        assert_eq!(line(&viewer), 4);
+        // They are marked in the source while the text is that text.
+        let marks = |viewer: &mut Viewer| {
+            let id = TextureId(hash128(&("solid", ERROR_MARK)));
+            let scene = viewer.scene(&|_| false);
+            scene.quads.iter().filter(|quad| quad.texture == id).count()
+        };
+        assert_eq!(marks(&mut viewer), 2);
+        press(&mut viewer, "x");
+        assert_eq!(marks(&mut viewer), 0);
+        // With nothing wrong there is nowhere to go.
+        press(&mut viewer, "ggjddjdd");
+        compile(&mut viewer);
+        press(&mut viewer, "]d");
+        assert_eq!(message(&viewer), "the compiler has no complaints");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn brackets_come_in_pairs_and_snippets_expand() {
+        let (mut viewer, directory) = editing("\n");
+        let text = |viewer: &Viewer| viewer.text().unwrap().trim_end().to_owned();
+        // The closing one comes along, is stepped over, and goes with
+        // its opening one.
+        press(&mut viewer, "if(x<Esc>");
+        assert_eq!(text(&viewer), "f(x)");
+        press(&mut viewer, "ccf(x) and [y]<Esc>");
+        assert_eq!(text(&viewer), "f(x) and [y]");
+        press(&mut viewer, "cca(<BS>b<Esc>");
+        assert_eq!(text(&viewer), "ab");
+        // Before text, and for an apostrophe-like mark behind a word, no.
+        press(&mut viewer, "0i(<Esc>");
+        assert_eq!(text(&viewer), "(ab");
+        press(&mut viewer, "ccsay \"hi\" and 5\" wide<Esc>");
+        assert_eq!(text(&viewer), "say \"hi\" and 5\" wide");
+        // An equation in its line, and one displayed.
+        press(&mut viewer, "ccLet $x$ be.<Esc>");
+        assert_eq!(text(&viewer), "Let $x$ be.");
+        press(&mut viewer, "cc$ a + b<Esc>");
+        assert_eq!(text(&viewer), "$ a + b $");
+        // It is one undo step, and `.` types the same again.
+        press(&mut viewer, "ccx<Esc>Ag(z)<Esc>.");
+        assert_eq!(text(&viewer), "xg(z)g(z)");
+        press(&mut viewer, "u");
+        assert_eq!(text(&viewer), "xg(z)");
+
+        // The name of a snippet and Tab.
+        press(&mut viewer, "ccSee fn<Tab>the note<Esc>");
+        assert_eq!(text(&viewer), "See #footnote[the note]");
+        press(&mut viewer, "cc$ ff<Tab>a<Esc>");
+        assert_eq!(text(&viewer), "$ frac(a, ) $");
+        // Elsewhere Tab is a tab's worth of blanks.
+        press(&mut viewer, "ccab<Tab>c<Esc>");
+        assert_eq!(text(&viewer), "ab  c");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn typing_brings_up_what_could_be_typed() {
+        let text = "#let width = 3cm\n= Start <start>\nText.\n\n";
+        let (mut viewer, directory) = editing(text);
+        let labels = |viewer: &Viewer| -> Vec<String> {
+            let completion = viewer.completion.as_ref();
+            completion.map_or_else(Vec::new, |completion| {
+                completion
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.label.clone())
+                    .collect()
+            })
+        };
+        let last = |viewer: &Viewer| viewer.text().unwrap().lines().last().unwrap().to_owned();
+        // Behind a hash: functions, and what the document defines.
+        press(&mut viewer, "Go#");
+        assert!(labels(&viewer).len() > 20, "{:?}", labels(&viewer));
+        press(&mut viewer, "wi");
+        assert_eq!(labels(&viewer).first().map(String::as_str), Some("width"));
+        press(&mut viewer, "<Tab>");
+        assert_eq!(last(&viewer), "#width");
+        assert!(viewer.completion.is_none());
+        // A function comes with its brackets, the cursor between them.
+        press(&mut viewer, " and #ima");
+        assert!(labels(&viewer).contains(&"image".to_owned()));
+        press(&mut viewer, "<C-n><C-p><Tab>\"a.png<Esc>");
+        assert_eq!(last(&viewer), "#width and #image(\"a.png\")");
+        // One undo step with the rest of what was typed, and `.` types
+        // it again.
+        press(&mut viewer, "u");
+        assert_eq!(viewer.text(), Some(text));
+        press(&mut viewer, ".");
+        assert_eq!(last(&viewer), "#width and #image(\"a.png\")");
+        // In running text nothing comes up unasked; asked, it does; and
+        // it goes away again.
+        press(&mut viewer, "Goplain wor");
+        assert_eq!(labels(&viewer), Vec::<String>::new());
+        press(&mut viewer, "<Esc>o@st");
+        assert_eq!(labels(&viewer), ["start"]);
+        press(&mut viewer, "<C-e>");
+        assert!(viewer.completion.is_none());
+        press(&mut viewer, "<C-n>");
+        assert_eq!(labels(&viewer), ["start"]);
+        press(&mut viewer, "<C-y><Esc>");
+        assert_eq!(last(&viewer), "@start");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn typst_tells_what_a_thing_is_and_where_it_is_from() {
+        let text = "#let width = 3cm\n= Start\n#rect(width: width)\n\n== Sub part\nEnd.\n";
+        let (mut viewer, directory) = editing(text);
+        let line = |viewer: &Viewer| viewer.editor.as_ref().unwrap().position().0;
+        press(&mut viewer, "/rect<CR>K");
+        let told = viewer.tooltip.clone().unwrap();
+        assert!(told.to_lowercase().contains("rectangle"), "{told}");
+        press(&mut viewer, "l");
+        assert_eq!(viewer.tooltip, None, "until the next key");
+        // To the definition, and back.
+        press(&mut viewer, "$hgd");
+        assert_eq!(viewer.editor.as_ref().unwrap().position(), (1, 6));
+        press(&mut viewer, "``");
+        assert_eq!(line(&viewer), 3);
+        press(&mut viewer, "/rect<CR>gd");
+        assert!(viewer.message.as_ref().unwrap().text.contains("built in"));
+
+        // The list of headings: narrowed by typing, Enter goes there.
+        press(&mut viewer, "go");
+        assert!(viewer.is_picking());
+        press(&mut viewer, "x");
+        assert_eq!(viewer.text(), Some(text), "keys are for the list");
+        press(&mut viewer, "<BS>sub<CR>");
+        assert!(!viewer.is_picking());
+        assert_eq!(line(&viewer), 5);
+        press(&mut viewer, "go<Esc>");
+        assert_eq!(line(&viewer), 5);
+        press(&mut viewer, ":labels<CR>");
+        assert!(!viewer.is_picking(), "there are none");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     /// Whether `j` and `k` get through a whole document on its pages:
     /// `ZETWERK_BENCH=file.typ cargo test --release -p zetwerk-app walking_the_pages -- --ignored --nocapture`
     #[test]
@@ -3638,6 +3961,7 @@ mod tests {
             "jjjjjjjjjjkkkkkkkkkkjjjjjjjjjj",
             &mut viewer,
         );
+        report("with a list up", "A #figu<C-e><Esc>", &mut viewer);
         report("half a page down", "<C-d>", &mut viewer);
         report("deleting words", "dwdwdwdwdwdwdwdw", &mut viewer);
         report("undo", "uuuuuuuu", &mut viewer);

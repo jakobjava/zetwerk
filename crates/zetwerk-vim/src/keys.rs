@@ -20,6 +20,11 @@ pub enum Key {
     PageDown,
     Home,
     End,
+    /// Not a key of any keyboard: a text put in whole in insert mode, as
+    /// when one of a list of completions is taken. The number says which,
+    /// to the engine that made it (see `Engine::completed`); it is what
+    /// `.` and macros replay.
+    Text(u32),
 }
 
 /// A key pressed together with modifiers.

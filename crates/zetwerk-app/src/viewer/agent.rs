@@ -58,6 +58,9 @@ pub(super) enum Mark {
     Proposed,
     /// An agent proposed to change it, and it has changed since.
     Stale,
+    /// The compiler says it is wrong, or may be.
+    Error,
+    Warning,
 }
 
 /// What became of a change an agent asked for.

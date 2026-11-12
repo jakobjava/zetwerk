@@ -49,6 +49,34 @@ pub trait Host {
         let _ = (from, rows, across);
         None
     }
+
+    /// The edits that set bytes `range` of the text off as `format`, or
+    /// that take that away again where it is there already. Their ranges
+    /// are ranges of the text as it is, in its order and apart from each
+    /// other. `None` if the host has no such thing or it cannot be done
+    /// there.
+    fn format(&self, format: Format, range: Range<usize>) -> Option<Vec<Edit>> {
+        let _ = (format, range);
+        None
+    }
+
+    /// What the word before byte `at` stands for, if it is the name of a
+    /// snippet where it is: the bytes to replace, the text to put there,
+    /// and how far into that text the cursor goes. Asked when Tab is
+    /// pressed in insert mode.
+    fn expand(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
+        let _ = at;
+        None
+    }
+
+    /// A text object of the host's language around byte `at`, named by
+    /// the key after `i` (the inside) or `a` (`around`: all of it). The
+    /// host says which keys those are; `None` for all others, and where
+    /// there is no such object.
+    fn object(&self, name: char, at: usize, around: bool) -> Option<Range<usize>> {
+        let _ = (name, at, around);
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +118,27 @@ enum Operator {
     ToggleCase,
     Lower,
     Upper,
+    /// Not Vim's: set the text off the way the host's language does.
+    Format(Format),
+}
+
+/// A way to set text off that only the host knows how to write: the
+/// engine knows keys and ranges, not markup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// `gb`: strong (bold).
+    Strong,
+    /// `gm`: emphasis.
+    Emph,
+    /// `gt`: raw (typewriter) text.
+    Raw,
+    /// `gc`: a comment, line by line.
+    Comment,
+    /// `gl`: items of a list, line by line.
+    ListItem,
+    /// `g+` and `g-`: a heading one level deeper or shallower.
+    Deeper,
+    Shallower,
 }
 
 /// A key that the next key completes.
@@ -318,6 +367,12 @@ pub struct Engine {
     /// Whether `j` and `k` go by the rows the host shows instead of by
     /// lines of the text, as `gj` and `gk` always do where it shows any.
     rows_first: bool,
+    /// Whether a bracket typed brings its closing one along (not Vim's).
+    pairs: bool,
+    /// The texts that were put in whole (see [`Key::Text`]): how many
+    /// characters before the cursor each replaced, the text, and how far
+    /// into it the cursor went.
+    texts: Vec<(usize, String, usize)>,
     /// How far across the cursor aimed when it last went by rows, and the
     /// column it came to: the aim holds while that is still the column
     /// the cursor is aiming at.
@@ -395,6 +450,8 @@ impl Engine {
             prompt_return: Mode::Normal,
             last_search: None,
             rows_first: false,
+            pairs: false,
+            texts: Vec::new(),
             row_goal: None,
             page_lines: 40,
             view_lines: (0, 0),
@@ -445,6 +502,30 @@ impl Engine {
     /// `Ctrl-F` and `Ctrl-B` move.
     pub fn set_page_lines(&mut self, lines: usize) {
         self.page_lines = lines.max(2);
+    }
+
+    /// The key that, pressed in insert mode, puts `text` in place of the
+    /// `replaced` characters before the cursor and the cursor `within`
+    /// bytes into it: for taking one of a list of completions. It is part
+    /// of what is being typed, for undo and for `.`.
+    pub fn completed(&mut self, replaced: usize, text: String, within: usize) -> KeyPress {
+        let within = within.min(text.len());
+        self.texts.push((replaced, text, within));
+        let number = u32::try_from(self.texts.len() - 1).unwrap_or(u32::MAX);
+        KeyPress::plain(Key::Text(number))
+    }
+
+    /// Puts the cursor at `pos` as a jump: `` ` ` `` leads back.
+    pub fn jump(&mut self, pos: usize, text: &str) {
+        self.set_jump();
+        self.set_cursor(pos, text);
+    }
+
+    /// Makes brackets, quotation marks and dollar signs typed in insert
+    /// mode come in pairs: the closing one is put in behind the cursor,
+    /// typing it steps over it, and Backspace between the two takes both.
+    pub fn set_pairs(&mut self, on: bool) {
+        self.pairs = on;
     }
 
     /// Makes `j` and `k` go by the rows the host shows (see
@@ -958,17 +1039,15 @@ impl Engine {
             Awaiting::Bracket { forward } => {
                 self.reset_pending();
                 // The editor's own: to the next or the previous change an
-                // agent proposes.
-                if press.key == Key::Char('p') && !press.ctrl {
-                    let command = if forward {
-                        "proposal next"
-                    } else {
-                        "proposal previous"
-                    };
-                    self.effects.push(Effect::Command(command.to_owned()));
-                } else {
-                    self.fail();
-                }
+                // agent proposes (`]p`).
+                let what = match press.key {
+                    Key::Char('p') if !press.ctrl => "proposal",
+                    // And to what the compiler complains about.
+                    Key::Char('d') if !press.ctrl => "diagnostic",
+                    _ => return self.fail(),
+                };
+                let way = if forward { "next" } else { "previous" };
+                self.effects.push(Effect::Command(format!("{what} {way}")));
                 return;
             }
             Awaiting::View => {
@@ -1086,6 +1165,10 @@ impl Engine {
 
         let operator = match c {
             'd' => Some(Operator::Delete),
+            // `gcc`: the comment operator doubled, on this line.
+            'c' if self.pending.operator == Some(Operator::Format(Format::Comment)) => {
+                Some(Operator::Format(Format::Comment))
+            }
             'c' => Some(Operator::Change),
             'y' => Some(Operator::Yank),
             '>' => Some(Operator::Indent),
@@ -1194,6 +1277,10 @@ impl Engine {
             '@' if self.pending.operator.is_none() => self.pending.awaiting = Awaiting::Play,
             'g' => self.pending.awaiting = Awaiting::G,
             'z' if self.pending.operator.is_none() => self.pending.awaiting = Awaiting::View,
+            // What the thing under the cursor is: the host knows.
+            'K' if self.pending.is_idle() && !self.selecting() => {
+                self.effects.push(Effect::Command("describe".to_owned()));
+            }
             ']' | '[' if self.pending.is_idle() && !self.selecting() => {
                 self.pending.awaiting = Awaiting::Bracket { forward: c == ']' };
             }
@@ -1382,6 +1469,34 @@ impl Engine {
             '~' => self.operator_key(Operator::ToggleCase, host),
             'u' => self.operator_key(Operator::Lower, host),
             'U' => self.operator_key(Operator::Upper, host),
+            // Not Vim's: the formats of the host's language, as operators.
+            'b' => self.operator_key(Operator::Format(Format::Strong), host),
+            'm' => self.operator_key(Operator::Format(Format::Emph), host),
+            't' => self.operator_key(Operator::Format(Format::Raw), host),
+            'c' => self.operator_key(Operator::Format(Format::Comment), host),
+            'l' => self.operator_key(Operator::Format(Format::ListItem), host),
+            '+' | '-' if self.pending.operator.is_none() => {
+                let format = if c == '+' {
+                    Format::Deeper
+                } else {
+                    Format::Shallower
+                };
+                if self.selecting() {
+                    return self.operator_key(Operator::Format(format), host);
+                }
+                // This line, or with a count that many lines.
+                let (count, _) = self.take_count();
+                let text = Text(host.text());
+                let start = text.line_start(self.cursor);
+                let last = lines_below(text, self.cursor, count - 1).unwrap_or(start);
+                let object = Object {
+                    start,
+                    end: text.line_end(last),
+                    linewise: false,
+                };
+                self.reset_pending();
+                self.operate(Operator::Format(format), object, 1, self.cursor, host);
+            }
             'J' if self.pending.operator.is_none() => self.join_lines_raw(host),
             'v' if self.pending.is_idle() && self.mode == Mode::Normal => {
                 // The last selection again.
@@ -1405,6 +1520,12 @@ impl Engine {
             // switching what the window shows.
             's' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("view".to_owned()));
+            }
+            // To where the name under the cursor is defined, as far as
+            // the host can tell; and the host's list of places to go.
+            'd' | 'o' if self.pending.is_idle() && !self.selecting() => {
+                let command = if c == 'd' { "definition" } else { "outline" };
+                self.effects.push(Effect::Command(command.to_owned()));
             }
             // Nor Vim's `ga` and `gr`: to accept or reject the change an
             // agent proposes under the cursor.
@@ -1538,7 +1659,12 @@ impl Engine {
             'W' => object::word(text, pos, around, true, count),
             'p' => object::paragraph(text, pos, around, count),
             '"' | '\'' | '`' => object::quote(text, pos, c, around, count),
-            _ => None,
+            // The host's own: an equation, a section, an argument.
+            _ => host.object(c, pos, around).map(|range| Object {
+                start: range.start,
+                end: range.end,
+                linewise: false,
+            }),
         };
         let Some(found) = found else {
             return self.object_failed();
@@ -2198,6 +2324,19 @@ impl Engine {
                 self.touch(host);
                 self.changed = true;
             }
+            Operator::Format(format) => {
+                let edits = host.format(format, start..end).unwrap_or_default();
+                if edits.is_empty() {
+                    self.failed = true;
+                } else {
+                    // From the last to the first: the ranges are those of
+                    // the text as it was.
+                    for edit in edits.iter().rev() {
+                        self.edit(host, edit.range.clone(), &edit.text);
+                    }
+                }
+                self.cursor = clamp(Text(host.text()), landing, false);
+            }
             Operator::ToggleCase | Operator::Lower | Operator::Upper => {
                 // What Vim makes of a motion that did not move, when the
                 // cursor is at the start of a line: the whole line, or on
@@ -2775,13 +2914,39 @@ impl Engine {
                 let to = self.stop_at_insert_start(host.text(), start);
                 self.insert_delete(to, host);
             }
+            (Key::Char(c), false) if self.pairs && !self.replacing => self.insert_paired(c, host),
             (Key::Char(c), false) => self.insert_text(&c.to_string(), host),
             (Key::Enter, _) => self.insert_text("\n", host),
             (Key::Tab, _) => {
+                // The name of a snippet becomes the snippet.
+                if let Some((range, with, within)) = host.expand(self.cursor)
+                    && range.end == self.cursor
+                    && range.start <= range.end
+                {
+                    self.edit(host, range.clone(), &with);
+                    self.cursor = range.start + within.min(with.len());
+                    return true;
+                }
                 let column = text.column(self.cursor);
                 self.insert_text(&" ".repeat(SHIFT_WIDTH - column % SHIFT_WIDTH), host);
             }
             (Key::Backspace, _) => return self.insert_backspace(host),
+            (Key::Text(number), _) => {
+                let Some((replaced, with, within)) = self.texts.get(number as usize).cloned()
+                else {
+                    return false;
+                };
+                // Back over that many characters, within the line.
+                let mut from = self.cursor;
+                for _ in 0..replaced {
+                    if from == text.line_start(from) {
+                        break;
+                    }
+                    from = text.prev(from);
+                }
+                self.edit(host, from..self.cursor, &with);
+                self.cursor = from + within;
+            }
             _ => return false,
         }
         true
@@ -2809,11 +2974,73 @@ impl Engine {
         self.cursor += typed.len();
     }
 
+    /// Types `c` where brackets come in pairs.
+    fn insert_paired(&mut self, c: char, host: &mut impl Host) {
+        let text = Text(host.text());
+        let before = (self.cursor > 0)
+            .then(|| text.char_at(text.prev(self.cursor)))
+            .flatten();
+        let after = text.char_at(self.cursor).filter(|c| *c != '\n');
+        let closing = match c {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '"' | '$' => Some(c),
+            _ => None,
+        };
+        // The closing one where it stands already: over it.
+        if matches!(c, ')' | ']' | '}' | '"' | '$') && after == Some(c) {
+            self.cursor = text.next(self.cursor);
+            return;
+        }
+        // A blank between two dollar signs is a displayed equation
+        // begun: it needs the blank on the other side too.
+        if c == ' ' && before == Some('$') && after == Some('$') {
+            self.edit(host, self.cursor..self.cursor, "  ");
+            self.cursor += 1;
+            return;
+        }
+        // Before text an opening bracket is just that; and a quotation
+        // mark or a dollar sign behind a letter or a digit closes
+        // something, or is an apostrophe's cousin or a price.
+        let room = after.is_none_or(|c| c.is_whitespace() || ")]}>,.;:$\"".contains(c));
+        let opens = c != closing.unwrap_or(' ') || !before.is_some_and(char::is_alphanumeric);
+        let escaped = before == Some('\\');
+        match closing {
+            Some(closing) if room && opens && !escaped => {
+                let mut pair = c.to_string();
+                pair.push(closing);
+                self.edit(host, self.cursor..self.cursor, &pair);
+                self.cursor += c.len_utf8();
+            }
+            _ => self.insert_text(&c.to_string(), host),
+        }
+    }
+
     /// Deletes the character before the cursor. Returns whether there was
     /// one.
     fn insert_backspace(&mut self, host: &mut impl Host) -> bool {
         if self.cursor == 0 {
             return false;
+        }
+        if self.pairs && !self.replacing {
+            // Between a pair with nothing in it: both go.
+            let text = Text(host.text());
+            let before = text.char_at(text.prev(self.cursor));
+            let after = text.char_at(self.cursor);
+            let pair = matches!(
+                (before, after),
+                (Some('('), Some(')'))
+                    | (Some('['), Some(']'))
+                    | (Some('{'), Some('}'))
+                    | (Some('"'), Some('"'))
+                    | (Some('$'), Some('$'))
+            );
+            let from = text.prev(self.cursor);
+            if pair && from >= self.stop_at_insert_start(host.text(), from) {
+                let to = text.next(self.cursor);
+                self.edit(host, self.cursor..to, "");
+            }
         }
         if self.replacing {
             // Back over what was typed, bringing back what it replaced;
@@ -3076,6 +3303,7 @@ fn key_of(c: char) -> KeyPress {
         '\u{e006}' => special(Key::End),
         '\u{e007}' => special(Key::PageUp),
         '\u{e008}' => special(Key::PageDown),
+        '\u{e100}'..='\u{f8ff}' => special(Key::Text(c as u32 - TEXT_KEYS)),
         '\u{1}'..='\u{1f}' => KeyPress {
             key: Key::Char(char::from(c as u8 | 0x60)),
             ctrl: true,
@@ -3104,8 +3332,17 @@ fn char_of(press: KeyPress) -> char {
         Key::End => '\u{e006}',
         Key::PageUp => '\u{e007}',
         Key::PageDown => '\u{e008}',
+        // The rest of the private use area numbers the texts put in
+        // whole; beyond that many, the last stands for all.
+        Key::Text(number) => {
+            char::from_u32(TEXT_KEYS + number.min(TEXT_KEYS_END - TEXT_KEYS)).unwrap_or('\u{f8ff}')
+        }
     }
 }
+
+/// The characters that stand for [`Key::Text`] in a register.
+const TEXT_KEYS: u32 = 0xe100;
+const TEXT_KEYS_END: u32 = 0xf8ff;
 
 /// `pos` as a line and a byte within it.
 fn place(text: &str, pos: usize) -> LinePlace {

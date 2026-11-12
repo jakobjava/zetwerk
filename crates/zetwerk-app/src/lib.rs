@@ -5,6 +5,7 @@ pub mod gpu;
 pub mod headless;
 pub use zetwerk_vim::keys;
 pub mod power;
+pub mod typst_text;
 pub mod view;
 pub mod viewer;
 pub mod watch;
