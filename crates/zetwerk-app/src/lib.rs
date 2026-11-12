@@ -2,6 +2,7 @@ pub mod app;
 pub mod chrome;
 pub mod editor;
 pub mod gpu;
+pub mod headless;
 pub use zetwerk_vim::keys;
 pub mod power;
 pub mod view;

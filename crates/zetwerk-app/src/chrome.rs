@@ -28,6 +28,7 @@ const FOREGROUND: &str = "#ebdbb2";
 const DIM: &str = "#928374";
 const ACCENT: &str = "#fabd2f";
 const ALERT: &str = "#fb4934";
+const ADDED: &str = "#b8bb26";
 const FONT: &str = "DejaVu Sans Mono";
 
 /// How many chrome renders a result in Typst's cache may go unused before
@@ -275,6 +276,32 @@ pub fn panel_markup(rows: &[(&str, String)]) -> String {
   column-gutter: 16pt,
   row-gutter: 5pt,
 {cells})"#
+    )
+}
+
+/// Markup for the panel of a proposed change: a `title`, a `hint` at what
+/// can be done with it, and the lines to go and the lines to come.
+#[must_use]
+pub fn proposal_markup(title: &str, hint: &str, old: &[String], new: &[String]) -> String {
+    let mut lines = String::new();
+    for (sign, colour, texts) in [("- ", ALERT, old), ("+ ", ADDED, new)] {
+        for text in texts {
+            let _ = writeln!(
+                lines,
+                "  text(fill: rgb(\"{colour}\"), {}),",
+                string(&format!("{sign}{text}"))
+            );
+        }
+    }
+    format!(
+        r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
+#set text(font: "{FONT}", size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
+#stack(
+  spacing: 6pt,
+  text(fill: rgb("{ACCENT}"), {title}) + h(24pt) + text(fill: rgb("{DIM}"), {hint}),
+{lines})"#,
+        title = string(title),
+        hint = string(hint),
     )
 }
 

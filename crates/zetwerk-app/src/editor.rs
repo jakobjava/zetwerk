@@ -134,6 +134,56 @@ impl Editor {
         }
     }
 
+    /// Changes the text without keys, as an agent does: each of `edits`
+    /// replaces a range of bytes by a text, the ranges referring to the
+    /// text as the edits before them left it. All of them are one undo
+    /// step. Nothing is changed if one of them cannot be made.
+    pub fn replace(&mut self, edits: &[(Range<usize>, &str)]) -> Result<(), String> {
+        // Tried on a copy of the ranges first: the engine has no way to
+        // say no.
+        let mut length = self.text().len();
+        let mut text = std::borrow::Cow::Borrowed(self.text());
+        for (range, with) in edits {
+            let fits = range.start <= range.end
+                && range.end <= length
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end);
+            if !fits {
+                return Err(format!(
+                    "bytes {}..{} are not a part of the text",
+                    range.start, range.end
+                ));
+            }
+            if edits.len() > 1 {
+                text.to_mut().replace_range(range.clone(), with);
+            }
+            length = length - range.len() + with.len();
+        }
+        drop(text);
+        let before = self.document.revision();
+        let mut host = DocumentHost {
+            document: &mut self.document,
+            failure: &mut self.failure,
+            rows: RowsOf::Pages(None),
+            shown_revision: before,
+        };
+        self.engine.replace(&mut host, edits);
+        match self.failure.take() {
+            None => Ok(()),
+            Some(failure) => {
+                self.engine
+                    .set_cursor(self.engine.cursor(), self.document.text());
+                Err(failure)
+            }
+        }
+    }
+
+    /// Counts the changes made to the text.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.document.revision()
+    }
+
     #[must_use]
     pub fn text(&self) -> &str {
         self.document.text()

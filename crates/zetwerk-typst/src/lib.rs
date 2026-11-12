@@ -8,7 +8,7 @@ mod pagemap;
 mod service;
 mod world;
 
-pub use compile::{Compiled, compile, forget_unused};
+pub use compile::{Compiled, compile, export_pdf, forget_unused};
 pub use diagnostics::describe;
 pub use locate::{PagePosition, locate};
 pub use pagemap::{Atomic, Caret, MappedGlyph, Origin, PageLines, PageMap, TextRun};

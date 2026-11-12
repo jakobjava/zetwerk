@@ -111,6 +111,10 @@ enum Awaiting {
     Z,
     /// After `z`.
     View,
+    /// After `]` (forward) or `[`.
+    Bracket {
+        forward: bool,
+    },
     /// After `q`, when nothing is being recorded.
     Record,
     /// After `m`.
@@ -523,6 +527,39 @@ impl Engine {
         std::mem::take(&mut self.effects)
     }
 
+    /// Changes the text from outside the keyboard, as an agent does:
+    /// each of `edits` replaces a range by a text, the ranges referring to
+    /// the text as the edits before them left it. Together they are one
+    /// undo step of their own, whatever is being typed; `.` still repeats
+    /// what it did before; and the cursor, the selection and the marks
+    /// stay with their text.
+    pub fn replace(&mut self, host: &mut impl Host, edits: &[(Range<usize>, &str)]) {
+        let (changed, undo_cursor) = (self.changed, self.undo_cursor.take());
+        self.joined = false;
+        for (range, text) in edits {
+            let (start, old_end, new_end) = (range.start, range.end, range.start + text.len());
+            self.edit(host, range.clone(), text);
+            for at in [&mut self.cursor, &mut self.anchor] {
+                if *at >= old_end {
+                    *at = *at - old_end + new_end;
+                } else if *at > start {
+                    *at = start;
+                }
+            }
+        }
+        // What is typed next is a step of its own again.
+        self.joined = false;
+        self.changed = changed;
+        self.undo_cursor = undo_cursor;
+        let text = host.text();
+        self.cursor = clamp(Text(text), self.cursor, self.mode != Mode::Normal);
+        self.anchor = self.anchor.min(text.len());
+        self.wanted_column = None;
+        if self.mode == Mode::Insert {
+            self.insert_start = place(text, self.cursor);
+        }
+    }
+
     /// Whether a macro is being recorded, and into which register.
     #[must_use]
     pub fn recording(&self) -> Option<char> {
@@ -918,6 +955,22 @@ impl Engine {
                 });
                 return self.finish_motion(moved, host);
             }
+            Awaiting::Bracket { forward } => {
+                self.reset_pending();
+                // The editor's own: to the next or the previous change an
+                // agent proposes.
+                if press.key == Key::Char('p') && !press.ctrl {
+                    let command = if forward {
+                        "proposal next"
+                    } else {
+                        "proposal previous"
+                    };
+                    self.effects.push(Effect::Command(command.to_owned()));
+                } else {
+                    self.fail();
+                }
+                return;
+            }
             Awaiting::View => {
                 self.reset_pending();
                 let place = match press.key {
@@ -1141,6 +1194,9 @@ impl Engine {
             '@' if self.pending.operator.is_none() => self.pending.awaiting = Awaiting::Play,
             'g' => self.pending.awaiting = Awaiting::G,
             'z' if self.pending.operator.is_none() => self.pending.awaiting = Awaiting::View,
+            ']' | '[' if self.pending.is_idle() && !self.selecting() => {
+                self.pending.awaiting = Awaiting::Bracket { forward: c == ']' };
+            }
             'H' | 'M' | 'L' => {
                 // To the top, the middle or the bottom of what the view
                 // shows; a count is that many lines from the edge.
@@ -1349,6 +1405,12 @@ impl Engine {
             // switching what the window shows.
             's' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("view".to_owned()));
+            }
+            // Nor Vim's `ga` and `gr`: to accept or reject the change an
+            // agent proposes under the cursor.
+            'a' | 'r' if self.pending.is_idle() && !self.selecting() => {
+                let command = if c == 'a' { "accept" } else { "reject" };
+                self.effects.push(Effect::Command(command.to_owned()));
             }
             _ => self.fail(),
         }

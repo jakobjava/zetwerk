@@ -67,3 +67,20 @@ pub fn compile(world: &dyn World) -> Compiled {
 pub fn forget_unused(rounds: usize) {
     comemo::evict(rounds);
 }
+
+/// The compiled `document` as the bytes of a PDF file, or what kept it
+/// from becoming one, said with the help of `world`.
+///
+/// Like [`compile`], it never panics.
+pub fn export_pdf(document: &PagedDocument, world: &dyn World) -> Result<Vec<u8>, Vec<String>> {
+    let options = typst_pdf::PdfOptions::default();
+    let exported = catch_unwind(AssertUnwindSafe(|| typst_pdf::pdf(document, &options)));
+    match exported {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(errors)) => Err(errors
+            .iter()
+            .map(|error| crate::describe(world, error))
+            .collect()),
+        Err(_) => Err(vec!["the PDF exporter crashed on this document".to_owned()]),
+    }
+}

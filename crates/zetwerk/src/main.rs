@@ -1,6 +1,7 @@
 //! zetwerk command line.
 
 mod bridge;
+mod config;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use std::time::Duration;
 
 use lexopt::prelude::*;
 use zetwerk_app::app::{self, Handle, Request};
+use zetwerk_app::headless;
 use zetwerk_app::keys::{self, KeyPress};
 use zetwerk_app::power::PowerMode;
 use zetwerk_mcp::Output;
@@ -20,12 +22,18 @@ use crate::bridge::Bridge;
 const USAGE: &str = "\
 Usage: zetwerk <file.typ> [options]
        zetwerk render <file.typ> [options]
-       zetwerk mcp
+       zetwerk mcp [file.typ]
 
 Opens a Typst document, or with `render` writes one page of it as a PNG.
 `zetwerk mcp` connects an AI agent to the open window: it is an MCP server
 on standard input and output, to be started by the agent
-(for Claude Code: `claude mcp add zetwerk -- zetwerk mcp`).
+(for Claude Code: `claude mcp add zetwerk -- zetwerk mcp`). With a file it
+works on that document without a window, unless a window has it open.
+
+Settings are read from ~/.config/zetwerk/config.toml:
+  [ai]
+  edit_mode = \"live\"      or \"propose\": agents' changes wait for you
+  save = false            whether agents may write the file
 
 Options:
       --power <mode>      auto (default), saver or performance
@@ -90,7 +98,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     };
     match args.command {
-        Command::Mcp => return mcp(),
+        Command::Mcp => return mcp(&args),
         Command::Call => return call(&args),
         Command::Open | Command::Render => {}
     }
@@ -117,11 +125,14 @@ fn run() -> Result<(), String> {
     let (script_result, script_done) = mpsc::channel();
     let script = (!args.keys.is_empty() || args.screenshot.is_some())
         .then(|| (args.keys.clone(), args.screenshot.clone()));
+    let (config, complaint) = config::load();
     let options = app::Options {
         path: input,
         font_set,
         power: args.power,
         state_dir: state_dir()?,
+        agent_edits: config.ai.edit_mode.into(),
+        complaint,
     };
     // Kept until the window closes; dropping it stops the server.
     let mut server = None;
@@ -130,7 +141,11 @@ fn run() -> Result<(), String> {
         // the window works as usual; agents just cannot reach it.
         server = zetwerk_mcp::socket_path().and_then(|socket| {
             let editor = Arc::new(Bridge::new(handle.clone()));
-            zetwerk_mcp::serve(&socket, editor, args.dev).ok()
+            let tools = zetwerk_mcp::Tools {
+                save: config.ai.save,
+                development: args.dev,
+            };
+            zetwerk_mcp::serve(&socket, editor, tools).ok()
         });
         if let Some((keys, screenshot)) = script {
             std::thread::spawn(move || {
@@ -229,10 +244,67 @@ fn run_script(
 
 /// `zetwerk mcp`: forwards an agent's standard input and output to the
 /// window's MCP server.
-fn mcp() -> Result<(), String> {
-    let socket = zetwerk_mcp::find_socket()?;
-    zetwerk_mcp::proxy_stdio(&socket)
-        .map_err(|err| format!("lost the connection to the zetwerk window: {err}"))
+fn mcp(args: &Args) -> Result<(), String> {
+    let proxy = |socket: PathBuf| {
+        zetwerk_mcp::proxy_stdio(&socket)
+            .map_err(|err| format!("lost the connection to the zetwerk window: {err}"))
+    };
+    let path = match args.values.as_slice() {
+        [] => {
+            let socket = zetwerk_mcp::find_socket().map_err(|why| {
+                format!("{why}; `zetwerk mcp <file.typ>` works on a document without one")
+            })?;
+            return proxy(socket);
+        }
+        [path] => PathBuf::from(path),
+        [_, extra, ..] => return Err(format!("unexpected argument {}", extra.display())),
+    };
+    if !path.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    // Standard output is the agent's line from here on: complaints go to
+    // standard error.
+    let (config, complaint) = config::load();
+    if let Some(complaint) = &complaint {
+        eprintln!("{complaint}");
+    }
+    let options = app::Options {
+        path,
+        font_set: if args.embedded_fonts {
+            FontSet::Embedded
+        } else {
+            FontSet::EmbeddedAndSystem
+        },
+        power: args.power,
+        state_dir: state_dir()?,
+        agent_edits: config.ai.edit_mode.into(),
+        complaint: None,
+    };
+    match headless::spawn(&options) {
+        Ok((handle, thread)) => {
+            let editor = Arc::new(Bridge::new(handle.clone()));
+            // There is no window to save in: the agent may.
+            let tools = zetwerk_mcp::Tools {
+                save: true,
+                development: false,
+            };
+            let served = zetwerk_mcp::serve_stdio(editor, tools);
+            handle.send(Request::Quit);
+            let _ = thread.join();
+            served.map_err(|err| format!("the connection to the agent failed: {err}"))
+        }
+        // A window has the document: the agent works in that.
+        Err(headless::OpenError::AlreadyOpen) => {
+            let socket = zetwerk_mcp::find_socket().map_err(|_| {
+                format!(
+                    "{} is open in another zetwerk that cannot be reached",
+                    options.path.display()
+                )
+            })?;
+            proxy(socket)
+        }
+        Err(headless::OpenError::Other(why)) => Err(why),
+    }
 }
 
 /// `zetwerk call`: calls one tool of the window and prints its answer.

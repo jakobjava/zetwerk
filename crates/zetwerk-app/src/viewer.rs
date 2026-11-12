@@ -5,6 +5,8 @@
 //! should look like. That keeps the whole behaviour of the program testable
 //! without opening a window.
 
+pub mod agent;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -24,6 +26,7 @@ use zetwerk_render::{PixelRegion, Tile, TileKey, page_size_px, tile_origins, til
 use zetwerk_typst::{CompileOutput, Environment, PageLines, PageMap, Project, ProjectWorld};
 use zetwerk_vim::Effect;
 
+use self::agent::{AgentEdits, Mark, Proposal};
 use crate::chrome::{self, Chrome, Image, ROW_HEIGHT, RowText, STATUS_HEIGHT, Status};
 use crate::editor::{self, Editor, Rows};
 use crate::gpu::{Quad, TextureId};
@@ -58,6 +61,18 @@ const PAGE_BAR: [u8; 4] = [0x28, 0x28, 0x28, 0xff];
 const PAGE_SELECTION: [u8; 4] = [0x45, 0x85, 0x88, 0x55];
 /// How many rows stay visible beyond the cursor when the source scrolls.
 const SCROLL_MARGIN: usize = 3;
+/// A change an agent proposes, in the source and on the page; one whose
+/// text has changed since; and what an agent changed last.
+const PROPOSAL: [u8; 3] = [0x5c, 0x4a, 0x14];
+const PAGE_PROPOSAL: [u8; 4] = [0xd7, 0x99, 0x21, 0x60];
+const STALE_PROPOSAL: [u8; 3] = [0x5c, 0x26, 0x22];
+const PAGE_STALE_PROPOSAL: [u8; 4] = [0xcc, 0x24, 0x1d, 0x45];
+const AGENT_MARK: [u8; 3] = [0x3c, 0x42, 0x1c];
+const PAGE_AGENT_MARK: [u8; 4] = [0x98, 0x97, 0x1a, 0x50];
+/// How many lines of what goes and of what comes the panel of a proposal
+/// shows, and how many characters of each.
+const PROPOSAL_LINES: usize = 8;
+const PROPOSAL_COLUMNS: usize = 90;
 /// The lens: its edge, how many rows and cells of source it shows at
 /// most, how many cells wide it is at least, and its padding and its
 /// distance from the cursor's line in points.
@@ -91,6 +106,8 @@ pub enum Edited {
     Command,
     /// Typing ended with changes not yet compiled.
     LeftInsert,
+    /// An agent changed the text, or a change it proposed was accepted.
+    Agent,
 }
 
 /// A compile shorter than this (in milliseconds) is run for every key
@@ -597,6 +614,16 @@ pub struct Viewer {
     message: Option<Message>,
     performance_panel: bool,
     quit: bool,
+    /// Whether agents change the text or propose changes to it.
+    agent_edits: AgentEdits,
+    /// The changes agents have proposed, in the order of the text; the
+    /// number the next one gets; and the text their places are places of.
+    proposals: Vec<Proposal>,
+    next_proposal: u64,
+    proposal_text: Option<String>,
+    /// What an agent changed last, until the next key: shown, so that the
+    /// user sees what was done.
+    agent_mark: Option<Range<usize>>,
     /// Tiles of the current document at the current zoom, by page and tile
     /// origin, so that a frame does not crop and hash pages again.
     planned: HashMap<(usize, u32, u32), Tile>,
@@ -657,6 +684,11 @@ impl Viewer {
             message: None,
             performance_panel: false,
             quit: false,
+            agent_edits: AgentEdits::default(),
+            proposals: Vec::new(),
+            next_proposal: 1,
+            proposal_text: None,
+            agent_mark: None,
             planned: HashMap::new(),
             shown: HashMap::new(),
             stats: Stats::default(),
@@ -690,6 +722,16 @@ impl Viewer {
             )),
         }
         self.arrange();
+        self
+    }
+
+    /// Takes from `options` what is the user's to say about the viewer.
+    #[must_use]
+    pub fn configured(mut self, options: &crate::app::Options) -> Self {
+        self.agent_edits = options.agent_edits;
+        if let Some(complaint) = &options.complaint {
+            self.alert(complaint.clone());
+        }
         self
     }
 
@@ -752,6 +794,12 @@ impl Viewer {
             self.project.set_source(editor.source().clone());
         }
         (self.revision, self.project.snapshot())
+    }
+
+    /// Where the document's main file is, if it is a file.
+    #[must_use]
+    pub fn main_path(&self) -> Option<std::path::PathBuf> {
+        self.project.main_path().map(Path::to_owned)
     }
 
     /// Whether the pages on screen reflect the current revision.
@@ -1190,8 +1238,10 @@ impl Viewer {
         if let Some(failure) = editor.take_failure() {
             self.alert(format!("not changed: {failure}"));
         }
+        self.agent_mark = None;
         if typed.changed {
             self.revision += 1;
+            self.sync_proposals();
             let shown = self.predict();
             self.edited = Some(if !typing {
                 Edited::Command
@@ -1386,6 +1436,35 @@ impl Viewer {
             "x" | "xit" => self.quit = !modified || self.save(false),
             "e!" | "edit!" => self.reload(),
             "perf" => self.performance_panel = !self.performance_panel,
+            "proposal next" => self.goto_proposal(true),
+            "proposal previous" => self.goto_proposal(false),
+            "accept" => {
+                self.accept_proposals(false);
+            }
+            "accept all" => {
+                self.accept_proposals(true);
+            }
+            "reject" => {
+                self.reject_proposals(false);
+            }
+            "reject all" => {
+                self.reject_proposals(true);
+            }
+            "agents" => {
+                let mode = match self.agent_edits {
+                    AgentEdits::Live => "agents change the text (:agents propose to review first)",
+                    AgentEdits::Propose => "agents propose changes (:agents live to let them)",
+                };
+                self.notice(mode);
+            }
+            "agents live" => {
+                self.agent_edits = AgentEdits::Live;
+                self.notice("agents change the text from now on");
+            }
+            "agents propose" => {
+                self.agent_edits = AgentEdits::Propose;
+                self.notice("agents propose their changes from now on");
+            }
             "view" => self.cycle_panes(),
             "view split" | "view source" | "view page" if self.editor.is_some() => {
                 self.panes = match command {
@@ -1433,8 +1512,7 @@ impl Viewer {
         };
         match editor.reload() {
             Ok(()) => {
-                self.revision += 1;
-                self.edited = Some(Edited::Command);
+                self.text_changed(Edited::Command);
                 self.notice("loaded from disk; undo brings the text back");
             }
             Err(err) => self.alert(format!("not loaded: {err}")),
@@ -1457,6 +1535,7 @@ impl Viewer {
         if self.performance_panel {
             self.performance(&mut scene, has);
         }
+        self.proposal_panel(&mut scene, has);
         scene
     }
 
@@ -1554,6 +1633,7 @@ impl Viewer {
         let Some(change) = self.places() else {
             return;
         };
+        let agent_marks = self.agent_marks();
         let (Some(editor), Some(document), Some(world)) =
             (&self.editor, &self.document, &self.compiled_world)
         else {
@@ -1575,11 +1655,24 @@ impl Viewer {
                 (rect.max.y - rect.min.y).to_pt() * zoom,
             )
         };
-        if let Some(selection) = editor.selection() {
-            let selection =
-                change.back_or_edge(selection.start)..change.back_or_edge(selection.end);
-            for rect in map.selection(file, &selection) {
-                tint(scene, has, PAGE_SELECTION, place(rect));
+        let mut marked: Vec<(Range<usize>, [u8; 4])> = Vec::new();
+        for (range, mark) in agent_marks {
+            let colour = match mark {
+                Mark::Changed => PAGE_AGENT_MARK,
+                Mark::Proposed => PAGE_PROPOSAL,
+                Mark::Stale => PAGE_STALE_PROPOSAL,
+            };
+            marked.push((range, colour));
+        }
+        marked.extend(editor.selection().map(|range| (range, PAGE_SELECTION)));
+        for (range, colour) in marked {
+            let mut range = change.back_or_edge(range.start)..change.back_or_edge(range.end);
+            if range.is_empty() {
+                // Text to be put in: shown on what stands there now.
+                range.end += 1;
+            }
+            for rect in map.selection(file, &range) {
+                tint(scene, has, colour, place(rect));
             }
         }
         // Text put in since the compile is nowhere on the page; the place
@@ -1747,6 +1840,7 @@ impl Viewer {
         let width = self.split().0;
         let scale = self.scale;
         let height = f64::from(self.window.1.saturating_sub(self.status_height()));
+        let marked = self.agent_marks();
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -1782,6 +1876,22 @@ impl Viewer {
                 let offset = offset.clamp(row.range.start, row.range.end);
                 gutter + editor::cells(&text[row.range.start..offset]) as f64 * cell
             };
+            for (range, mark) in &marked {
+                let on_row = range.start <= row.range.end
+                    && (range.end > row.range.start || range.start == row.range.start);
+                if on_row {
+                    let colour = match mark {
+                        Mark::Changed => AGENT_MARK,
+                        Mark::Proposed => PROPOSAL,
+                        Mark::Stale => STALE_PROPOSAL,
+                    };
+                    let (from, to) = (at(range.start), at(range.end));
+                    // Text to be put in where there is none shows as a
+                    // sliver.
+                    let width = (to - from).max(cell / 3.0);
+                    solid(scene, has, colour, (from, y, width, row_height));
+                }
+            }
             if let Some(selection) = &selection
                 && selection.start <= row.range.end
                 && selection.end > row.range.start
@@ -1886,8 +1996,13 @@ impl Viewer {
         // 100 % is the size at which a point is 1/72 inch on a 96 dpi
         // display, scaled like everything else on a high-density one.
         let percent = state.zoom / (self.scale * 96.0 / 72.0) * 100.0;
+        let proposals = match self.proposals.len() {
+            0 => String::new(),
+            1 => "1 proposal ]p  ".to_owned(),
+            count => format!("{count} proposals ]p  "),
+        };
         let right = format!(
-            "{progress}{place}{}/{}  {percent:.0}%",
+            "{proposals}{progress}{place}{}/{}  {percent:.0}%",
             state.page, state.pages
         );
         let status = Status {
@@ -1930,6 +2045,80 @@ impl Viewer {
         self.panel(scene, has, &chrome::panel_markup(&rows), |width| {
             (right - width, margin)
         });
+    }
+
+    /// The change an agent proposes for the text under the cursor: what
+    /// would go and what would come, in the corner above the status line.
+    fn proposal_panel(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {
+        let Some(cursor) = self.editor.as_ref().map(Editor::cursor) else {
+            return;
+        };
+        let on = |proposal: &&Proposal| {
+            proposal.range.contains(&cursor) || proposal.range.start == cursor
+        };
+        let Some(proposal) = self.proposals.iter().find(on) else {
+            return;
+        };
+        let number = self
+            .proposals
+            .iter()
+            .position(|other| other.id == proposal.id)
+            .map_or(0, |at| at + 1);
+        let title = format!("proposal {number} of {}", self.proposals.len());
+        let hint = if proposal.stale {
+            "the text has changed since · gr drops it"
+        } else {
+            "ga accept · gr reject · ]p next"
+        };
+        let lines = |text: &str| -> Vec<String> {
+            let mut lines: Vec<String> = text
+                .lines()
+                .take(PROPOSAL_LINES)
+                .map(|line| {
+                    let mut shown: String = line.chars().take(PROPOSAL_COLUMNS).collect();
+                    if shown.len() < line.len() {
+                        shown.push('…');
+                    }
+                    shown
+                })
+                .collect();
+            let more = text.lines().count().saturating_sub(lines.len());
+            if more > 0 {
+                lines.push(format!("… {more} more"));
+            }
+            lines
+        };
+        let markup =
+            chrome::proposal_markup(&title, hint, &lines(&proposal.old), &lines(&proposal.new));
+        let margin = PANEL_MARGIN * self.scale;
+        let right = f64::from(self.window.0) - margin;
+        let bottom = f64::from(self.window.1) - f64::from(self.status_height()) - margin;
+        let scale = self.scale;
+        let Some(image) = self.chrome.render(&markup, scale) else {
+            return;
+        };
+        let (width, height) = (
+            f64::from(image.pixmap.width()),
+            f64::from(image.pixmap.height()),
+        );
+        let (x, y) = ((right - width).round(), (bottom - height).round());
+        let line = scale.round().max(1.0);
+        solid(
+            scene,
+            has,
+            LENS_EDGE,
+            (x - line, y - line, width + 2.0 * line, height + 2.0 * line),
+        );
+        scene.quads.push(Quad {
+            texture: image.id,
+            x: x as f32,
+            y: y as f32,
+            width: width as f32,
+            height: height as f32,
+        });
+        if !has(image.id) {
+            scene.images.push(image);
+        }
     }
 
     /// Renders chrome `markup` and places it where `position` says, given
@@ -3098,6 +3287,240 @@ mod tests {
         let scene = viewer.scene(&|id| held.contains(&id));
         assert_eq!(scene.images.len(), 2);
         assert!(images > 4, "rows, numbers and chrome: {images} images");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn an_agent_reads_and_changes_the_text() {
+        use super::agent::Outcome;
+        let text = "= Title\n\nThe quick brown fox.\nThe lazy dog.\n";
+        let (mut viewer, directory) = editing(text);
+        let lines = viewer.lines(Some(3), None).unwrap();
+        assert_eq!(lines.text, "3\tThe quick brown fox.\n4\tThe lazy dog.\n");
+        assert_eq!((lines.first, lines.last, lines.total), (3, 4, 4));
+        assert!(viewer.lines(Some(9), None).is_err());
+        let revision = lines.revision;
+
+        // The cursor is the user's: it stays on its word.
+        press(&mut viewer, "/lazy<CR>");
+        let outcome = viewer
+            .agent_replace(
+                "quick brown",
+                "slow red and very tired",
+                false,
+                Some(revision),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Changed {
+                revision: revision + 1,
+                lines: (3, 3)
+            }
+        );
+        assert_eq!(
+            viewer.text(),
+            Some("= Title\n\nThe slow red and very tired fox.\nThe lazy dog.\n")
+        );
+        assert_eq!(viewer.take_edited(), Some(Edited::Agent));
+        let cursor = viewer.editor.as_ref().unwrap().cursor();
+        assert!(viewer.text().unwrap()[cursor..].starts_with("lazy"));
+        assert!(viewer.agent_mark.is_some());
+
+        // Made for text that is no more; not there; there twice.
+        let stale = viewer.agent_replace("fox", "cat", false, Some(revision), false);
+        assert!(stale.unwrap_err().contains("revision"));
+        let missing = viewer.agent_replace("quick", "x", false, None, false);
+        assert!(missing.unwrap_err().contains("not in the text"));
+        let twice = viewer.agent_replace("The", "A", false, None, false);
+        assert!(twice.unwrap_err().contains("2 times (lines 3, 4)"));
+        assert_eq!(viewer.state().revision, revision + 1);
+        // All of them, if asked: one step.
+        viewer.agent_replace("The", "A", true, None, false).unwrap();
+        assert_eq!(
+            viewer.text(),
+            Some("= Title\n\nA slow red and very tired fox.\nA lazy dog.\n")
+        );
+        press(&mut viewer, "u");
+        assert_eq!(
+            viewer.text(),
+            Some("= Title\n\nThe slow red and very tired fox.\nThe lazy dog.\n")
+        );
+        press(&mut viewer, "u");
+        assert_eq!(viewer.text(), Some(text));
+        assert!(viewer.agent_mark.is_none(), "a key ends the showing");
+
+        // At the cursor, and in place of the selection.
+        press(&mut viewer, "/dog<CR>");
+        viewer.agent_insert("old ", None, false).unwrap();
+        assert!(viewer.text().unwrap().contains("lazy old dog"));
+        press(&mut viewer, "viw");
+        let focus = viewer.focus().unwrap();
+        let selected = focus.selection.unwrap();
+        assert_eq!((selected.from, selected.to), ((4, 14), (4, 17)));
+        assert_eq!(selected.text, "dog");
+        viewer.agent_replace_selection("cat", None, false).unwrap();
+        assert!(viewer.text().unwrap().contains("lazy old cat."));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn an_agents_change_is_a_step_of_its_own_while_the_user_types() {
+        let (mut viewer, directory) = editing("one\ntwo\n");
+        press(&mut viewer, "Aab");
+        viewer
+            .agent_replace("two", "three", false, None, false)
+            .unwrap();
+        press(&mut viewer, "cd<Esc>");
+        assert_eq!(viewer.text(), Some("oneabcd\nthree\n"));
+        press(&mut viewer, "u");
+        assert_eq!(viewer.text(), Some("oneab\nthree\n"));
+        press(&mut viewer, "u");
+        assert_eq!(viewer.text(), Some("oneab\ntwo\n"));
+        press(&mut viewer, "u");
+        assert_eq!(viewer.text(), Some("one\ntwo\n"));
+        press(&mut viewer, "<C-r><C-r><C-r>");
+        assert_eq!(viewer.text(), Some("oneabcd\nthree\n"));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn proposals_wait_for_the_user() {
+        use super::agent::{AgentEdits, Outcome};
+        let text = "The quick brown fox.\nThe lazy dog.\nThe end.\n";
+        let (mut viewer, directory) = editing(text);
+        // Asked for by the agent, or by the user for all agents.
+        let first = viewer
+            .agent_replace("quick", "slow", false, None, true)
+            .unwrap();
+        press(&mut viewer, ":agents propose<CR>");
+        assert_eq!(viewer.agent_edits(), AgentEdits::Propose);
+        let second = viewer
+            .agent_replace("lazy dog", "busy cat", false, None, false)
+            .unwrap();
+        let third = viewer
+            .agent_replace("end", "END", false, None, false)
+            .unwrap();
+        let revision = viewer.state().revision;
+        assert_eq!(first, Outcome::Proposed { id: 1, revision });
+        assert_eq!(second, Outcome::Proposed { id: 2, revision });
+        assert_eq!(third, Outcome::Proposed { id: 3, revision });
+        assert_eq!(viewer.text(), Some(text), "nothing is changed yet");
+        assert_eq!(viewer.proposals().len(), 3);
+
+        // On a proposal, the panel says what it would do.
+        let panel = |viewer: &mut Viewer| {
+            let edge = TextureId(hash128(&("solid", LENS_EDGE)));
+            let scene = viewer.scene(&|_| false);
+            scene.quads.iter().any(|quad| quad.texture == edge)
+        };
+        assert!(!panel(&mut viewer));
+        press(&mut viewer, "]p");
+        let cursor = |viewer: &Viewer| viewer.editor.as_ref().unwrap().cursor();
+        assert_eq!(cursor(&viewer), text.find("quick").unwrap());
+        assert!(panel(&mut viewer));
+        press(&mut viewer, "]p");
+        assert_eq!(cursor(&viewer), text.find("lazy").unwrap());
+        press(&mut viewer, "[p[p");
+        assert_eq!(
+            cursor(&viewer),
+            text.find("end").unwrap(),
+            "around the ends"
+        );
+
+        // Accepting is a change like any other, and moves the rest along.
+        press(&mut viewer, "]pga");
+        assert_eq!(
+            viewer.text(),
+            Some("The slow brown fox.\nThe lazy dog.\nThe end.\n")
+        );
+        assert_eq!(viewer.take_edited(), Some(Edited::Agent));
+        let now = viewer.text().unwrap().to_owned();
+        let ranges: Vec<&str> = viewer
+            .proposals()
+            .iter()
+            .map(|proposal| &now[proposal.range.clone()])
+            .collect();
+        assert_eq!(ranges, ["lazy dog", "end"]);
+        press(&mut viewer, "u");
+        assert_eq!(viewer.text(), Some(text));
+
+        // Typing in the text of one makes it stale: it can only go.
+        press(&mut viewer, "/dog<CR>x");
+        assert!(viewer.proposals()[0].stale && !viewer.proposals()[1].stale);
+        press(&mut viewer, "0]p");
+        assert!(panel(&mut viewer));
+        press(&mut viewer, "ga");
+        assert!(viewer.text().unwrap().contains("lazy og"), "not made");
+        assert_eq!(viewer.proposals().len(), 2);
+        // Undoing the typing makes it good again.
+        press(&mut viewer, "u");
+        assert!(!viewer.proposals()[0].stale);
+        press(&mut viewer, "gg]pgr");
+        assert_eq!(viewer.proposals().len(), 1);
+        press(&mut viewer, ":accept all<CR>");
+        assert_eq!(
+            viewer.text(),
+            Some("The quick brown fox.\nThe lazy dog.\nThe END.\n")
+        );
+        assert_eq!(viewer.proposals(), []);
+        // The agent may take one back itself.
+        viewer
+            .agent_replace("fox", "cat", false, None, false)
+            .unwrap();
+        let id = viewer.proposals()[0].id;
+        assert!(viewer.withdraw_proposal(id + 7).is_err());
+        viewer.withdraw_proposal(id).unwrap();
+        assert_eq!(viewer.proposals(), []);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn an_agent_finds_its_way_in_the_document() {
+        let text = "#set page(width: 300pt, height: 200pt)\n\
+                    = First <one>\n\
+                    Some words, and Words again.\n\
+                    #pagebreak()\n\
+                    == Second *part*\n\
+                    More words here.\n";
+        let (mut viewer, directory) = editing(text);
+        let (found, total) = viewer.search("words", false, 10).unwrap();
+        let places: Vec<(usize, usize)> = found.iter().map(|at| (at.line, at.column)).collect();
+        assert_eq!((places, total), (vec![(3, 6), (6, 6)], 2));
+        let (found, total) = viewer.search("WORDS", true, 2).unwrap();
+        assert_eq!((found.len(), total), (2, 3));
+        assert_eq!(found[1].text, "Some words, and Words again.");
+
+        let outline = viewer.outline().unwrap();
+        let headings: Vec<(usize, &str, usize, Option<usize>)> = outline
+            .headings
+            .iter()
+            .map(|heading| {
+                (
+                    heading.level,
+                    heading.text.as_str(),
+                    heading.line,
+                    heading.page,
+                )
+            })
+            .collect();
+        assert_eq!(
+            headings,
+            [(1, "First", 2, Some(1)), (2, "Second *part*", 5, Some(2))]
+        );
+        assert_eq!(outline.labels, [("one".to_owned(), 2)]);
+
+        // From the text to the page and back.
+        let (page, x, y) = viewer.page_of(6, 6).unwrap();
+        assert_eq!(page, 2);
+        assert_eq!(viewer.source_of(page, x + 1.0, y + 2.0), Ok((6, 6)));
+        assert!(viewer.source_of(3, 0.0, 0.0).is_err());
+        assert!(viewer.page_of(40, 1).is_err());
+        // Not for text the pages are not of.
+        press(&mut viewer, "x");
+        assert!(viewer.page_of(6, 6).unwrap_err().contains("compiled"));
+        assert_eq!(viewer.outline().unwrap().headings[0].page, None);
         let _ = std::fs::remove_dir_all(directory);
     }
 

@@ -24,6 +24,7 @@ use crate::editor::Editor;
 use crate::gpu::{self, Gpu, Quad};
 use crate::keys::{Key, KeyPress};
 use crate::power::PowerMode;
+use crate::viewer::agent::AgentEdits;
 use crate::viewer::{self, Edited, State, Viewer};
 use crate::watch::FileWatcher;
 
@@ -35,6 +36,11 @@ pub struct Options {
     pub power: PowerMode,
     /// Where the journals that make edits survive a crash are kept.
     pub state_dir: PathBuf,
+    /// Whether agents change the text or propose changes to it.
+    pub agent_edits: AgentEdits,
+    /// Something to tell the user once the document is open, such as
+    /// that the settings could not be read.
+    pub complaint: Option<String>,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -56,8 +62,16 @@ pub enum Request {
     /// Reply with the document once the current revision is compiled, or
     /// `None` if it has never compiled.
     Document(Sender<Option<Arc<PagedDocument>>>),
+    /// Do this with the viewer, now. What it changes is compiled and
+    /// drawn as what keys change is.
+    Do(Task),
+    /// Do this with the viewer once the current revision is compiled.
+    WhenCompiled(Task),
     Quit,
 }
+
+/// Something to do with the viewer on the window's thread.
+pub type Task = Box<dyn FnOnce(&mut Viewer) + Send>;
 
 /// The pixels of a window.
 pub struct Screenshot {
@@ -67,16 +81,33 @@ pub struct Screenshot {
     pub rgba: Vec<u8>,
 }
 
-/// Sends [`Request`]s to a running window.
+/// Sends [`Request`]s to a running window, or to a document that runs
+/// without one.
 #[derive(Clone)]
 pub struct Handle {
-    proxy: EventLoopProxy<Event>,
+    to: Receiving,
+}
+
+#[derive(Clone)]
+enum Receiving {
+    Window(EventLoopProxy<Event>),
+    Thread(std::sync::mpsc::Sender<Request>),
 }
 
 impl Handle {
+    /// A handle to a thread that takes requests from a channel.
+    pub(crate) fn to_thread(requests: std::sync::mpsc::Sender<Request>) -> Self {
+        Self {
+            to: Receiving::Thread(requests),
+        }
+    }
+
     /// Sends `request`. Returns `false` if the window is gone.
     pub fn send(&self, request: Request) -> bool {
-        self.proxy.send_event(Event::Request(request)).is_ok()
+        match &self.to {
+            Receiving::Window(proxy) => proxy.send_event(Event::Request(request)).is_ok(),
+            Receiving::Thread(requests) => requests.send(request).is_ok(),
+        }
     }
 }
 
@@ -105,7 +136,7 @@ pub fn run(options: Options, ready: impl FnOnce(Handle)) -> Result<(), String> {
         .map_err(|err| format!("cannot start the event loop: {err}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     ready(Handle {
-        proxy: event_loop.create_proxy(),
+        to: Receiving::Window(event_loop.create_proxy()),
     });
     let mut app = App {
         options,
@@ -311,7 +342,8 @@ impl Session {
             window.scale_factor(),
         )
         .ok_or("cannot set up the interface")?
-        .editing(editor, &opened);
+        .editing(editor, &opened)
+        .configured(options);
         let mut session = Self {
             window,
             surface,
@@ -406,6 +438,10 @@ impl Session {
             Request::State(reply) => {
                 let _ = reply.send(self.viewer.state());
             }
+            Request::Do(task) => {
+                task(&mut self.viewer);
+                self.after_keys();
+            }
             // Answered at the end of a frame that finds everything settled.
             waiting => self.waiting.push(waiting),
         }
@@ -427,7 +463,9 @@ impl Session {
         let urgency = match edited {
             Edited::Typing => Urgency::WhenIdle,
             Edited::Command if rapid => Urgency::WhenIdle,
-            Edited::Command | Edited::LeftInsert | Edited::Unpredicted => Urgency::Now,
+            Edited::Command | Edited::LeftInsert | Edited::Unpredicted | Edited::Agent => {
+                Urgency::Now
+            }
         };
         if edited == Edited::Command {
             self.last_edit = Some(now);
@@ -537,6 +575,12 @@ impl Session {
                 }
                 Request::Document(reply) if compiled => {
                     let _ = reply.send(self.viewer.document().cloned());
+                }
+                Request::WhenCompiled(task) if compiled => {
+                    task(&mut self.viewer);
+                    // It may have changed something itself.
+                    self.after_keys();
+                    self.window.request_redraw();
                 }
                 waiting => still_waiting.push(waiting),
             }
