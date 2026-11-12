@@ -226,9 +226,10 @@ impl PageMap {
         best.map(|(_, file, offset)| (file, offset))
     }
 
-    /// The lines of text on the page, as far as they show text of `file`.
+    /// The lines of text on the page, as far as they show text of the
+    /// project's files.
     #[must_use]
-    pub fn lines(&self, file: FileId) -> PageLines {
+    pub fn lines(&self) -> PageLines {
         let mut lines: Vec<PageLine> = Vec::new();
         // Not what stands around the text on every page: a cursor that
         // goes down the text does not go through the running titles.
@@ -239,9 +240,10 @@ impl PageMap {
             // Text the document makes itself (a number, a reference) is
             // no place for the cursor, but part of its line: without it
             // the line would fall into pieces.
-            let entry = glyph.origin.range_in(file).map(|range| LineGlyph {
+            let entry = glyph.origin.place().map(|(file, range)| LineGlyph {
                 left,
                 right,
+                file,
                 offset: range.start,
                 end: range.end,
             });
@@ -330,8 +332,9 @@ struct PageLine {
 struct LineGlyph {
     left: f64,
     right: f64,
-    /// The byte of the source the glyph begins to show, and the byte
-    /// after the last it shows.
+    /// The file and the byte of it that the glyph begins to show, and
+    /// the byte after the last it shows.
+    file: FileId,
     offset: usize,
     end: usize,
 }
@@ -341,6 +344,11 @@ impl LineGlyph {
     /// before it when it comes back a hair off.
     fn middle(&self) -> f64 {
         self.left + (self.right - self.left) / 2.0
+    }
+
+    /// Whether the glyph shows byte `offset` of `file`.
+    fn shows(&self, file: FileId, offset: usize) -> bool {
+        self.file == file && self.offset <= offset && offset < self.end
     }
 }
 
@@ -391,25 +399,26 @@ impl PageLines {
         self.lines.is_empty()
     }
 
-    /// Whether a line of the page shows byte `offset` of the source.
+    /// Whether a line of the page shows byte `offset` of `file`.
     #[must_use]
-    pub fn shows(&self, offset: usize) -> bool {
+    pub fn shows(&self, file: FileId, offset: usize) -> bool {
         self.lines
             .iter()
             .flat_map(|line| &line.glyphs)
-            .any(|glyph| glyph.offset <= offset && offset < glyph.end)
+            .any(|glyph| glyph.shows(file, offset))
     }
 
     /// The line that shows byte `offset` of the source, or the text
     /// nearest before it (after it, if there is none before), and how far
     /// across the page the middle of that is.
     #[must_use]
-    pub fn find(&self, offset: usize) -> Option<(usize, f64)> {
+    pub fn find(&self, file: FileId, offset: usize) -> Option<(usize, f64)> {
         let glyphs = || {
             self.lines
                 .iter()
                 .enumerate()
                 .flat_map(|(index, line)| line.glyphs.iter().map(move |glyph| (index, glyph)))
+                .filter(|(_, glyph)| glyph.file == file)
         };
         // Of several that begin at the same byte (all that one call put
         // on the page), the first.
@@ -427,12 +436,9 @@ impl PageLines {
     /// How far across the page line `line` shows byte `offset`, or else
     /// begins.
     #[must_use]
-    pub fn across(&self, line: usize, offset: usize) -> Option<f64> {
+    pub fn across(&self, line: usize, file: FileId, offset: usize) -> Option<f64> {
         let line = self.lines.get(line)?;
-        let shown = line
-            .glyphs
-            .iter()
-            .find(|glyph| glyph.offset <= offset && offset < glyph.end);
+        let shown = line.glyphs.iter().find(|glyph| glyph.shows(file, offset));
         Some(shown.map_or(line.left, LineGlyph::middle))
     }
 
@@ -525,6 +531,17 @@ impl PageLines {
         nearest(&|_| true).map(|index| (index, across))
     }
 
+    /// The file and the byte that line `line` begins with: those of its
+    /// leftmost glyph.
+    #[must_use]
+    pub fn first(&self, line: usize) -> Option<(FileId, usize)> {
+        let line = self.lines.get(line)?;
+        line.glyphs
+            .iter()
+            .min_by(|a, b| order(a.left, b.left))
+            .map(|glyph| (glyph.file, glyph.offset))
+    }
+
     /// From where to where across the page line `line` reaches.
     #[must_use]
     pub fn extent(&self, line: usize) -> Option<(f64, f64)> {
@@ -553,11 +570,12 @@ impl PageLines {
             .map(|(index, _)| index)
     }
 
-    /// The byte of the source shown `across` on line `line`: that of the
-    /// glyph there, or of the nearest one. Glyphs that show byte `not` do
-    /// not count: `None` if the line has no others.
+    /// The place in the sources shown `across` on line `line`: the file
+    /// and the byte of the glyph there, or of the nearest one. Glyphs
+    /// that show the place `not` do not count: `None` if the line has no
+    /// others.
     #[must_use]
-    pub fn at(&self, line: usize, across: f64, not: usize) -> Option<usize> {
+    pub fn at(&self, line: usize, across: f64, not: (FileId, usize)) -> Option<(FileId, usize)> {
         let aside = |glyph: &LineGlyph| {
             if across < glyph.left {
                 glyph.left - across
@@ -573,9 +591,9 @@ impl PageLines {
             .get(line)?
             .glyphs
             .iter()
-            .filter(|glyph| !(glyph.offset <= not && not < glyph.end))
+            .filter(|glyph| !glyph.shows(not.0, not.1))
             .min_by(|a, b| order(aside(a), aside(b)))
-            .map(|glyph| glyph.offset)
+            .map(|glyph| (glyph.file, glyph.offset))
     }
 }
 
@@ -594,6 +612,18 @@ pub struct Caret {
 }
 
 impl Origin {
+    /// The file and the bytes of it this glyph stands for, if it stands
+    /// for any.
+    fn place(&self) -> Option<(FileId, &Range<usize>)> {
+        match self {
+            Self::Text { file, range }
+            | Self::Space { file, range }
+            | Self::Math { file, range }
+            | Self::Object { file, range, .. } => Some((*file, range)),
+            Self::Atomic(_) => None,
+        }
+    }
+
     /// The bytes of `file` this glyph stands for, if it stands for any.
     fn range_in(&self, file: FileId) -> Option<&Range<usize>> {
         match self {

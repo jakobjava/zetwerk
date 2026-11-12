@@ -485,6 +485,13 @@ impl Engine {
         self.wanted_column = None;
     }
 
+    /// Whether no command is under way: no count, no operator, no key
+    /// that waits for another.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.pending.is_idle()
+    }
+
     /// Whether an operator is waiting for its motion.
     #[must_use]
     pub fn operator_pending(&self) -> bool {
@@ -513,6 +520,18 @@ impl Engine {
         self.texts.push((replaced, text, within));
         let number = u32::try_from(self.texts.len() - 1).unwrap_or(u32::MAX);
         KeyPress::plain(Key::Text(number))
+    }
+
+    /// Takes over from `other`, the engine of another text, what a user
+    /// expects to have in every text: the registers, what `.` repeats,
+    /// what `n` and `;` look for, the last macro.
+    pub fn share(&mut self, other: &Self) {
+        self.registers.clone_from(&other.registers);
+        self.last_change.clone_from(&other.last_change);
+        self.last_search.clone_from(&other.last_search);
+        self.last_find = other.last_find;
+        self.last_macro = other.last_macro;
+        self.texts.clone_from(&other.texts);
     }
 
     /// Puts the cursor at `pos` as a jump: `` ` ` `` leads back.
@@ -1041,6 +1060,9 @@ impl Engine {
                 // The editor's own: to the next or the previous change an
                 // agent proposes (`]p`).
                 let what = match press.key {
+                    // `]]` and `[[`: to the next and the previous page.
+                    Key::Char(']') if !press.ctrl && forward => "page",
+                    Key::Char('[') if !press.ctrl && !forward => "page",
                     Key::Char('p') if !press.ctrl => "proposal",
                     // And to what the compiler complains about.
                     Key::Char('d') if !press.ctrl => "diagnostic",
@@ -1097,6 +1119,11 @@ impl Engine {
             return;
         };
 
+        if press.ctrl && c == '^' && self.pending.is_idle() && !self.selecting() {
+            // To the file that was edited before this one.
+            self.effects.push(Effect::Command("b#".to_owned()));
+            return;
+        }
         if press.ctrl {
             // Moving by pages: the cursor goes, and the view follows it.
             let page = match c {
@@ -1523,8 +1550,13 @@ impl Engine {
             }
             // To where the name under the cursor is defined, as far as
             // the host can tell; and the host's list of places to go.
-            'd' | 'o' if self.pending.is_idle() && !self.selecting() => {
-                let command = if c == 'd' { "definition" } else { "outline" };
+            'd' | 'o' | 'f' if self.pending.is_idle() && !self.selecting() => {
+                let command = match c {
+                    'd' => "definition",
+                    'o' => "outline",
+                    // The file named under the cursor.
+                    _ => "file",
+                };
                 self.effects.push(Effect::Command(command.to_owned()));
             }
             // Nor Vim's `ga` and `gr`: to accept or reject the change an

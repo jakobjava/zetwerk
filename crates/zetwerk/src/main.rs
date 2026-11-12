@@ -34,8 +34,22 @@ Settings are read from ~/.config/zetwerk/config.toml:
   [ai]
   edit_mode = \"live\"      or \"propose\": agents' changes wait for you
   save = false            whether agents may write the file
+  [view]
+  layout = \"split\"        or \"source\", \"page\"
+  slides = false          one page at a time, whole
+  [power]
+  mode = \"auto\"           or \"saver\", \"performance\"
+  [keys.normal]           your own keys, as Vim's nnoremap
+  \"<C-s>\" = \":w<CR>\"
+  [keys.insert]           and inoremap (one key each)
+  \"<C-s>\" = \"<Esc>:w<CR>\"
+
+A file that another file includes is opened as part of that document:
+the whole document is shown, the file is what is edited.
 
 Options:
+      --main <file.typ>   The main file of the document, where zetwerk
+                          does not find it itself
       --power <mode>      auto (default), saver or performance
       --embedded-fonts    Use only the fonts shipped with Typst
   -h, --help              Show this help
@@ -87,9 +101,48 @@ struct Args {
     page: Option<usize>,
     scale: Option<f64>,
     embedded_fonts: bool,
-    power: PowerMode,
+    power: Option<PowerMode>,
     keys: Vec<KeyPress>,
     screenshot: Option<PathBuf>,
+    main: Option<PathBuf>,
+}
+
+/// What a document is opened with: what the command line says, then what
+/// the settings say.
+fn options(
+    args: &Args,
+    config: &config::Config,
+    path: PathBuf,
+    font_set: FontSet,
+    complaint: Option<String>,
+) -> Result<app::Options, String> {
+    let (keys, odd_key) = config.keys.keymap();
+    Ok(app::Options {
+        main: main_of(&path, args.main.as_deref()),
+        path,
+        font_set,
+        power: args
+            .power
+            .or(config.power.mode.map(Into::into))
+            .unwrap_or_default(),
+        state_dir: state_dir()?,
+        agent_edits: config.ai.edit_mode.into(),
+        complaint: complaint.or(odd_key),
+        keys,
+        layout: config.view.layout.map(Into::into),
+        slides: config.view.slides,
+    })
+}
+
+/// The main file of the document `file` is part of, if that is another
+/// file: the one the user named, or the one that includes it.
+fn main_of(file: &Path, named: Option<&Path>) -> Option<PathBuf> {
+    let main = named.map_or_else(|| zetwerk_typst::find_main(file), Path::to_owned);
+    let same = match (main.canonicalize(), file.canonicalize()) {
+        (Ok(main), Ok(file)) => main == file,
+        _ => main == file,
+    };
+    (!same).then_some(main)
 }
 
 fn run() -> Result<(), String> {
@@ -126,14 +179,7 @@ fn run() -> Result<(), String> {
     let script = (!args.keys.is_empty() || args.screenshot.is_some())
         .then(|| (args.keys.clone(), args.screenshot.clone()));
     let (config, complaint) = config::load();
-    let options = app::Options {
-        path: input,
-        font_set,
-        power: args.power,
-        state_dir: state_dir()?,
-        agent_edits: config.ai.edit_mode.into(),
-        complaint,
-    };
+    let options = options(&args, &config, input, font_set, complaint)?;
     // Kept until the window closes; dropping it stops the server.
     let mut server = None;
     app::run(options, |handle| {
@@ -183,8 +229,9 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .value()
                     .and_then(lexopt::ValueExt::string)
                     .map_err(fail)?;
-                args.power = PowerMode::from_name(&name)
+                let mode = PowerMode::from_name(&name)
                     .ok_or_else(|| format!("unknown power mode {name:?}"))?;
+                args.power = Some(mode);
             }
             Long("keys") => {
                 let notation = parser
@@ -194,6 +241,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.keys = keys::parse(&notation)?;
             }
             Long("screenshot") => args.screenshot = Some(parser.value().map_err(fail)?.into()),
+            Long("main") => args.main = Some(parser.value().map_err(fail)?.into()),
             Value(value) if args.command == Command::Open && args.values.is_empty() => {
                 match value.to_str() {
                     Some("render") => args.command = Command::Render,
@@ -268,18 +316,12 @@ fn mcp(args: &Args) -> Result<(), String> {
     if let Some(complaint) = &complaint {
         eprintln!("{complaint}");
     }
-    let options = app::Options {
-        path,
-        font_set: if args.embedded_fonts {
-            FontSet::Embedded
-        } else {
-            FontSet::EmbeddedAndSystem
-        },
-        power: args.power,
-        state_dir: state_dir()?,
-        agent_edits: config.ai.edit_mode.into(),
-        complaint: None,
+    let font_set = if args.embedded_fonts {
+        FontSet::Embedded
+    } else {
+        FontSet::EmbeddedAndSystem
     };
+    let options = options(args, &config, path, font_set, None)?;
     match headless::spawn(&options) {
         Ok((handle, thread)) => {
             let editor = Arc::new(Bridge::new(handle.clone()));

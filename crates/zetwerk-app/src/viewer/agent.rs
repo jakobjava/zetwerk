@@ -39,6 +39,8 @@ pub enum AgentEdits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {
     pub id: u64,
+    /// The file it is about.
+    pub file: typst::syntax::FileId,
     /// The bytes of the text to replace.
     pub range: Range<usize>,
     /// What is there, and what should be.
@@ -193,10 +195,30 @@ impl Viewer {
         self.agent_edits = mode;
     }
 
-    /// The changes agents have proposed, in the order of the text.
+    /// The changes agents have proposed to the file being edited, in
+    /// the order of its text.
     #[must_use]
     pub fn proposals(&self) -> &[Proposal] {
         &self.proposals
+    }
+
+    /// How many changes agents have proposed to other open files.
+    #[must_use]
+    pub fn proposals_elsewhere(&self) -> usize {
+        self.proposals_elsewhere.len()
+    }
+
+    /// Brings up the proposals for the file that is being edited now,
+    /// and puts away those for the one that was.
+    pub(super) fn swap_proposals(&mut self) {
+        let file = self.file_id();
+        self.proposals_elsewhere.append(&mut self.proposals);
+        let (here, elsewhere) = std::mem::take(&mut self.proposals_elsewhere)
+            .into_iter()
+            .partition(|proposal| proposal.file == file);
+        self.proposals = here;
+        self.proposals_elsewhere = elsewhere;
+        self.proposal_text = self.text().map(str::to_owned);
     }
 
     /// The cursor and the selection; `None` for a window that only shows
@@ -369,6 +391,7 @@ impl Viewer {
                 self.next_proposal += 1;
                 self.proposals.push(Proposal {
                     id,
+                    file: self.file_id(),
                     old: text[range.clone()].to_owned(),
                     range: range.clone(),
                     new: new.to_owned(),
@@ -429,6 +452,7 @@ impl Viewer {
     /// What follows a change of the text that no key made.
     pub(super) fn text_changed(&mut self, edited: Edited) {
         self.revision += 1;
+        self.touched();
         if let Some(old) = self.predicted.take() {
             self.planned.retain(|(index, _, _), _| *index != old.index);
         }
@@ -722,7 +746,7 @@ impl Viewer {
         let offset = offset_of(editor.text(), line, column)
             .ok_or_else(|| format!("the text has no line {line}"))?;
         let (document, world) = (document.clone(), world.clone());
-        let file = self.project.main();
+        let file = self.file_id();
         let source = world
             .source(file)
             .map_err(|_| "the compiled source is gone".to_owned())?;
@@ -744,10 +768,15 @@ impl Viewer {
         })
     }
 
-    /// The line and column of the text that is shown on `page` (counting
-    /// from 1) at the point `x` across and `y` down it, in points, or
-    /// nearest to it.
-    pub fn source_of(&mut self, page: usize, x: f64, y: f64) -> Result<(usize, usize), String> {
+    /// The file, line and column of the text that is shown on `page`
+    /// (counting from 1) at the point `x` across and `y` down it, in
+    /// points, or nearest to it.
+    pub fn source_of(
+        &mut self,
+        page: usize,
+        x: f64,
+        y: f64,
+    ) -> Result<(String, usize, usize), String> {
         let (_, document, world) = self.current_pages()?;
         let (document, world) = (document.clone(), world.clone());
         let pages = document.pages().len();
@@ -757,7 +786,6 @@ impl Viewer {
             .ok_or_else(|| {
                 format!("page {page} does not exist; the document has {pages} page(s)")
             })?;
-        let file = self.project.main();
         let map = self
             .maps
             .entry(index)
@@ -766,11 +794,14 @@ impl Viewer {
         let (found, offset) = map
             .source_at(point)
             .ok_or("that page shows no text of the document's own")?;
-        if found != file {
-            return Err("the text there is from another file".to_owned());
-        }
-        let text = self.text().ok_or(NOT_EDITING)?;
-        Ok(line_column(text, offset))
+        // The file may be another than the one being edited: a chapter
+        // the main file includes.
+        let source = world
+            .source(found)
+            .map_err(|_| "the file of the text there is gone".to_owned())?;
+        let name = found.vpath().get_without_slash().to_owned();
+        let (line, column) = line_column(source.text(), offset);
+        Ok((name, line, column))
     }
 
     /// Writes the text to its file, as `:w` does. The error says why it

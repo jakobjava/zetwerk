@@ -34,13 +34,7 @@ pub enum OpenError {
 pub fn spawn(options: &Options) -> Result<(Handle, JoinHandle<()>), OpenError> {
     let other = |message: String| OpenError::Other(message);
     let env = Environment::new(options.font_set);
-    let project =
-        Project::open(Arc::clone(&env), &options.path).map_err(|err| other(err.to_string()))?;
-    let (editor, opened) = Editor::open(&options.path, &options.state_dir, project.main())
-        .map_err(|err| match err {
-            zetwerk_core::OpenError::AlreadyOpen(_) => OpenError::AlreadyOpen,
-            err => other(err.to_string()),
-        })?;
+    let (project, editor, opened) = open_document(&env, options)?;
     let viewer = Viewer::new(env, project, WINDOW, 1.0)
         .ok_or_else(|| other("no usable fonts were found".to_owned()))?
         .editing(editor, &opened)
@@ -51,6 +45,43 @@ pub fn spawn(options: &Options) -> Result<(Handle, JoinHandle<()>), OpenError> {
         .spawn(move || run(viewer, &requests))
         .map_err(|err| other(format!("cannot start a thread: {err}")))?;
     Ok((Handle::to_thread(send), thread))
+}
+
+/// Opens the document of `options`: its main file as a project, and the
+/// file to edit in it.
+pub(crate) fn open(
+    env: &Arc<Environment>,
+    options: &Options,
+) -> Result<(Project, Editor, zetwerk_core::Opened), String> {
+    open_document(env, options).map_err(|err| match err {
+        OpenError::AlreadyOpen => format!(
+            "{} is open in another zetwerk already",
+            options.path.display()
+        ),
+        OpenError::Other(why) => why,
+    })
+}
+
+fn open_document(
+    env: &Arc<Environment>,
+    options: &Options,
+) -> Result<(Project, Editor, zetwerk_core::Opened), OpenError> {
+    let other = |message: String| OpenError::Other(message);
+    let main = options.main.as_deref().unwrap_or(&options.path);
+    let project = Project::open(Arc::clone(env), main).map_err(|err| other(err.to_string()))?;
+    let file = project.file_id(&options.path).ok_or_else(|| {
+        other(format!(
+            "{} is not in the directory of its main file, {}",
+            options.path.display(),
+            main.display()
+        ))
+    })?;
+    let (editor, opened) =
+        Editor::open(&options.path, &options.state_dir, file).map_err(|err| match err {
+            zetwerk_core::OpenError::AlreadyOpen(_) => OpenError::AlreadyOpen,
+            err => other(err.to_string()),
+        })?;
+    Ok((project, editor, opened))
 }
 
 fn run(mut viewer: Viewer, requests: &Receiver<Request>) {

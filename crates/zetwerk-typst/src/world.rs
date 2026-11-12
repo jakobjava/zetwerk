@@ -205,6 +205,32 @@ impl Project {
         self.main_path.as_deref()
     }
 
+    /// The directory the project's files are in: what paths in the
+    /// document are relative to.
+    #[must_use]
+    pub fn root_dir(&self) -> &Path {
+        self.root.path()
+    }
+
+    /// The id of the project file at `path`, if `path` is in the project
+    /// directory.
+    #[must_use]
+    pub fn file_id(&self, path: &Path) -> Option<FileId> {
+        let absolute = std::path::absolute(path).ok()?;
+        let vpath = VirtualPath::virtualize(self.root.path(), &absolute).ok()?;
+        Some(RootedPath::new(VirtualRoot::Project, vpath).intern())
+    }
+
+    /// Where the project file `id` is on disk; `None` for the files of
+    /// packages.
+    #[must_use]
+    pub fn path_of(&self, id: FileId) -> Option<PathBuf> {
+        match id.root() {
+            VirtualRoot::Project => self.root.resolve(id.vpath()).ok(),
+            VirtualRoot::Package(_) => None,
+        }
+    }
+
     /// Replaces the whole text of the main source, reparsing only what
     /// differs.
     pub fn set_main_text(&mut self, text: &str) {
@@ -226,7 +252,23 @@ impl Project {
                 VirtualRoot::Project => self.root.resolve(id.vpath()).ok(),
                 VirtualRoot::Package(_) => None,
             });
-        self.main_path.iter().cloned().chain(external).collect()
+        // And what is open for editing, whether a compile has read it
+        // from disk before or not.
+        let owned = self
+            .sources
+            .keys()
+            .filter(|id| **id != self.main)
+            .filter_map(|id| self.path_of(*id));
+        let mut paths: Vec<PathBuf> = self
+            .main_path
+            .iter()
+            .cloned()
+            .chain(external)
+            .chain(owned)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
     }
 
     /// Tells the project that `path` changed on disk. Returns whether the
@@ -279,11 +321,12 @@ pub struct ProjectWorld {
 }
 
 impl ProjectWorld {
-    /// Whether the editor owns this file, i.e. whether edits to it are
-    /// possible at all. Package files and unadopted project files are not.
+    /// Whether edits to this file are possible at all: whether it is a
+    /// file of the project. The files of packages are not; a file of the
+    /// project that is not open for editing can be opened.
     #[must_use]
     pub fn is_editable(&self, id: FileId) -> bool {
-        self.sources.contains_key(&id)
+        self.sources.contains_key(&id) || matches!(id.root(), VirtualRoot::Project)
     }
 
     fn load_external(&self, id: FileId) -> FileResult<Bytes> {
@@ -389,5 +432,123 @@ impl ExternalFiles {
             source: None,
         });
         f(slot)
+    }
+}
+
+/// The main file of the document that the file at `path` is part of: the
+/// file that includes it, or includes the file that does, as far up as
+/// that goes. `path` itself if nothing includes it.
+///
+/// Typst has no place where a document says which file is its main one,
+/// so it is looked for: in the directory of the file and those above it
+/// (up to the one that holds `typst.toml` or `.git`), among the Typst
+/// files there, `main.typ` first.
+#[must_use]
+pub fn find_main(path: &Path) -> PathBuf {
+    /// How many directories up a main file is looked for.
+    const LEVELS: usize = 6;
+    let Ok(mut part) = std::path::absolute(path) else {
+        return path.to_owned();
+    };
+    let mut directory = part.parent().map(Path::to_owned);
+    let mut levels = 0;
+    while let Some(here) = directory {
+        let mut candidates: Vec<PathBuf> = std::fs::read_dir(&here)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|file| file.extension().is_some_and(|ending| ending == "typ") && *file != part)
+            .collect();
+        // `main.typ` before the others, and those in a fixed order.
+        candidates
+            .sort_by_key(|file| (file.file_name() != Some("main.typ".as_ref()), file.clone()));
+        let includer = candidates
+            .into_iter()
+            .find(|candidate| includes(candidate, &here, &part, 0));
+        let top = here.join("typst.toml").exists() || here.join(".git").exists();
+        match includer {
+            // It may be a part of something itself: on from there, in
+            // the same directory first.
+            Some(includer) => {
+                part = includer;
+                directory = Some(here);
+            }
+            None if top || levels >= LEVELS => break,
+            None => {
+                levels += 1;
+                directory = here.parent().map(Path::to_owned);
+            }
+        }
+    }
+    part
+}
+
+/// Whether the Typst file `file`, as a file of a project in `root`,
+/// includes `wanted`, itself or through files it includes.
+fn includes(file: &Path, root: &Path, wanted: &Path, depth: usize) -> bool {
+    /// How deep includes are followed.
+    const DEPTH: usize = 8;
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    let mut stack = vec![typst::syntax::parse(&text)];
+    let mut included = Vec::new();
+    while let Some(node) = stack.pop() {
+        if node.kind() == typst::syntax::SyntaxKind::ModuleInclude {
+            let literal = node
+                .children()
+                .find(|child| child.kind() == typst::syntax::SyntaxKind::Str);
+            if let Some(literal) = literal {
+                let name = literal.leaf_text().trim_matches('"');
+                // From the project directory, or from this file's.
+                let target = match name.strip_prefix('/') {
+                    Some(rooted) => root.join(rooted),
+                    None => file.parent().unwrap_or(root).join(name),
+                };
+                included.push(target);
+            }
+        }
+        stack.extend(node.children().cloned());
+    }
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    included.iter().any(|target| same(target, wanted))
+        || (depth < DEPTH
+            && included
+                .iter()
+                .any(|target| includes(target, root, wanted, depth + 1)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a failed step should fail the test")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_main_file_is_the_one_that_includes_the_others() {
+        let root = std::env::temp_dir().join(format!("zetwerk-main-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("chapters/deep")).unwrap();
+        std::fs::write(root.join("typst.toml"), "").unwrap();
+        let write = |name: &str, text: &str| std::fs::write(root.join(name), text).unwrap();
+        write("thesis.typ", "= Thesis\n#include \"chapters/one.typ\"\n");
+        write("notes.typ", "Nothing to do with it.\n");
+        write("chapters/one.typ", "== One\n#include \"deep/part.typ\"\n");
+        write("chapters/deep/part.typ", "Part.\n");
+        write("chapters/alone.typ", "Alone.\n");
+        let main = |name: &str| find_main(&root.join(name));
+        let same =
+            |a: PathBuf, b: &str| a.canonicalize().unwrap() == root.join(b).canonicalize().unwrap();
+        // Up through two includes; from the middle; and the top itself.
+        assert!(same(main("chapters/deep/part.typ"), "thesis.typ"));
+        assert!(same(main("chapters/one.typ"), "thesis.typ"));
+        assert!(same(main("thesis.typ"), "thesis.typ"));
+        // What nothing includes is its own document.
+        assert!(same(main("chapters/alone.typ"), "chapters/alone.typ"));
+        assert!(same(main("notes.typ"), "notes.typ"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

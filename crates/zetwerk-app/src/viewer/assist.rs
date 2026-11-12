@@ -29,12 +29,21 @@ pub(super) struct Completion {
 /// A list of places to go, narrowed by typing.
 pub(super) struct Picker {
     title: &'static str,
-    /// What each is listed as and the byte it is at.
-    items: Vec<(String, usize)>,
+    /// What each is listed as and where it is.
+    items: Vec<(String, Target)>,
     query: String,
     /// The items the query leaves, best first.
     shown: Vec<usize>,
     chosen: usize,
+}
+
+/// Where an entry of a list leads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Target {
+    /// A byte of the file being edited.
+    Offset(usize),
+    /// A file of the project.
+    File(std::path::PathBuf),
 }
 
 /// How well `query` is found in `text`, all its characters in their
@@ -226,13 +235,17 @@ impl Viewer {
         let world = self.project.snapshot();
         let document = self.document.as_deref();
         match zetwerk_typst::definition_of(&world, document, &source, cursor) {
-            Some((file, range)) if file == self.project.main() => {
+            Some((file, range)) if file == editor.file() => {
                 editor.jump(range.start);
                 self.follow_cursor();
             }
+            // In another file of the document: that file is opened.
+            Some((file, range)) if self.project.path_of(file).is_some() => {
+                self.open_file(file, Some(range.start));
+            }
             Some((file, _)) => {
                 let path = file.vpath().get_without_slash().to_owned();
-                self.notice(format!("defined in {path}, which is not open"));
+                self.notice(format!("defined in {path}, a file of a package"));
             }
             None => self.notice("not defined in a file: built in, or no name"),
         }
@@ -253,29 +266,44 @@ impl Viewer {
                 .map(str::len)
                 .sum()
         };
-        let items: Vec<(String, usize)> = if labels {
-            let listed = |(name, line): &(String, usize)| (format!("<{name}>"), start_of(*line));
+        let items: Vec<(String, Target)> = if labels {
+            let listed = |(name, line): &(String, usize)| {
+                (format!("<{name}>"), Target::Offset(start_of(*line)))
+            };
             outline.labels.iter().map(listed).collect()
         } else {
             let listed = |heading: &super::agent::Heading| {
                 let indent = "  ".repeat(heading.level.saturating_sub(1));
-                (format!("{indent}{}", heading.text), start_of(heading.line))
+                let place = Target::Offset(start_of(heading.line));
+                (format!("{indent}{}", heading.text), place)
             };
             outline.headings.iter().map(listed).collect()
         };
-        if items.is_empty() {
-            let what = if labels { "labels" } else { "headings" };
-            self.notice(format!("the document has no {what}"));
-            return;
-        }
         // The one the cursor is in or behind comes up chosen.
         let cursor = self
             .editor
             .as_ref()
             .map_or(0, crate::editor::Editor::cursor);
-        let chosen = items.iter().rposition(|(_, at)| *at <= cursor).unwrap_or(0);
+        let behind =
+            |(_, target): &(String, Target)| matches!(target, Target::Offset(at) if *at <= cursor);
+        let chosen = items.iter().rposition(behind).unwrap_or(0);
+        let title = if labels { "labels" } else { "headings" };
+        self.open_picker(title, items, chosen);
+    }
+
+    /// Puts up a list of places to choose from.
+    pub(super) fn open_picker(
+        &mut self,
+        title: &'static str,
+        items: Vec<(String, Target)>,
+        chosen: usize,
+    ) {
+        if items.is_empty() {
+            self.notice(format!("the document has no {title}"));
+            return;
+        }
         self.picker = Some(Picker {
-            title: if labels { "labels" } else { "headings" },
+            title,
             shown: (0..items.len()).collect(),
             items,
             query: String::new(),
@@ -291,14 +319,16 @@ impl Viewer {
         match (press.key, press.ctrl) {
             (Key::Escape, _) | (Key::Char('c' | '['), true) => self.picker = None,
             (Key::Enter, _) => {
-                let target = picker
-                    .shown
-                    .get(picker.chosen)
-                    .map(|item| picker.items[*item].1);
+                let chosen = picker.shown.get(picker.chosen);
+                let target = chosen.map(|item| picker.items[*item].1.clone());
                 self.picker = None;
-                if let (Some(target), Some(editor)) = (target, &mut self.editor) {
-                    editor.jump(target);
-                    self.follow_cursor();
+                match (target, &mut self.editor) {
+                    (Some(Target::Offset(at)), Some(editor)) => {
+                        editor.jump(at);
+                        self.follow_cursor();
+                    }
+                    (Some(Target::File(path)), _) => self.open_path(&path, false),
+                    _ => {}
                 }
             }
             (Key::Down, _) | (Key::Char('n'), true) => {

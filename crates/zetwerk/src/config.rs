@@ -8,18 +8,117 @@
 //! edit_mode = "live"
 //! # Whether agents may write the file. Without it, saving is yours.
 //! save = false
+//!
+//! [view]
+//! layout = "split"    # or "source", "page": what the window shows
+//! slides = false      # one page at a time, whole
+//!
+//! [power]
+//! mode = "auto"       # or "saver", "performance"
+//!
+//! # Your own keys, as in Vim's nnoremap and inoremap.
+//! [keys.normal]
+//! ";" = ":"
+//! "<C-s>" = ":w<CR>"
+//! [keys.insert]
+//! "<C-s>" = "<Esc>:w<CR>"
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use zetwerk_app::power::PowerMode;
 use zetwerk_app::viewer::agent::AgentEdits;
+use zetwerk_app::viewer::{Keymap, Panes};
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub ai: Ai,
+    #[serde(default)]
+    pub view: View,
+    #[serde(default)]
+    pub power: Power,
+    #[serde(default)]
+    pub keys: Keys,
+}
+
+/// What the window shows to begin with.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct View {
+    pub layout: Option<Layout>,
+    #[serde(default)]
+    pub slides: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    Split,
+    Source,
+    Page,
+}
+
+impl From<Layout> for Panes {
+    fn from(layout: Layout) -> Self {
+        match layout {
+            Layout::Split => Self::Split,
+            Layout::Source => Self::Source,
+            Layout::Page => Self::Page,
+        }
+    }
+}
+
+/// How much of the machine zetwerk may use.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Power {
+    pub mode: Option<Mode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Auto,
+    Saver,
+    Performance,
+}
+
+impl From<Mode> for PowerMode {
+    fn from(mode: Mode) -> Self {
+        match mode {
+            Mode::Auto => Self::Auto,
+            Mode::Saver => Self::Saver,
+            Mode::Performance => Self::Performance,
+        }
+    }
+}
+
+/// The user's own keys: what is typed, and what it stands for.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Keys {
+    #[serde(default)]
+    pub normal: BTreeMap<String, String>,
+    #[serde(default)]
+    pub insert: BTreeMap<String, String>,
+}
+
+impl Keys {
+    /// The mappings as the viewer takes them, and a complaint about the
+    /// first that makes no sense.
+    pub fn keymap(&self) -> (Keymap, Option<String>) {
+        fn pairs(table: &BTreeMap<String, String>) -> Vec<(&str, &str)> {
+            table
+                .iter()
+                .map(|(typed, stands_for)| (typed.as_str(), stands_for.as_str()))
+                .collect()
+        }
+        Keymap::parse(pairs(&self.normal), pairs(&self.insert))
+    }
 }
 
 /// What agents may do.
@@ -113,8 +212,23 @@ mod tests {
                 edit_mode: EditMode::Propose,
                 save: true,
             },
+            ..Config::default()
         };
         assert_eq!(config, Ok(expected));
+        let config = parse(
+            "[view]\nlayout = \"page\"\nslides = true\n[power]\nmode = \"saver\"\n\
+             [keys.normal]\n\";\" = \":\"\n[keys.insert]\n\"<C-s>\" = \"<Esc>:w<CR>\"\n",
+        )
+        .unwrap_or_default();
+        assert_eq!(
+            (config.view.layout, config.view.slides),
+            (Some(Layout::Page), true)
+        );
+        assert_eq!(config.power.mode, Some(Mode::Saver));
+        assert_eq!(config.keys.keymap().1, None);
+        assert!(parse("[keys.normal]\n\"gx\" = 3\n").is_err());
+        let odd = parse("[keys.insert]\n\"jk\" = \"<Esc>\"\n").unwrap_or_default();
+        assert!(odd.keys.keymap().1.is_some());
         assert_eq!(
             parse("[ai]\nsave = true\n").map(|config| config.ai.edit_mode),
             Ok(EditMode::Live)

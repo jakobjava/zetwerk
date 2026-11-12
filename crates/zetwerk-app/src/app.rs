@@ -18,9 +18,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 use zetwerk_render::Rasterizer;
-use zetwerk_typst::{Compiler, Environment, FontSet, Project, Scheduler, Urgency};
+use zetwerk_typst::{Compiler, Environment, FontSet, Scheduler, Urgency};
 
-use crate::editor::Editor;
 use crate::gpu::{self, Gpu, Quad};
 use crate::keys::{Key, KeyPress};
 use crate::power::PowerMode;
@@ -30,8 +29,11 @@ use crate::watch::FileWatcher;
 
 /// How the window should be opened.
 pub struct Options {
-    /// The main file of the document.
+    /// The file to edit.
     pub path: PathBuf,
+    /// The main file of the document it is part of, if it is not that
+    /// itself.
+    pub main: Option<PathBuf>,
     pub font_set: FontSet,
     pub power: PowerMode,
     /// Where the journals that make edits survive a crash are kept.
@@ -41,6 +43,12 @@ pub struct Options {
     /// Something to tell the user once the document is open, such as
     /// that the settings could not be read.
     pub complaint: Option<String>,
+    /// The user's own keys.
+    pub keys: viewer::Keymap,
+    /// What the window shows to begin with, if not the usual, and whether
+    /// pages are shown as slides.
+    pub layout: Option<viewer::Panes>,
+    pub slides: bool,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -267,10 +275,7 @@ impl Session {
         event_loop: &ActiveEventLoop,
     ) -> Result<Self, String> {
         let env = Environment::new(options.font_set);
-        let project =
-            Project::open(Arc::clone(&env), &options.path).map_err(|err| err.to_string())?;
-        let (editor, opened) = Editor::open(&options.path, &options.state_dir, project.main())
-            .map_err(|err| err.to_string())?;
+        let (project, editor, opened) = crate::headless::open(&env, options)?;
         let name = options
             .path
             .file_name()

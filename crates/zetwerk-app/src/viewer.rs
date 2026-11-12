@@ -7,6 +7,9 @@
 
 pub mod agent;
 mod assist;
+mod buffers;
+mod keymap;
+mod slides;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -28,6 +31,8 @@ use zetwerk_typst::{CompileOutput, Environment, PageLines, PageMap, Project, Pro
 use zetwerk_vim::Effect;
 
 use self::agent::{AgentEdits, Mark, Proposal};
+pub use self::keymap::Keymap;
+pub use self::slides::Paging;
 use crate::chrome::{self, Chrome, Image, ROW_HEIGHT, RowText, STATUS_HEIGHT, Status};
 use crate::editor::{self, Editor, Rows};
 use crate::gpu::{Quad, TextureId};
@@ -430,11 +435,17 @@ struct PageRows<'a> {
     cursor_page: &'a Cell<usize>,
     /// How the text differs from the text the pages were compiled from.
     change: Change,
-    /// The page, the line and the byte of the compiled text the cursor
-    /// last came to here. What a call put on the page is many lines for
-    /// one place in the source: the place alone does not say which.
-    landed: &'a Cell<Option<(usize, usize, usize)>>,
+    /// The page, the line, and the file and byte of the compiled text
+    /// the cursor last came to here. What a call put on the page is many
+    /// lines for one place in the source: the place alone does not say
+    /// which.
+    landed: &'a Cell<Option<Landed>>,
+    /// Where a motion led that is in another file than the one edited.
+    elsewhere: &'a Cell<Option<(FileId, usize)>>,
 }
+
+/// A page, a line of it, and the file and byte shown there.
+type Landed = (usize, usize, FileId, usize);
 
 impl PageRows<'_> {
     /// Runs `ask` on the lines of page `index`.
@@ -443,7 +454,7 @@ impl PageRows<'_> {
         let mut lines = self.lines.borrow_mut();
         let lines = lines
             .entry(index)
-            .or_insert_with(|| PageMap::build(self.world, &page.frame).lines(self.file));
+            .or_insert_with(|| PageMap::build(self.world, &page.frame).lines());
         Some(ask(lines))
     }
 }
@@ -501,13 +512,14 @@ impl PageRows<'_> {
 
 impl Rows for PageRows<'_> {
     fn row(&self, from: usize, rows: isize, across: Option<f64>) -> Option<(usize, f64)> {
-        let source = self.world.source(self.file).ok()?;
+        let file = self.file;
+        let source = self.world.source(file).ok()?;
         let from = self.change.back_or_edge(from);
         let (page, line, shown_at) = match self.landed.get() {
-            Some((page, line, at)) if at == from => (
+            Some((page, line, of, at)) if (of, at) == (file, from) => (
                 page,
                 line,
-                self.on(page, |lines| lines.across(line, from))??,
+                self.on(page, |lines| lines.across(line, file, from))??,
             ),
             _ => {
                 // On the page it was last found on, if that shows it:
@@ -515,11 +527,11 @@ impl Rows for PageRows<'_> {
                 // table of contents), and what a call made is found by
                 // no search.
                 let near = self.cursor_page.get();
-                let page = match self.on(near, |lines| lines.shows(from)) {
+                let page = match self.on(near, |lines| lines.shows(file, from)) {
                     Some(true) => near,
                     _ => zetwerk_typst::locate(self.document, &source, from, near)?.page,
                 };
-                let (line, shown_at) = self.on(page, |lines| lines.find(from))??;
+                let (line, shown_at) = self.on(page, |lines| lines.find(file, from))??;
                 (page, line, shown_at)
             }
         };
@@ -539,9 +551,9 @@ impl Rows for PageRows<'_> {
         // The cursor has to come to something else than it is on. Where a
         // line shows nothing else (it is more of what one call made, all
         // of which is one place in the source), it goes on.
-        let to = loop {
+        let (of, to) = loop {
             let Place { page, line, across } = place;
-            if let Some(to) = self.on(page, |lines| lines.at(line, across, from))? {
+            if let Some(to) = self.on(page, |lines| lines.at(line, across, (file, from)))? {
                 break to;
             }
             if !self.step(&mut place, down) {
@@ -550,7 +562,13 @@ impl Rows for PageRows<'_> {
         };
         let Place { page, line, across } = place;
         self.cursor_page.set(page);
-        self.landed.set(Some((page, line, to)));
+        self.landed.set(Some((page, line, of, to)));
+        if of != file {
+            // The line is of another file of the document (an included
+            // chapter): the cursor cannot go there, the window can.
+            self.elsewhere.set(Some((of, to)));
+            return stay;
+        }
         Some((self.change.forth(to), across))
     }
 }
@@ -587,15 +605,37 @@ pub struct Viewer {
     page_lines: RefCell<HashMap<usize, PageLines>>,
     /// The page the cursor was last found on: where to look for it first.
     cursor_page: Cell<usize>,
-    /// See [`PageRows::landed`].
-    landed: Cell<Option<(usize, usize, usize)>>,
+    /// See [`PageRows::landed`] and [`PageRows::elsewhere`].
+    landed: Cell<Option<Landed>>,
+    elsewhere: Cell<Option<(FileId, usize)>>,
+    /// The files that are open and not the one being edited, the one
+    /// edited last first.
+    others: Vec<Editor>,
+    /// Where journals are kept, for opening more files.
+    state_dir: Option<std::path::PathBuf>,
+    /// The files whose text has changed since the last compile.
+    stale_files: Vec<FileId>,
+    /// The files that are open, in the order they were opened.
+    opened: Vec<FileId>,
+    /// Whether the pages are scrolled over or shown one at a time; with
+    /// the latter, which one is shown, and how far the view was pushed
+    /// towards the next.
+    paging: Paging,
+    slide: usize,
+    pushed: f64,
+    /// The overview of all pages, while it is up.
+    grid: Option<slides::Grid>,
+    /// The user's own keys, and the keys typed that may yet become one
+    /// of them.
+    keymap: Keymap,
+    typed: Vec<KeyPress>,
     /// The revision that document was compiled from. Differs from
     /// `compiled_revision` while the newest text has errors.
     document_revision: Option<u64>,
     predicted: Option<Predicted>,
     /// How the text of a revision differs from the compiled text, where
     /// that is one replacement.
-    changed: Option<(u64, Change)>,
+    changed: Option<(u64, FileId, Change)>,
     /// Where the cursor is on the pages as last drawn, in device pixels:
     /// how far across, and its top and bottom.
     cursor_at: Option<(f64, f64, f64)>,
@@ -605,10 +645,10 @@ pub struct Viewer {
     /// Why the last change could not be shown without compiling.
     declined: Option<String>,
     problems: Vec<String>,
-    /// What the last compile complained about in the main file: the bytes
-    /// (of the text it compiled), whether it is an error, and the
-    /// complaint.
-    diagnostics: Vec<(Range<usize>, bool, String)>,
+    /// What the last compile complained about in the project's files: the
+    /// file and the bytes (of the text it compiled), whether it is an
+    /// error, and the complaint.
+    diagnostics: Vec<(FileId, Range<usize>, bool, String)>,
     layout: Layout,
     view: Viewport,
     window: (u32, u32),
@@ -627,6 +667,8 @@ pub struct Viewer {
     /// The changes agents have proposed, in the order of the text; the
     /// number the next one gets; and the text their places are places of.
     proposals: Vec<Proposal>,
+    /// And those for open files that are not being edited.
+    proposals_elsewhere: Vec<Proposal>,
     next_proposal: u64,
     proposal_text: Option<String>,
     /// What an agent changed last, until the next key: shown, so that the
@@ -678,6 +720,17 @@ impl Viewer {
             page_lines: RefCell::default(),
             cursor_page: Cell::new(0),
             landed: Cell::new(None),
+            elsewhere: Cell::new(None),
+            others: Vec::new(),
+            state_dir: None,
+            stale_files: Vec::new(),
+            opened: Vec::new(),
+            paging: Paging::default(),
+            slide: 0,
+            pushed: 0.0,
+            grid: None,
+            keymap: Keymap::default(),
+            typed: Vec::new(),
             document_revision: None,
             predicted: None,
             changed: None,
@@ -704,6 +757,7 @@ impl Viewer {
             quit: false,
             agent_edits: AgentEdits::default(),
             proposals: Vec::new(),
+            proposals_elsewhere: Vec::new(),
             next_proposal: 1,
             proposal_text: None,
             agent_mark: None,
@@ -726,23 +780,16 @@ impl Viewer {
         // The text to compile is the editor's from now on; it may hold
         // changes the file does not.
         self.project.set_source(editor.source().clone());
+        self.file = editor
+            .path()
+            .strip_prefix(self.project.root_dir())
+            .unwrap_or(editor.path())
+            .to_string_lossy()
+            .into_owned();
+        self.opened.push(editor.file());
         self.editor = Some(editor);
         self.panes = Panes::Split;
-        match opened {
-            Opened::Clean => {}
-            Opened::Restored => self.notice("unsaved changes from the last session are back"),
-            Opened::ChangedWhileClosed => {
-                self.notice("the file changed since the last session; its undo history is gone");
-            }
-            Opened::Conflict { journal, .. } => self.alert(format!(
-                "the file changed while unsaved changes were pending; they are kept in {}",
-                journal.display()
-            )),
-            Opened::JournalUnusable { journal } => self.alert(format!(
-                "the journal could not be read and was set aside as {}",
-                journal.display()
-            )),
-        }
+        self.announce(opened);
         self.arrange();
         self
     }
@@ -751,6 +798,13 @@ impl Viewer {
     #[must_use]
     pub fn configured(mut self, options: &crate::app::Options) -> Self {
         self.agent_edits = options.agent_edits;
+        self.state_dir = Some(options.state_dir.clone());
+        self.keymap = options.keys.clone();
+        self.panes = options.layout.unwrap_or(self.panes);
+        if options.slides {
+            self.paging = Paging::Slides;
+        }
+        self.arrange();
         if let Some(complaint) = &options.complaint {
             self.alert(complaint.clone());
         }
@@ -797,14 +851,17 @@ impl Viewer {
     /// Since when there are changes that a power failure would lose.
     #[must_use]
     pub fn unsynced_since(&self) -> Option<Instant> {
-        self.editor.as_ref().and_then(Editor::unsynced_since)
+        let editors = self.editor.iter().chain(&self.others);
+        editors.filter_map(Editor::unsynced_since).min()
     }
 
     /// Forces the journal onto the disk.
     pub fn sync(&mut self) {
-        if let Some(editor) = &mut self.editor
-            && let Err(err) = editor.sync()
-        {
+        let editors = self.editor.iter_mut().chain(&mut self.others);
+        // All of them, whatever becomes of one.
+        let failed: Vec<std::io::Error> =
+            editors.filter_map(|editor| editor.sync().err()).collect();
+        if let Some(err) = failed.first() {
             self.alert(format!("cannot write the journal: {err}"));
         }
     }
@@ -919,8 +976,11 @@ impl Viewer {
 
     /// A file changed on disk. Returns whether a compile is needed.
     pub fn file_changed(&mut self, path: &Path) -> bool {
-        if self.editor.is_some() && self.project.main_path() == Some(path) {
+        if self.is_edited(path) {
             return self.edited_file_changed();
+        }
+        if let Some(changed) = self.waiting_file_changed(path) {
+            return changed;
         }
         match self.project.file_changed(path) {
             Ok(true) => {
@@ -988,14 +1048,14 @@ impl Viewer {
         ) else {
             return;
         };
-        let Ok(source) = world.source(self.project.main()) else {
+        let file = self.file_id();
+        let Ok(source) = world.source(file) else {
             return;
         };
         let cursor = change.back_or_edge(editor.cursor());
         // Where it was last found, if it is there still: that page shows
         // it for certain, and may show it by something no search finds.
         let near = self.cursor_page.get();
-        let file = self.project.main();
         let there = document.pages().get(near).and_then(|page| {
             let map = self
                 .maps
@@ -1015,6 +1075,9 @@ impl Viewer {
             return;
         };
         self.cursor_page.set(position.page);
+        if self.paging == Paging::Slides {
+            return self.show_slide(position.page);
+        }
         let Some(page) = self.layout.pages.get(position.page) else {
             return;
         };
@@ -1046,7 +1109,6 @@ impl Viewer {
             let describe = |error| zetwerk_typst::describe(world, error);
             output.compiled.errors.iter().map(describe).collect()
         };
-        let main = self.project.main();
         let world = &*output.world;
         let compiled = &output.compiled;
         let errors = compiled.errors.iter().map(|error| (error, true));
@@ -1055,10 +1117,10 @@ impl Viewer {
             .chain(warnings)
             .filter_map(|(diagnostic, is_error)| {
                 let (file, range) = zetwerk_typst::place(world, diagnostic)?;
-                (file == main).then(|| (range, is_error, diagnostic.message.to_string()))
+                Some((file, range, is_error, diagnostic.message.to_string()))
             })
             .collect();
-        self.diagnostics.sort_by_key(|(range, _, _)| range.start);
+        self.diagnostics.sort_by_key(|(_, range, _, _)| range.start);
         if let Some(document) = output.compiled.document {
             self.document = Some(Arc::new(document));
             self.compiled_world = Some(Arc::clone(&output.world));
@@ -1068,6 +1130,7 @@ impl Viewer {
             self.maps.clear();
             self.page_lines.get_mut().clear();
             self.landed.set(None);
+            self.stale_files.clear();
             self.planned.clear();
             self.relayout();
             self.follow_cursor();
@@ -1077,7 +1140,10 @@ impl Viewer {
     /// The user turned the wheel or dragged on the touchpad, by this many
     /// device pixels.
     pub fn scroll(&mut self, dx: f64, dy: f64) {
-        self.view.scroll_by(dx, dy, &self.layout);
+        match self.paging {
+            Paging::Scroll => self.view.scroll_by(dx, dy, &self.layout),
+            Paging::Slides => self.push_slides(dy),
+        }
     }
 
     /// Zooms by `factor`, keeping the document under `anchor` (a position in
@@ -1104,6 +1170,12 @@ impl Viewer {
             self.layout = Layout::default();
             return;
         };
+        if self.paging == Paging::Slides {
+            self.slide_layout();
+            let pages = self.layout.pages.len();
+            self.shown.retain(|index, _| *index < pages);
+            return;
+        }
         if self.fit {
             let widest = document
                 .pages()
@@ -1127,9 +1199,12 @@ impl Viewer {
         (STATUS_HEIGHT * self.scale).round() as u32
     }
 
-    /// A key was pressed.
-    pub fn key(&mut self, press: KeyPress) {
+    /// A key, as it is: no mapping of the user's is applied to it.
+    fn plain_key(&mut self, press: KeyPress) {
         self.message = None;
+        if self.grid.is_some() {
+            return self.grid_key(press);
+        }
         if self.editor.is_some() {
             if !self.assist_key(press) {
                 self.editor_key(press);
@@ -1188,6 +1263,9 @@ impl Viewer {
     /// pixels: the cursor goes to the text there, in the source or on a
     /// page.
     pub fn click(&mut self, (x, y): (f64, f64)) {
+        if self.grid.is_some() {
+            return self.grid_click((x, y));
+        }
         let (source_width, page_left, _) = self.split();
         let height = f64::from(self.window.1.saturating_sub(self.status_height()));
         if self.editor.is_none() || y >= height {
@@ -1207,7 +1285,8 @@ impl Viewer {
                 return;
             };
             let zoom = self.view.zoom;
-            let file = self.project.main();
+            let file = self.file_id();
+            let mut elsewhere = None;
             for visible in self.view.visible(&self.layout) {
                 let (Some(page), Some(page_box)) = (
                     document.pages().get(visible.index),
@@ -1232,13 +1311,19 @@ impl Viewer {
                     typst::layout::Abs::pt((x - left) / zoom),
                     typst::layout::Abs::pt((y - top) / zoom),
                 );
-                if let (Some((found, offset)), Some(editor)) =
-                    (map.source_at(point), &mut self.editor)
-                    && found == file
-                {
-                    editor.set_cursor(change.forth(offset));
+                match (map.source_at(point), &mut self.editor) {
+                    (Some((found, offset)), Some(editor)) if found == file => {
+                        editor.set_cursor(change.forth(offset));
+                    }
+                    // Text of another file of the document: that file is
+                    // what the click is for.
+                    (Some(found), _) => elsewhere = Some(found),
+                    _ => {}
                 }
-                return;
+                break;
+            }
+            if let Some((found, offset)) = elsewhere {
+                self.open_file(found, Some(offset));
             }
         }
     }
@@ -1255,11 +1340,12 @@ impl Viewer {
             (Some(document), Some(world), Some(change)) => Some(PageRows {
                 document,
                 world,
-                file: self.project.main(),
+                file: editor.file(),
                 lines: &self.page_lines,
                 cursor_page: &self.cursor_page,
                 change,
                 landed: &self.landed,
+                elsewhere: &self.elsewhere,
             }),
             _ => None,
         };
@@ -1280,6 +1366,7 @@ impl Viewer {
         self.agent_mark = None;
         if typed.changed {
             self.revision += 1;
+            self.touched();
             self.sync_proposals();
             let shown = self.predict();
             self.edited = Some(if !typing {
@@ -1305,6 +1392,9 @@ impl Viewer {
         }
         if moved {
             self.follow_cursor();
+        }
+        if let Some((file, offset)) = self.elsewhere.take() {
+            self.open_file(file, Some(offset));
         }
     }
 
@@ -1338,7 +1428,7 @@ impl Viewer {
         else {
             return Err("nothing compiled yet".to_owned());
         };
-        let file = self.project.main();
+        let file = editor.file();
         let base = world
             .source(file)
             .map_err(|_| "the compiled source is gone".to_owned())?;
@@ -1360,7 +1450,7 @@ impl Viewer {
             removed,
             inserted: text.len(),
         };
-        self.changed = Some((self.revision, change));
+        self.changed = Some((self.revision, file, change));
         if removed > MAX_PREDICTED || text.len() > MAX_PREDICTED {
             return Err("too much changed".to_owned());
         }
@@ -1442,9 +1532,17 @@ impl Viewer {
         if self.document_revision == Some(self.revision) {
             return Some(Change::NONE);
         }
-        self.changed
-            .filter(|(revision, _)| *revision == self.revision)
-            .map(|(_, change)| change)
+        // One change, in one file: in the others nothing has moved.
+        let (revision, file, change) = self.changed?;
+        let only = self.stale_files.iter().all(|stale| *stale == file);
+        if revision != self.revision || !only {
+            return None;
+        }
+        Some(if file == self.file_id() {
+            change
+        } else {
+            Change::NONE
+        })
     }
 
     /// Whether the pages show text that has not been compiled, worked out
@@ -1455,11 +1553,18 @@ impl Viewer {
     }
 
     fn execute(&mut self, command: &str) {
-        let modified = self.editor.as_ref().is_some_and(Editor::is_modified);
+        let unwritten = self.unwritten();
+        let modified = !unwritten.is_empty();
+        if self.file_command(command) {
+            return;
+        }
         match command {
             "" => {}
             "q" | "quit" if modified => {
-                self.alert("unsaved changes: :wq saves them, :q! leaves them unsaved");
+                self.alert(format!(
+                    "unsaved changes in {}: :wq saves them, :q! leaves them unsaved",
+                    unwritten.join(", ")
+                ));
             }
             // Unsaved changes stay in the journal: they are back the next
             // time the file is opened, and can be undone then.
@@ -1470,11 +1575,21 @@ impl Viewer {
             "w!" | "write!" => {
                 self.save(true);
             }
-            "wq" => self.quit = self.save(false),
-            "wq!" => self.quit = self.save(true),
-            "x" | "xit" => self.quit = !modified || self.save(false),
+            // With all that is open written, not only this file.
+            "wq" | "x" | "xit" | "wqa" | "xa" => self.quit = !modified || self.save_all(),
+            "wq!" => self.quit = self.save(true) && self.save_all(),
             "e!" | "edit!" => self.reload(),
             "perf" => self.performance_panel = !self.performance_panel,
+            "slides" => {
+                let paging = match self.paging {
+                    Paging::Scroll => Paging::Slides,
+                    Paging::Slides => Paging::Scroll,
+                };
+                self.set_paging(paging);
+            }
+            "grid" => self.open_grid(),
+            "page next" => self.step_page(true),
+            "page previous" => self.step_page(false),
             "describe" => self.describe(),
             "definition" => self.goto_definition(),
             "outline" => self.pick(false),
@@ -1521,7 +1636,7 @@ impl Viewer {
                 self.follow_cursor();
             }
             _ => match command.parse::<usize>() {
-                Ok(page) if page >= 1 => self.view.scroll_to_page(page - 1, &self.layout),
+                Ok(page) if page >= 1 => self.goto_page(page - 1),
                 _ => self.alert(format!("not a command: {command}")),
             },
         }
@@ -1533,17 +1648,26 @@ impl Viewer {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let cursor = editor.cursor();
-        let starts = || self.diagnostics.iter().map(|(range, _, _)| range.start);
+        let (cursor, file) = (editor.cursor(), editor.file());
+        // Those of this file; the others are in the status line.
+        let here: Vec<&(FileId, Range<usize>, bool, String)> = self
+            .diagnostics
+            .iter()
+            .filter(|(of, ..)| *of == file)
+            .collect();
+        let starts = || here.iter().map(|(_, range, _, _)| range.start);
         let target = if forward {
             starts().position(|start| start > cursor).or(Some(0))
         } else {
             let before = starts().rposition(|start| start < cursor);
-            before.or(self.diagnostics.len().checked_sub(1))
+            before.or(here.len().checked_sub(1))
         };
-        let Some((range, is_error, message)) = target.and_then(|at| self.diagnostics.get(at))
-        else {
-            self.notice("the compiler has no complaints");
+        let Some((_, range, is_error, message)) = target.and_then(|at| here.get(at)) else {
+            let elsewhere = self.diagnostics.len() - here.len();
+            self.notice(match elsewhere {
+                0 => "the compiler has no complaints".to_owned(),
+                count => format!("no complaints about this file; {count} about others"),
+            });
             return;
         };
         editor.set_cursor(range.start);
@@ -1601,6 +1725,11 @@ impl Viewer {
         solid(&mut scene, has, BACKDROP, (0.0, 0.0, width, height));
         self.cursor_at = None;
         self.caret_at = None;
+        if self.grid.is_some() {
+            self.grid_scene(&mut scene, has);
+            self.status_line(&mut scene, has);
+            return scene;
+        }
         self.pages(&mut scene, has);
         self.lens(&mut scene, has);
         // Drawn after the pages: a page zoomed wider than its pane must
@@ -1722,7 +1851,7 @@ impl Viewer {
             .maps
             .entry(index)
             .or_insert_with(|| PageMap::build(world, &page.frame));
-        let file = self.project.main();
+        let file = editor.file();
         let place = |rect: Rect| {
             (
                 origin.0 + rect.min.x.to_pt() * zoom,
@@ -1917,7 +2046,9 @@ impl Viewer {
     fn source_marks(&self) -> Vec<(Range<usize>, Mark)> {
         let mut marked = self.agent_marks();
         if self.compiled_revision == Some(self.revision) {
-            marked.extend(self.diagnostics.iter().map(|(range, is_error, _)| {
+            let file = self.file_id();
+            let here = self.diagnostics.iter().filter(|(of, ..)| *of == file);
+            marked.extend(here.map(|(_, range, is_error, _)| {
                 let mark = if *is_error {
                     Mark::Error
                 } else {
@@ -2097,7 +2228,7 @@ impl Viewer {
         // 100 % is the size at which a point is 1/72 inch on a 96 dpi
         // display, scaled like everything else on a high-density one.
         let percent = state.zoom / (self.scale * 96.0 / 72.0) * 100.0;
-        let proposals = match self.proposals.len() {
+        let proposals = match self.proposals.len() + self.proposals_elsewhere.len() {
             0 => String::new(),
             1 => "1 proposal ]p  ".to_owned(),
             count => format!("{count} proposals ]p  "),
@@ -2599,6 +2730,7 @@ mod tests {
         let mut viewer = Viewer::new(env, project, (1000, 620), 1.0)
             .unwrap_or_else(|| panic!("viewer sets up"))
             .editing(editor, &opened);
+        viewer.state_dir = Some(directory.join("state"));
         compile(&mut viewer);
         (viewer, opened)
     }
@@ -3615,7 +3747,10 @@ mod tests {
         // From the text to the page and back.
         let (page, x, y) = viewer.page_of(6, 6).unwrap();
         assert_eq!(page, 2);
-        assert_eq!(viewer.source_of(page, x + 1.0, y + 2.0), Ok((6, 6)));
+        assert_eq!(
+            viewer.source_of(page, x + 1.0, y + 2.0),
+            Ok(("main.typ".to_owned(), 6, 6))
+        );
         assert!(viewer.source_of(3, 0.0, 0.0).is_err());
         assert!(viewer.page_of(40, 1).is_err());
         // Not for text the pages are not of.
@@ -3847,6 +3982,244 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    /// A document of three files: a main one that includes two chapters.
+    fn chapters() -> (Viewer, PathBuf) {
+        let main = "#set page(width: 300pt, height: 200pt)\n\
+                    = Thesis\n\
+                    Opening words.\n\
+                    #include \"one.typ\"\n\
+                    #include \"parts/two.typ\"\n\n\
+                    Closing words.\n";
+        let directory = directory(main);
+        std::fs::create_dir_all(directory.join("parts")).unwrap();
+        std::fs::write(directory.join("one.typ"), "== One\nFirst chapter text.\n").unwrap();
+        let two = "== Two\nSecond chapter text.\n";
+        std::fs::write(directory.join("parts/two.typ"), two).unwrap();
+        (open(&directory).0, directory)
+    }
+
+    #[test]
+    fn the_files_of_a_document_are_edited_together() {
+        let (mut viewer, directory) = chapters();
+        let name = |viewer: &Viewer| viewer.state().file;
+        let message = |viewer: &Viewer| viewer.message.as_ref().unwrap().text.clone();
+        assert_eq!(name(&viewer), "main.typ");
+        // To the file named under the cursor, and back.
+        press(&mut viewer, "/one<CR>gf");
+        assert_eq!(name(&viewer), "one.typ");
+        assert_eq!(viewer.text(), Some("== One\nFirst chapter text.\n"));
+        press(&mut viewer, "<C-^>");
+        assert_eq!(name(&viewer), "main.typ");
+        assert_eq!(
+            viewer.editor.as_ref().unwrap().position().0,
+            4,
+            "where it was"
+        );
+        // What is typed in one shows in the document, saved or not.
+        press(&mut viewer, ":e parts/two.typ<CR>");
+        assert_eq!(name(&viewer), "parts/two.typ");
+        press(&mut viewer, "GAAdded.<Esc>");
+        compile(&mut viewer);
+        assert_eq!(viewer.state().problems, Vec::<String>::new());
+        let on_disk = std::fs::read_to_string(directory.join("parts/two.typ")).unwrap();
+        assert!(!on_disk.contains("Added"));
+        // An agent asking what is at a place on the page is told the file.
+        let (page, x, y) = viewer.page_of(2, 1).unwrap();
+        let shown = viewer.source_of(page, x + 1.0, y + 2.0);
+        assert_eq!(shown, Ok(("parts/two.typ".to_owned(), 2, 1)));
+        // Registers go along from file to file.
+        press(&mut viewer, "yiW:b main<CR>GP");
+        assert!(viewer.text().unwrap().contains("Added."));
+        assert_eq!(name(&viewer), "main.typ");
+        // The list says what is open and what is unwritten.
+        press(&mut viewer, ":ls<CR>");
+        assert_eq!(
+            message(&viewer),
+            "1% main.typ [+]   2 one.typ   3 parts/two.typ [+]"
+        );
+        press(&mut viewer, ":q<CR>");
+        assert!(!viewer.wants_quit());
+        assert!(message(&viewer).contains("main.typ, parts/two.typ"));
+        press(&mut viewer, ":wa<CR>");
+        let on_disk = std::fs::read_to_string(directory.join("parts/two.typ")).unwrap();
+        assert!(on_disk.contains("Added."));
+        assert_eq!(viewer.unwritten(), Vec::<String>::new());
+        // Round the open files, and to one by its number.
+        press(&mut viewer, ":bn<CR>");
+        assert_eq!(name(&viewer), "one.typ");
+        press(&mut viewer, ":bp<CR>:bp<CR>");
+        assert_eq!(name(&viewer), "parts/two.typ");
+        press(&mut viewer, ":b 1<CR>");
+        assert_eq!(name(&viewer), "main.typ");
+        // What is not there is not made by accident.
+        press(&mut viewer, ":e three.typ<CR>");
+        assert!(message(&viewer).contains(":e! makes it"));
+        press(&mut viewer, ":e! three.typ<CR>");
+        assert_eq!(name(&viewer), "three.typ");
+        assert!(directory.join("three.typ").is_file());
+        press(&mut viewer, ":q<CR>");
+        assert!(viewer.wants_quit());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_page_leads_into_the_file_its_text_is_from() {
+        let (mut viewer, directory) = chapters();
+        let name = |viewer: &Viewer| viewer.state().file;
+        let word = |viewer: &Viewer| {
+            let editor = viewer.editor.as_ref().unwrap();
+            let rest = &editor.text()[editor.cursor()..];
+            rest.split_whitespace().next().unwrap_or("").to_owned()
+        };
+        // Down the page from the main file: into the first chapter,
+        // through the second and out again.
+        press(&mut viewer, "gsgs/Opening<CR>");
+        let mut walked = vec![(name(&viewer), word(&viewer))];
+        for _ in 0..12 {
+            press(&mut viewer, "j");
+            let now = (name(&viewer), word(&viewer));
+            if walked.last() == Some(&now) {
+                break;
+            }
+            walked.push(now);
+        }
+        let walked: Vec<(&str, &str)> = walked
+            .iter()
+            .map(|(file, word)| (file.as_str(), word.as_str()))
+            .collect();
+        assert_eq!(
+            walked,
+            [
+                ("main.typ", "Opening"),
+                ("one.typ", "One"),
+                ("one.typ", "First"),
+                ("parts/two.typ", "Two"),
+                ("parts/two.typ", "Second"),
+                ("main.typ", "Closing"),
+            ]
+        );
+        // And up again.
+        press(&mut viewer, "kk");
+        assert_eq!(
+            (name(&viewer), word(&viewer)),
+            ("parts/two.typ".to_owned(), "Two".to_owned())
+        );
+        // A click on text of another file goes to that file.
+        press(&mut viewer, ":b main<CR>/Closing<CR>");
+        let cursor = tints(&mut viewer, PAGE_CURSOR);
+        assert_eq!(cursor.len(), 1);
+        press(&mut viewer, "kk");
+        let other = tints(&mut viewer, PAGE_CURSOR);
+        assert_eq!(name(&viewer), "parts/two.typ");
+        press(&mut viewer, ":b main<CR>");
+        let (x, y) = (f64::from(other[0].x) + 2.0, f64::from(other[0].y) + 3.0);
+        viewer.click((x, y));
+        assert_eq!(
+            (name(&viewer), word(&viewer)),
+            ("parts/two.typ".to_owned(), "Two".to_owned())
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn pages_are_shown_as_slides_and_all_at_once() {
+        let text = "#set page(width: 320pt, height: 180pt)\n\
+                    = One\nFirst.\n#pagebreak()\n\
+                    = Two\nSecond.\n#pagebreak()\n\
+                    = Three\nThird.\n";
+        let (mut viewer, directory) = editing(text);
+        let line = |viewer: &Viewer| viewer.editor.as_ref().unwrap().position().0;
+        let visible = |viewer: &Viewer| -> Vec<usize> {
+            let pages = viewer.view.visible(&viewer.layout);
+            pages.iter().map(|page| page.index).collect()
+        };
+        press(&mut viewer, "gsgs");
+        assert!(visible(&viewer).len() > 1, "one under the other");
+        // One at a time, whole, wherever the cursor is.
+        press(&mut viewer, ":slides<CR>");
+        assert_eq!(viewer.paging(), Paging::Slides);
+        assert_eq!(visible(&viewer), [0]);
+        let page = viewer.layout.pages[0];
+        assert!(page.height <= viewer.view.height && page.width <= viewer.view.width);
+        press(&mut viewer, "/Second<CR>");
+        assert_eq!(visible(&viewer), [1]);
+        // To the next page and the one before, the cursor along.
+        press(&mut viewer, "]]");
+        assert_eq!((visible(&viewer), line(&viewer)), (vec![2], 8));
+        press(&mut viewer, "]]");
+        assert_eq!(visible(&viewer), [2], "the last one");
+        press(&mut viewer, "[[[[");
+        assert_eq!((visible(&viewer), line(&viewer)), (vec![0], 2));
+        // A push at the view is the next slide, not half of one.
+        viewer.scroll(0.0, 30.0);
+        assert_eq!(visible(&viewer), [0]);
+        viewer.scroll(0.0, 30.0);
+        assert_eq!(visible(&viewer), [1]);
+        viewer.scroll(0.0, -80.0);
+        assert_eq!(visible(&viewer), [0]);
+
+        // The overview: keys pick a page, Enter goes to it.
+        press(&mut viewer, ":grid<CR>");
+        assert!(viewer.is_grid());
+        let scene = viewer.scene(&|_| false);
+        assert_eq!(scene.wanted.len(), 3, "all pages are asked for, small");
+        assert!(scene.wanted.iter().all(|tile| tile.region.width < 400));
+        press(&mut viewer, "x");
+        assert_eq!(viewer.text(), Some(text), "keys are for the overview");
+        press(&mut viewer, "ll<CR>");
+        assert!(!viewer.is_grid());
+        assert_eq!((visible(&viewer), line(&viewer)), (vec![2], 8));
+        press(&mut viewer, ":grid<CR>h<Esc>");
+        assert_eq!(visible(&viewer), [2], "Escape leaves things as they were");
+        // And scrolling again.
+        press(&mut viewer, ":slides<CR>");
+        assert_eq!(viewer.paging(), Paging::Scroll);
+        press(&mut viewer, "gg]]");
+        assert_eq!(line(&viewer), 5);
+        assert!(visible(&viewer).contains(&1));
+        press(&mut viewer, ":pdf<CR>");
+        let pdf = std::fs::read(directory.join("main.pdf")).unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_users_own_keys_stand_for_others() {
+        let (mut viewer, directory) = editing("a;b and more\n");
+        let (keymap, complaint) = Keymap::parse(
+            [(";", ":"), (",w", ":w<CR>"), ("<C-s>", ":w<CR>")],
+            [("<C-s>", "<Esc>:w<CR>")],
+        );
+        assert_eq!(complaint, None);
+        viewer.set_keymap(keymap);
+        let saved = |directory: &Path| std::fs::read_to_string(directory.join("main.typ")).unwrap();
+        // One key for another.
+        press(&mut viewer, ";");
+        assert_eq!(viewer.state().editing.unwrap().mode, editor::Mode::Command);
+        press(&mut viewer, "<Esc>");
+        // In the middle of a command a key is what it is.
+        press(&mut viewer, "f;");
+        assert_eq!(viewer.editor.as_ref().unwrap().cursor(), 1);
+        // Several keys: waited for, and typed as they are if they do not
+        // become the mapping.
+        press(&mut viewer, "x,");
+        assert_eq!(viewer.text(), Some("ab and more\n"));
+        press(&mut viewer, "w");
+        assert_eq!(saved(&directory), "ab and more\n");
+        press(&mut viewer, ",x");
+        assert_eq!(viewer.text(), Some("a and more\n"));
+        // While typing, at once.
+        press(&mut viewer, "Anew<C-s>");
+        assert_eq!(saved(&directory), "a and morenew\n");
+        assert_eq!(viewer.state().editing.unwrap().mode, editor::Mode::Normal);
+        // What a mapping stands for is not looked up again.
+        let (keymap, _) = Keymap::parse([("x", "dd"), ("dd", "x")], []);
+        viewer.set_keymap(keymap);
+        press(&mut viewer, "x");
+        assert_eq!(viewer.text(), Some(""));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     /// Whether `j` and `k` get through a whole document on its pages:
     /// `ZETWERK_BENCH=file.typ cargo test --release -p zetwerk-app walking_the_pages -- --ignored --nocapture`
     #[test]
@@ -3861,8 +4234,7 @@ mod tests {
         let lines: usize = {
             let document = viewer.document.as_ref().unwrap();
             let world = viewer.compiled_world.as_ref().unwrap();
-            let file = viewer.project.main();
-            let count = |page: &Page| PageMap::build(world, &page.frame).lines(file).len();
+            let count = |page: &Page| PageMap::build(world, &page.frame).lines().len();
             document.pages().iter().map(count).sum()
         };
         let pages = viewer.document().unwrap().pages().len();

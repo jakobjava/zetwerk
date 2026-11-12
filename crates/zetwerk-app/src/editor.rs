@@ -192,6 +192,31 @@ impl Editor {
         self.engine.jump(offset, self.document.text());
     }
 
+    /// The file this is the text of, as Typst names it and as the disk
+    /// does.
+    #[must_use]
+    pub fn file(&self) -> FileId {
+        self.document.buffer().0.id()
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.document.path()
+    }
+
+    /// Takes over from the editor of another file what belongs to the
+    /// user and not to a file: registers, the last search, what `.`
+    /// repeats.
+    pub fn share(&mut self, other: &Self) {
+        self.engine.share(&other.engine);
+    }
+
+    /// Whether no command is under way; see [`Engine::is_idle`].
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.engine.is_idle()
+    }
+
     /// Counts the changes made to the text.
     #[must_use]
     pub fn revision(&self) -> u64 {

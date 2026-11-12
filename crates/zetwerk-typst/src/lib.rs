@@ -15,4 +15,4 @@ pub use ide::{Candidate, complete, definition_of, describe_at};
 pub use locate::{PagePosition, locate};
 pub use pagemap::{Atomic, Caret, MappedGlyph, Origin, PageLines, PageMap, TextRun};
 pub use service::{CompileOutput, Compiler, Scheduler, Urgency};
-pub use world::{Environment, FontSet, OpenError, Project, ProjectWorld};
+pub use world::{Environment, FontSet, OpenError, Project, ProjectWorld, find_main};

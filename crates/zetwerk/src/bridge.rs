@@ -247,9 +247,9 @@ impl Editor for Bridge {
                 Ok(json!({ "page": page, "x": round(x), "y": round(y) }))
             }
             Place::Page { page, x, y } => {
-                let (line, column) =
+                let (file, line, column) =
                     self.compiled(move |viewer| viewer.source_of(page, x, y))??;
-                Ok(json!({ "line": line, "column": column }))
+                Ok(json!({ "file": file, "line": line, "column": column }))
             }
         }
     }
@@ -403,12 +403,16 @@ mod tests {
 
     fn options(directory: &Path, agent_edits: AgentEdits) -> Options {
         Options {
+            main: None,
             path: directory.join("main.typ"),
             font_set: FontSet::Embedded,
             power: PowerMode::default(),
             state_dir: directory.join("state"),
             agent_edits,
             complaint: None,
+            keys: zetwerk_app::viewer::Keymap::default(),
+            layout: None,
+            slides: false,
         }
     }
 
@@ -515,7 +519,7 @@ mod tests {
                 y: y + 2.0,
             })
             .unwrap();
-        assert_eq!(back, json!({ "line": 6, "column": 5 }));
+        assert_eq!(back, json!({ "file": "main.typ", "line": 6, "column": 5 }));
         let png = bridge.render_page(2, 400).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
         assert!(bridge.render_page(3, 400).is_err());
@@ -557,6 +561,46 @@ mod tests {
         );
         bridge.withdraw_proposal(id).unwrap();
         assert_eq!(bridge.proposals().unwrap()["proposals"], json!([]));
+    }
+
+    #[test]
+    fn a_chapter_is_opened_as_part_of_its_document() {
+        let session = session("= Book\n#include \"part.typ\"\n", AgentEdits::Live);
+        let part = session.directory.join("part.typ");
+        std::fs::write(&part, "== Part\nPart text.\n").unwrap();
+        // The main file is found from the part.
+        assert_eq!(
+            zetwerk_typst::find_main(&part).canonicalize().unwrap(),
+            session.directory.join("main.typ").canonicalize().unwrap()
+        );
+        let mut options = options(&session.directory, AgentEdits::Live);
+        options.main = Some(std::mem::replace(&mut options.path, part));
+        // The main file is open in the first session: a second one may
+        // have the part.
+        let (handle, thread) = headless::spawn(&options).unwrap_or_else(|err| panic!("{err:?}"));
+        let bridge = Bridge::new(handle.clone());
+        assert_eq!(bridge.state().unwrap().file, "part.typ");
+        assert_eq!(bridge.read_source(None, None).unwrap().lines().count(), 3);
+        let outline = bridge.outline().unwrap();
+        assert_eq!(outline["headings"][0]["text"], "Part");
+        // The whole document is what is compiled and shown.
+        let changed = bridge
+            .change(replace("Part text.", "Other text.", None))
+            .unwrap();
+        assert_eq!(changed["diagnostics"], json!([]));
+        let place = bridge.locate(Place::Source { line: 2, column: 1 }).unwrap();
+        assert_eq!(place["page"], 1);
+        let (x, y) = (place["x"].as_f64().unwrap(), place["y"].as_f64().unwrap());
+        let back = bridge
+            .locate(Place::Page {
+                page: 1,
+                x: x + 1.0,
+                y: y + 2.0,
+            })
+            .unwrap();
+        assert_eq!(back, json!({ "file": "part.typ", "line": 2, "column": 1 }));
+        handle.send(Request::Quit);
+        let _ = thread.join();
     }
 
     #[test]

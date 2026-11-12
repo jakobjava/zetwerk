@@ -57,6 +57,40 @@ impl Layout {
         }
     }
 
+    /// Lays out pages of the given pixel sizes as slides: each alone in a
+    /// stretch as high as a view of `view_height` pixels (or as itself,
+    /// if it is higher), in the middle of it. A view at the top of such a
+    /// stretch shows that page and nothing of its neighbours.
+    #[must_use]
+    pub fn slides(
+        sizes: impl IntoIterator<Item = (u32, u32)>,
+        zoom: f64,
+        view_height: u32,
+    ) -> Self {
+        let gap = gap_px(zoom);
+        let mut y = 0;
+        let mut widest = 0;
+        let pages = sizes
+            .into_iter()
+            .map(|(width, height)| {
+                let stretch = view_height.max(height + 2 * gap);
+                let page = PageBox {
+                    y: y + (stretch - height) / 2,
+                    width,
+                    height,
+                };
+                y += stretch;
+                widest = widest.max(width);
+                page
+            })
+            .collect();
+        Self {
+            pages,
+            width: widest + 2 * gap,
+            height: y,
+        }
+    }
+
     /// The page showing at `y` pixels from the top of the document, or the
     /// nearest one if `y` falls into a gap.
     #[must_use]
@@ -163,6 +197,15 @@ impl Viewport {
         }
     }
 
+    /// Puts page `index` in the middle of the view, top to bottom.
+    pub fn center_page(&mut self, index: usize, layout: &Layout) {
+        if let Some(page) = layout.pages.get(index) {
+            let middle = f64::from(page.y) + f64::from(page.height) / 2.0;
+            self.top = (middle - f64::from(self.height) / 2.0) / self.zoom;
+            self.clamp(layout);
+        }
+    }
+
     /// Keeps the view inside the document: no scrolling past its ends, and
     /// no horizontal offset while the pages fit the view.
     pub fn clamp(&mut self, layout: &Layout) {
@@ -188,6 +231,16 @@ impl Viewport {
     #[must_use]
     pub fn fit_width(&self, page_width: f64) -> f64 {
         (f64::from(self.width) / (page_width + 2.0 * GAP_PT)).clamp(MIN_ZOOM, MAX_ZOOM)
+    }
+
+    /// The zoom at which a page of `page_width` by `page_height` points
+    /// is in the view whole, with the usual gap around it.
+    #[must_use]
+    pub fn fit_page(&self, page_width: f64, page_height: f64) -> f64 {
+        let by_height = f64::from(self.height) / (page_height + 2.0 * GAP_PT);
+        self.fit_width(page_width)
+            .min(by_height)
+            .clamp(MIN_ZOOM, MAX_ZOOM)
     }
 }
 
