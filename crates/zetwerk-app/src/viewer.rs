@@ -8,11 +8,14 @@
 pub mod agent;
 mod assist;
 mod buffers;
+mod inplace;
 mod keymap;
 mod slides;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+
+use crate::typst_text::{EMPTY, Ground, empty_places};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -28,13 +31,13 @@ use zetwerk_core::{DiskError, DiskStatus, Opened};
 use zetwerk_predict::{Replacement, predict};
 use zetwerk_render::{PixelRegion, Tile, TileKey, page_size_px, tile_origins, tiles};
 use zetwerk_typst::{CompileOutput, Environment, PageLines, PageMap, Project, ProjectWorld};
-use zetwerk_vim::Effect;
+use zetwerk_vim::{Effect, Seek, Shown as ShownLine};
 
 use self::agent::{AgentEdits, Mark, Proposal};
 pub use self::keymap::Keymap;
 pub use self::slides::Paging;
 use crate::chrome::{self, Chrome, Image, ROW_HEIGHT, RowText, STATUS_HEIGHT, Status};
-use crate::editor::{self, Editor, Rows};
+use crate::editor::{self, Editor, Rows, Unseen};
 use crate::gpu::{Quad, TextureId};
 use crate::keys::{Key, KeyPress};
 use crate::view::{Layout, MAX_ZOOM, MIN_ZOOM, Viewport};
@@ -119,9 +122,24 @@ pub enum Edited {
     Agent,
 }
 
+/// Whether what is before byte `cursor` of `text` has just begun
+/// something that stands by itself: a paragraph, a heading, an item of a
+/// list, with not more than its first character there.
+fn begins_block(text: &str, cursor: usize) -> bool {
+    let Some(before) = text.get(..cursor) else {
+        return false;
+    };
+    let line = before.rfind('\n').map_or(0, |at| at + 1);
+    let begun = before[line..].trim_start_matches(['=', '-', '+', '/', ' ']);
+    begun.chars().count() <= 1
+}
+
+/// How many words of equations are remembered as names or none.
+const NAMES_KEPT: usize = 2000;
+
 /// A compile shorter than this (in milliseconds) is run for every key
 /// that the page cannot show without one.
-const QUICK_COMPILE_MS: f64 = 12.0;
+const QUICK_COMPILE_MS: f64 = 40.0;
 
 /// A page as it should look with what was typed since the last compile,
 /// worked out without compiling. It is shown until the compile replaces it.
@@ -228,35 +246,19 @@ impl Change {
     }
 }
 
-/// Whether the page shows what is at byte `offset` of `source` the way it
-/// is written: the words of a paragraph, a heading or a list item. Markup,
-/// math and code show as something else or not at all.
-fn is_prose(source: &Source, offset: usize) -> bool {
-    let Some(leaf) = LinkedNode::new(source.root()).leaf_at(offset, Side::After) else {
-        // Beyond the last leaf: the end of the text.
-        return true;
-    };
-    match leaf.kind() {
-        SyntaxKind::Text => true,
-        SyntaxKind::Space
-        | SyntaxKind::Parbreak
-        | SyntaxKind::SmartQuote
-        | SyntaxKind::Shorthand
-        | SyntaxKind::Linebreak
-        | SyntaxKind::Escape => leaf.parent_kind().is_some_and(|parent| {
-            matches!(
-                parent,
-                SyntaxKind::Markup
-                    | SyntaxKind::Strong
-                    | SyntaxKind::Emph
-                    | SyntaxKind::Heading
-                    | SyntaxKind::ListItem
-                    | SyntaxKind::EnumItem
-                    | SyntaxKind::TermItem
-            )
-        }),
-        _ => false,
+/// The equation byte `offset` of `source` is in, the outermost if there
+/// are several, dollar signs and all.
+fn equation_at(source: &Source, offset: usize) -> Option<Range<usize>> {
+    let last = source.text().len().saturating_sub(1);
+    let mut node = LinkedNode::new(source.root()).leaf_at(offset.min(last), Side::After);
+    let mut outermost = None;
+    while let Some(here) = node {
+        if here.kind() == SyntaxKind::Equation {
+            outermost = Some(here.range());
+        }
+        node = here.parent().cloned();
     }
+    outermost
 }
 
 /// The part of `source` the lens shows for a cursor at `offset`: the whole
@@ -447,7 +449,34 @@ struct PageRows<'a> {
 /// A page, a line of it, and the file and byte shown there.
 type Landed = (usize, usize, FileId, usize);
 
+/// How many pages on are looked at for the nearest place for the cursor.
+const NEAR_PAGES: usize = 4;
+
 impl PageRows<'_> {
+    /// The page that shows byte `then` of the compiled text of the file,
+    /// or the text nearest to it.
+    fn page_of(&self, then: usize) -> Option<usize> {
+        // On the page it was last found on, if that shows it: the same
+        // text may be on many pages (a heading and the table of
+        // contents), and what a call made is found by no search. Then
+        // the pages beside it: a cursor seldom goes far.
+        let near = self.cursor_page.get();
+        if self.on(near, |lines| lines.shows(self.file, then)) == Some(true) {
+            return Some(near);
+        }
+        let beside = [Some(near), near.checked_add(1), near.checked_sub(1)];
+        let covering = beside
+            .into_iter()
+            .flatten()
+            .find(|page| self.on(*page, |lines| lines.covers(self.file, then)) == Some(true));
+        if covering.is_some() {
+            return covering;
+        }
+        let source = self.world.source(self.file).ok()?;
+        let then = self.world.shown_at(self.file, then);
+        zetwerk_typst::locate(self.document, &source, then, near).map(|position| position.page)
+    }
+
     /// Runs `ask` on the lines of page `index`.
     fn on<T>(&self, index: usize, ask: impl FnOnce(&PageLines) -> T) -> Option<T> {
         let page = self.document.pages().get(index)?;
@@ -511,9 +540,64 @@ impl PageRows<'_> {
 }
 
 impl Rows for PageRows<'_> {
+    fn stop(&self, at: usize, seek: Seek) -> Result<Option<Range<usize>>, Unseen> {
+        let file = self.file;
+        let then = self.change.back(at).ok_or(Unseen)?;
+        let Some(page) = self.page_of(then) else {
+            return Ok(None);
+        };
+        let found = match seek {
+            Seek::At => self.on(page, |lines| lines.stop_at(file, then)).flatten(),
+            Seek::Next | Seek::Previous => {
+                let forward = seek == Seek::Next;
+                self.on(page, |lines| lines.stop_beside(file, then, forward))
+                    .flatten()
+            }
+            Seek::After | Seek::Before => {
+                // On that page, or else on the next ones that way.
+                let forward = seek == Seek::After;
+                let mut page = Some(page);
+                let mut found = None;
+                for _ in 0..NEAR_PAGES {
+                    let Some(here) = page else {
+                        break;
+                    };
+                    let Some(stop) = self.on(here, |lines| lines.stop_near(file, then, forward))
+                    else {
+                        break;
+                    };
+                    found = stop;
+                    if found.is_some() {
+                        break;
+                    }
+                    page = if forward {
+                        here.checked_add(1)
+                    } else {
+                        here.checked_sub(1)
+                    };
+                }
+                found
+            }
+        };
+        // Where it is now: its start has moved with the change, its
+        // length is its own.
+        Ok(found.map(|stop| {
+            let start = self.change.forth(stop.start);
+            start..start + stop.len()
+        }))
+    }
+
+    fn line(&self, at: usize) -> Option<ShownLine> {
+        let then = self.change.back(at)?;
+        let page = self.page_of(then)?;
+        let (start, last, end) = self.on(page, |lines| lines.line_span(self.file, then))??;
+        let forth = |then: usize| self.change.forth(then);
+        let (start, last, end) = (forth(start), forth(last), forth(end));
+        (start <= last && last < end).then_some(ShownLine { start, last, end })
+    }
+
     fn row(&self, from: usize, rows: isize, across: Option<f64>) -> Option<(usize, f64)> {
         let file = self.file;
-        let source = self.world.source(file).ok()?;
         let from = self.change.back_or_edge(from);
         let (page, line, shown_at) = match self.landed.get() {
             Some((page, line, of, at)) if (of, at) == (file, from) => (
@@ -522,15 +606,7 @@ impl Rows for PageRows<'_> {
                 self.on(page, |lines| lines.across(line, file, from))??,
             ),
             _ => {
-                // On the page it was last found on, if that shows it:
-                // the same text may be on many pages (a heading and the
-                // table of contents), and what a call made is found by
-                // no search.
-                let near = self.cursor_page.get();
-                let page = match self.on(near, |lines| lines.shows(file, from)) {
-                    Some(true) => near,
-                    _ => zetwerk_typst::locate(self.document, &source, from, near)?.page,
-                };
+                let page = self.page_of(from)?;
                 let (line, shown_at) = self.on(page, |lines| lines.find(file, from))??;
                 (page, line, shown_at)
             }
@@ -579,6 +655,9 @@ impl Rows for PageRows<'_> {
 )]
 pub struct Viewer {
     chrome: Chrome,
+    /// Whether words typed in equations name something, as far as that
+    /// was asked.
+    names: HashMap<String, bool>,
     project: Project,
     /// The main file's text, if the window edits it and does not merely
     /// show what is on disk.
@@ -625,6 +704,9 @@ pub struct Viewer {
     pushed: f64,
     /// The overview of all pages, while it is up.
     grid: Option<slides::Grid>,
+    /// Whether the page, as last drawn, shows the equation the cursor is
+    /// in typeset, so that its source is not to be seen there.
+    equation_set: bool,
     /// The user's own keys, and the keys typed that may yet become one
     /// of them.
     keymap: Keymap,
@@ -705,6 +787,7 @@ impl Viewer {
         );
         let mut viewer = Self {
             chrome: Chrome::new(env)?,
+            names: HashMap::new(),
             project,
             editor: None,
             panes: Panes::Page,
@@ -729,6 +812,7 @@ impl Viewer {
             slide: 0,
             pushed: 0.0,
             grid: None,
+            equation_set: false,
             keymap: Keymap::default(),
             typed: Vec::new(),
             document_revision: None,
@@ -800,7 +884,9 @@ impl Viewer {
         self.agent_edits = options.agent_edits;
         self.state_dir = Some(options.state_dir.clone());
         self.keymap = options.keys.clone();
-        self.panes = options.layout.unwrap_or(self.panes);
+        // The page is where a document is worked on; the source is there
+        // for whoever wants to see it (`gs`).
+        self.panes = options.layout.unwrap_or(Panes::Page);
         if options.slides {
             self.paging = Paging::Slides;
         }
@@ -872,7 +958,64 @@ impl Viewer {
         if let Some(editor) = &self.editor {
             self.project.set_source(editor.source().clone());
         }
-        (self.revision, self.project.snapshot())
+        let put = self.put_to_show();
+        let world = match &self.editor {
+            Some(editor) if !put.is_empty() => self.project.snapshot_showing(editor.file(), &put),
+            _ => self.project.snapshot(),
+        };
+        (self.revision, world)
+    }
+
+    /// What is put into the text to show it, and where: into the
+    /// equation the cursor is in, something in every place that is
+    /// still empty (the parts of a fraction just begun), and marks
+    /// around the word being typed while it names nothing. Half an
+    /// equation is none to Typst; so it is one, and shows what it lacks.
+    fn put_to_show(&mut self) -> Vec<(usize, &'static str)> {
+        let Some(editor) = &self.editor else {
+            return Vec::new();
+        };
+        let (source, cursor) = (editor.source(), editor.cursor());
+        let Some(equation) = equation_at(source, cursor) else {
+            return Vec::new();
+        };
+        let mut put: Vec<(usize, &'static str)> = empty_places(source, &equation)
+            .into_iter()
+            .map(|place| (place, EMPTY))
+            .collect();
+        // The word that ends at the cursor.
+        let text = source.text();
+        let typing = editor.mode() == editor::Mode::Insert;
+        let before = text.get(..cursor).unwrap_or("");
+        let named = before
+            .trim_end_matches(|c: char| c.is_alphabetic() || c == '.')
+            .len();
+        let word = cursor - before[named..].trim_start_matches('.').len()..cursor;
+        let begins = text[..word.start].chars().next_back();
+        let goes_on = text[cursor..].chars().next();
+        let alone = !begins.is_some_and(|c| c.is_alphanumeric() || matches!(c, '#' | '"' | '.'))
+            && !goes_on.is_some_and(char::is_alphanumeric);
+        let in_math = crate::typst_text::ground(source, word.start + 1) == Ground::Math
+            && crate::typst_text::ground(source, cursor) == Ground::Math;
+        if typing && alone && in_math && text[word.clone()].chars().count() >= 2 {
+            let name = text[word.clone()].to_owned();
+            let known = if let Some(known) = self.names.get(&name) {
+                *known
+            } else {
+                let known = self.chrome.typesets(&format!("${name}$"));
+                if self.names.len() >= NAMES_KEPT {
+                    self.names.clear();
+                }
+                self.names.insert(name, known);
+                known
+            };
+            if !known {
+                put.push((word.start, "\""));
+                put.push((word.end, "\""));
+                put.sort_by_key(|(at, _)| *at);
+            }
+        }
+        put
     }
 
     /// Where the document's main file is, if it is a file.
@@ -935,9 +1078,20 @@ impl Viewer {
 
     /// The width of the source pane and the left edge and width of the
     /// area pages are drawn in, in device pixels.
+    /// What the window shows: what was asked for, but the source where
+    /// there are no pages to show yet (the text has never compiled), so
+    /// that what is wrong with it can be seen and mended.
+    fn shown_panes(&self) -> Panes {
+        if self.document.is_none() && self.editor.is_some() && self.compiled_revision.is_some() {
+            Panes::Source
+        } else {
+            self.panes
+        }
+    }
+
     fn split(&self) -> (u32, u32, u32) {
         let width = self.window.0;
-        match (&self.editor, self.panes) {
+        match (&self.editor, self.shown_panes()) {
             (None, _) | (_, Panes::Page) => (0, 0, width),
             (_, Panes::Source) => (width, width, 0),
             (_, Panes::Split) => (width / 2, width / 2, width - width / 2),
@@ -1037,7 +1191,7 @@ impl Viewer {
     /// Scrolls the pages to where the text under the cursor is set, if the
     /// pages say where that is and it is out of view.
     fn follow_cursor(&mut self) {
-        if self.panes == Panes::Source {
+        if self.shown_panes() == Panes::Source {
             return;
         }
         let (Some(change), Some(editor), Some(document), Some(world)) = (
@@ -1069,8 +1223,9 @@ impl Viewer {
                 y: cell.min.y.to_pt(),
             })
         });
+        let shown = world.shown_at(file, cursor);
         let Some(position) =
-            there.or_else(|| zetwerk_typst::locate(document, &source, cursor, near))
+            there.or_else(|| zetwerk_typst::locate(document, &source, shown, near))
         else {
             return;
         };
@@ -1117,12 +1272,20 @@ impl Viewer {
             .chain(warnings)
             .filter_map(|(diagnostic, is_error)| {
                 let (file, range) = zetwerk_typst::place(world, diagnostic)?;
+                let range = world.written_at(file, range.start)..world.written_at(file, range.end);
                 Some((file, range, is_error, diagnostic.message.to_string()))
             })
             .collect();
         self.diagnostics.sort_by_key(|(_, range, _, _)| range.start);
         if let Some(document) = output.compiled.document {
-            self.document = Some(Arc::new(document));
+            if self.document.is_none() {
+                // The first pages there are: until now the window showed
+                // the source in their place.
+                self.document = Some(Arc::new(document));
+                self.arrange();
+            } else {
+                self.document = Some(Arc::new(document));
+            }
             self.compiled_world = Some(Arc::clone(&output.world));
             self.document_revision = Some(output.revision);
             self.predicted = None;
@@ -1330,7 +1493,11 @@ impl Viewer {
 
     /// A key for the source text.
     fn editor_key(&mut self, press: KeyPress) {
-        let places = self.places();
+        // What the pages say of where the text is holds also while one
+        // of them is shown as worked out: only where things are drawn
+        // differs then.
+        let places = self.places_of_text();
+        let layout = self.shown_panes();
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -1349,7 +1516,7 @@ impl Viewer {
             }),
             _ => None,
         };
-        let shown = match self.panes {
+        let shown = match layout {
             Panes::Page => editor::Shown::Pages(pages.as_ref().map(|pages| pages as &dyn Rows)),
             Panes::Split | Panes::Source => editor::Shown::Source {
                 columns: self.source_size.0,
@@ -1369,13 +1536,22 @@ impl Viewer {
             self.touched();
             self.sync_proposals();
             let shown = self.predict();
+            // What begins a paragraph moves all that is below it: that
+            // is for Typst to settle, at once.
+            let begins = self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| begins_block(editor.text(), editor.cursor()));
             self.edited = Some(if !typing {
                 Edited::Command
-            } else if shown || self.stats.compile_ms > QUICK_COMPILE_MS {
+            } else if shown || !(begins || self.stats.compile_ms <= QUICK_COMPILE_MS) {
                 Edited::Typing
             } else {
                 Edited::Unpredicted
             });
+            if typing {
+                self.offer_files();
+            }
         } else if was_typing && !typing && !self.is_compiled() {
             self.edited = Some(Edited::LeftInsert);
         }
@@ -1430,7 +1606,7 @@ impl Viewer {
         };
         let file = editor.file();
         let base = world
-            .source(file)
+            .written(file)
             .map_err(|_| "the compiled source is gone".to_owned())?;
         let (offset, removed, text) = match difference(base.text(), editor.text()) {
             Difference::Nothing => {
@@ -1477,6 +1653,9 @@ impl Viewer {
         }
         if to > from && !is_plain_text(editor.source(), from, to - from) {
             return Err("not plain text of a paragraph".to_owned());
+        }
+        if world.shows_more() {
+            return Err("the pages show more than is written".to_owned());
         }
         // The page is that of the text next to the insertion. While typing
         // goes on in one place it stays the same page, and is not looked
@@ -1526,9 +1705,16 @@ impl Viewer {
     /// nothing is compiled, more than one thing changed since, or a page
     /// is shown as worked out, not as compiled.
     fn places(&self) -> Option<Change> {
-        if self.predicted.is_some() || self.document.is_none() {
+        if self.predicted.is_some() {
             return None;
         }
+        self.places_of_text()
+    }
+
+    /// Like [`Viewer::places`], for asking where text is in the compiled
+    /// document, whatever is on screen.
+    fn places_of_text(&self) -> Option<Change> {
+        self.document.as_ref()?;
         if self.document_revision == Some(self.revision) {
             return Some(Change::NONE);
         }
@@ -1725,6 +1911,7 @@ impl Viewer {
         solid(&mut scene, has, BACKDROP, (0.0, 0.0, width, height));
         self.cursor_at = None;
         self.caret_at = None;
+        self.equation_set = false;
         if self.grid.is_some() {
             self.grid_scene(&mut scene, has);
             self.status_line(&mut scene, has);
@@ -1822,6 +2009,9 @@ impl Viewer {
     ) {
         let zoom = self.view.zoom;
         let bar = (1.5 * self.scale).round().max(1.0);
+        if self.in_place(scene, has, index, origin) {
+            return;
+        }
         if let (Some(predicted), Some(editor)) = (&self.predicted, &self.editor) {
             // The page is a predicted one: all that is known of it is
             // where the typed text is.
@@ -1887,18 +2077,25 @@ impl Viewer {
         let caret = map.caret(file, change.back_or_edge(editor.cursor()));
         if let Some(caret) = &caret {
             let (x, y, _, height) = place(caret.cell);
-            self.cursor_at = Some((x, y, y + height));
+            self.cursor_at.get_or_insert((x, y, y + height));
         }
         let Some(cursor) = cursor else {
             return;
         };
-        if caret.as_ref().is_none_or(|caret| caret.after) {
+        let typing = editor.mode() == editor::Mode::Insert;
+        if caret.as_ref().is_none_or(|caret| caret.after && !typing) {
             // No text of the source is shown here; something made of it
             // may be, such as what a reference refers to by.
             let object = map.object(file, cursor);
             if let Some(first) = object.first() {
                 let (x, y, _, height) = place(*first);
-                self.cursor_at = Some((x, y, y + height));
+                self.cursor_at.get_or_insert((x, y, y + height));
+                if let (true, Some(last)) = (typing, object.last()) {
+                    // What is typed goes behind it.
+                    let (x, y, width, height) = place(*last);
+                    tint(scene, has, PAGE_BAR, ((x + width).round(), y, bar, height));
+                    return;
+                }
                 for rect in object {
                     tint(scene, has, PAGE_CURSOR, place(rect));
                 }
@@ -1923,17 +2120,13 @@ impl Viewer {
         let Some(editor) = &self.editor else {
             return false;
         };
-        if self.panes != Panes::Page {
-            return false;
-        }
-        let unseen = match self.places() {
-            Some(change) => change.back(editor.cursor()).is_none(),
-            None => self.predicted.is_none(),
-        };
-        let typing_unseen = editor.mode() == editor::Mode::Insert
-            && self.predicted.is_none()
-            && self.document_revision != Some(self.revision);
-        unseen || typing_unseen || !is_prose(editor.source(), editor.cursor())
+        // What is typed shows where it is typed (see `in_place`). Only
+        // an equation needs more: it shows as what it means, and what is
+        // typed is its source.
+        self.shown_panes() == Panes::Page
+            && editor.mode() == editor::Mode::Insert
+            && self.equation_set
+            && equation_at(editor.source(), editor.cursor()).is_some()
     }
 
     /// The source lens: where only pages are shown and they do not show
@@ -1959,7 +2152,9 @@ impl Viewer {
 
         let (cursor, selection, mode) = (editor.cursor(), editor.selection(), editor.mode());
         let text = editor.text();
-        let block = lens_block(editor.source(), cursor);
+        // The equation and no more: the line it is in is on the page.
+        let block = equation_at(editor.source(), cursor)
+            .unwrap_or_else(|| lens_block(editor.source(), cursor));
         let rows = editor::rows(&text[block.clone()], columns);
         let cursor_row = editor::row_of(&rows, cursor - block.start);
         let first = cursor_row
@@ -2208,6 +2403,14 @@ impl Viewer {
                 1 => first.clone(),
                 count => format!("{first}  (+{} more)", count - 1),
             });
+        // What the compiler makes of half a word is not worth reading:
+        // its complaints wait until typing is over. Not in an equation:
+        // there the page shows what is typed only once it is one.
+        let typing = editing.is_some_and(|editing| editing.mode == editor::Mode::Insert);
+        let in_equation = self.editor.as_ref().is_some_and(|editor| {
+            crate::typst_text::equation_at(editor.source(), editor.cursor()).is_some()
+        });
+        let problem = problem.filter(|_| !typing || in_equation);
         let (left, alert) = match (&command, &self.message, &problem) {
             (Some(command), ..) => (command.as_str(), false),
             (None, Some(message), _) => (message.text.as_str(), message.alert),
@@ -3029,9 +3232,88 @@ mod tests {
     }
 
     #[test]
-    fn the_lens_shows_the_source_where_the_page_does_not() {
+    fn what_is_typed_on_the_page_is_what_is_read() {
+        let text = "#set page(width: 300pt, height: 300pt)\nSome words.\n\nMore.\n";
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "/words<CR>gsgs");
+        press(&mut viewer, "A Use a_b * c [1] <lt>x> of me@x.de");
+        let typed = viewer.text().unwrap();
+        assert!(
+            typed.contains("Use a\\_b \\* c \\[1\\] \\<x> of me\\@x.de"),
+            "{typed:?}"
+        );
+        compile(&mut viewer);
+        assert_eq!(viewer.document_revision, Some(viewer.revision));
+        // Strong and emphasised text is begun and left by a key.
+        press(
+            &mut viewer,
+            " and <C-b>bold<C-b> or <C-i>so<C-i>, b<C-b>ut<C-b>.",
+        );
+        let typed = viewer.text().unwrap();
+        assert!(
+            typed.contains(" and *bold* or _so_, b#strong[ut]."),
+            "{typed:?}"
+        );
+        compile(&mut viewer);
+        assert_eq!(viewer.document_revision, Some(viewer.revision));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn deleting_in_an_equation_leaves_an_equation() {
+        let text = "#set page(width: 300pt, height: 300pt)\nBefore.\n\n\
+                    $ y_i = lambda x_i + (1 - lambda) x_(i+1) $\n\nAfter.\n";
+        let (mut viewer, directory) = editing(text);
+        let equation = |viewer: &Viewer| {
+            let text = viewer.text().unwrap_or_default().to_owned();
+            let from = text.find('$').unwrap_or(0);
+            let to = text.rfind('$').map_or(text.len(), |at| at + 1);
+            text[from..to].to_owned()
+        };
+        // Backwards through all of it while typing: what is raised or
+        // lowered goes, and with the last of it the mark that did it.
+        press(&mut viewer, "/i+1<CR>gsgsA");
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            press(&mut viewer, "<BS>");
+            compile(&mut viewer);
+            seen.push(equation(&viewer));
+            assert_eq!(
+                viewer.document_revision,
+                Some(viewer.revision),
+                "no equation: {seen:?}"
+            );
+        }
+        assert!(
+            seen.contains(&"$ y_i = lambda x_i + (1 - lambda) x_() $".to_owned()),
+            "{seen:?}"
+        );
+        assert!(
+            seen.contains(&"$ y_i = lambda x_i + (1 - lambda) x $".to_owned()),
+            "{seen:?}"
+        );
+        // A symbol written with several letters goes as the one thing
+        // it shows as.
+        assert_eq!(
+            equation(&viewer).trim_end_matches([' ', '$']),
+            "$ y_i = lambda x_i +",
+            "{seen:?}"
+        );
+        // And with `x` on the page: nothing is left of what it took.
+        press(&mut viewer, "<Esc>u");
+        compile(&mut viewer);
+        press(&mut viewer, "/i+1<CR>");
+        press(&mut viewer, "xxx");
+        compile(&mut viewer);
+        assert_eq!(equation(&viewer), "$ y_i = lambda x_i + (1 - lambda) x $");
+        assert_eq!(viewer.document_revision, Some(viewer.revision));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn an_equation_is_typed_where_it_stands() {
         let text = "#set page(width: 300pt, height: 300pt)\n\
-                    Some words and $x^2 + y^2$ in a line.\n\n\
+                    Some words and $x^2 + y$ in a line.\n\n\
                     = A heading\n";
         let (mut viewer, directory) = editing(text);
         let lens = |viewer: &mut Viewer| {
@@ -3040,33 +3322,46 @@ mod tests {
             let quads = scene.quads;
             quads.into_iter().find(|quad| quad.texture == edge)
         };
-        // Beside the source it has nothing to add.
-        press(&mut viewer, "/x<CR>");
+        // Its source is not shown: not for a cursor that stands on it,
+        // and not while it is typed.
+        press(&mut viewer, "/y<CR>gsgs");
         assert_eq!(lens(&mut viewer), None);
-        // With only pages: none on the words of a paragraph, one on math.
-        press(&mut viewer, "gsgs/words<CR>");
+        assert_eq!(tints(&mut viewer, PAGE_CURSOR).len(), 1);
+        // Half an equation is none to Typst. The page shows it all the
+        // same, with a box for what it lacks, and the cursor in it.
+        press(&mut viewer, "a^");
+        compile(&mut viewer);
+        assert_eq!(viewer.document_revision, Some(viewer.revision));
+        assert!(viewer.text().unwrap().contains("$x^2 + y^$"));
         assert_eq!(lens(&mut viewer), None);
-        press(&mut viewer, "/x<CR>");
-        let on_math = lens(&mut viewer).unwrap();
-        let cursor = tints(&mut viewer, PAGE_CURSOR);
-        assert_eq!(cursor.len(), 1);
-        assert!(on_math.y > cursor[0].y, "under the cursor's line");
-        let (width, height) = viewer.window;
-        assert!(on_math.x >= 0.0 && on_math.x + on_math.width <= width as f32);
-        assert!(on_math.y + on_math.height <= height as f32);
-        // On code that shows nowhere, in the corner.
-        press(&mut viewer, "gg");
-        assert!(lens(&mut viewer).is_some());
-        // While typing what the page cannot show yet, and no longer once
-        // it does.
-        press(&mut viewer, "/heading<CR>");
+        assert_eq!(tints(&mut viewer, PAGE_BAR).len(), 1);
+        // So with the parts of a fraction, and Tab leads through them.
+        press(&mut viewer, "n + ff<Tab>");
+        compile(&mut viewer);
+        assert_eq!(viewer.document_revision, Some(viewer.revision));
+        press(&mut viewer, "a<Tab>b<Tab><Tab> and");
+        compile(&mut viewer);
+        assert!(
+            viewer
+                .text()
+                .unwrap()
+                .contains("$x^2 + y^n + frac(a, b)$ and in a line."),
+            "{:?}",
+            viewer.text()
+        );
+        // A word that is not yet a name is shown as the word.
+        press(&mut viewer, "<Esc>/b<CR>a + alp");
+        compile(&mut viewer);
+        assert_eq!(viewer.document_revision, Some(viewer.revision));
         assert_eq!(lens(&mut viewer), None);
-        press(&mut viewer, "inew ");
-        assert!(!viewer.is_predicted(), "a heading is not worked out");
-        assert!(lens(&mut viewer).is_some());
+        press(&mut viewer, "<Esc>");
+        press(&mut viewer, "/words<CR>inew ");
+        assert_eq!(lens(&mut viewer), None);
+        // The cursor does not rest on code that shows nowhere.
         press(&mut viewer, "<Esc>");
         compile(&mut viewer);
-        assert_eq!(lens(&mut viewer), None);
+        press(&mut viewer, "gg");
+        assert_eq!(tints(&mut viewer, PAGE_CURSOR).len(), 1);
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -3346,7 +3641,7 @@ mod tests {
         assert_eq!(cursor(&viewer), start);
 
         // A count, and the aim holds across a line too short for it.
-        press(&mut viewer, "$");
+        press(&mut viewer, "/short<CR>$");
         let (end_x, _) = caret_on_page(&viewer);
         press(&mut viewer, "/full<CR>");
         let (x, y) = caret_on_page(&viewer);
@@ -3910,7 +4205,7 @@ mod tests {
                 completion
                     .candidates
                     .iter()
-                    .map(|candidate| candidate.label.clone())
+                    .map(|entry| entry.candidate.label.clone())
                     .collect()
             })
         };
@@ -3924,16 +4219,16 @@ mod tests {
         assert_eq!(last(&viewer), "#width");
         assert!(viewer.completion.is_none());
         // A function comes with its brackets, the cursor between them.
-        press(&mut viewer, " and #ima");
-        assert!(labels(&viewer).contains(&"image".to_owned()));
-        press(&mut viewer, "<C-n><C-p><Tab>\"a.png<Esc>");
-        assert_eq!(last(&viewer), "#width and #image(\"a.png\")");
+        press(&mut viewer, " and #ali");
+        assert!(labels(&viewer).contains(&"align".to_owned()));
+        press(&mut viewer, "<C-n><C-p><Tab>center<Esc>");
+        assert_eq!(last(&viewer), "#width and #align(center)");
         // One undo step with the rest of what was typed, and `.` types
         // it again.
         press(&mut viewer, "u");
         assert_eq!(viewer.text(), Some(text));
         press(&mut viewer, ".");
-        assert_eq!(last(&viewer), "#width and #image(\"a.png\")");
+        assert_eq!(last(&viewer), "#width and #align(center)");
         // In running text nothing comes up unasked; asked, it does; and
         // it goes away again.
         press(&mut viewer, "Goplain wor");
@@ -4217,6 +4512,280 @@ mod tests {
         viewer.set_keymap(keymap);
         press(&mut viewer, "x");
         assert_eq!(viewer.text(), Some(""));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "one walk over a page")]
+    fn on_the_page_vim_goes_by_what_is_shown() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    #set heading(numbering: \"1.\")\n\
+                    = Start <start>\n\
+                    The *quick* brown fox jumps over the lazy dog and runs on \
+                    through the wood, as @start says, until the line is full \
+                    and then some more of it follows here.\n\n\
+                    Second paragraph.\n";
+        let (mut viewer, directory) = editing(text);
+        let under = |viewer: &Viewer| {
+            let editor = viewer.editor.as_ref().unwrap();
+            editor.text()[editor.cursor()..].chars().next().unwrap()
+        };
+        let paragraph = |viewer: &Viewer| viewer.text().unwrap().lines().nth(3).unwrap().to_owned();
+        press(&mut viewer, "gsgs/The<CR>");
+        // Character by character: over the marks, which show as nothing,
+        // and with the cursor on the page all the way.
+        let mut seen = String::new();
+        for _ in 0..12 {
+            seen.push(under(&viewer));
+            assert_eq!(tints(&mut viewer, PAGE_CURSOR).len(), 1, "after {seen:?}");
+            press(&mut viewer, "l");
+        }
+        assert_eq!(seen, "The quick br");
+        press(&mut viewer, "hhhhhhhhh");
+        assert_eq!(under(&viewer), ' ', "and back over them");
+        press(&mut viewer, "h");
+        assert_eq!(under(&viewer), 'e');
+        // Backspace takes what is shown before the cursor, not the mark.
+        press(&mut viewer, "/brown<CR>hi<BS><Esc>");
+        assert!(paragraph(&viewer).starts_with("The *quic* brown"));
+        press(&mut viewer, "u");
+
+        // What a reference shows is one thing: stepped over, deleted whole.
+        press(&mut viewer, "/@start<CR>");
+        assert_eq!(under(&viewer), '@');
+        press(&mut viewer, "l");
+        assert_eq!(under(&viewer), ' ', "past all of it");
+        press(&mut viewer, "hx");
+        assert!(
+            paragraph(&viewer).contains("as  says"),
+            "{}",
+            paragraph(&viewer)
+        );
+        press(&mut viewer, "u");
+        compile(&mut viewer);
+
+        // The start and the end of a line are those of the line shown.
+        press(&mut viewer, "/jumps<CR>");
+        let line = {
+            let lines = PageRows {
+                document: viewer.document.as_ref().unwrap(),
+                world: viewer.compiled_world.as_ref().unwrap(),
+                file: viewer.file_id(),
+                lines: &viewer.page_lines,
+                cursor_page: &viewer.cursor_page,
+                change: Change::NONE,
+                landed: &viewer.landed,
+                elsewhere: &viewer.elsewhere,
+            };
+            let cursor = viewer.editor.as_ref().unwrap().cursor();
+            lines.line(cursor).unwrap()
+        };
+        let shown = &viewer.text().unwrap()[line.start..line.end].to_owned();
+        assert!(
+            shown.starts_with("The *quick*") && shown.len() < 70,
+            "{shown}"
+        );
+        let cursor = |viewer: &Viewer| viewer.editor.as_ref().unwrap().cursor();
+        press(&mut viewer, "$");
+        assert_eq!(cursor(&viewer), line.last);
+        press(&mut viewer, "0");
+        assert_eq!(cursor(&viewer), line.start);
+        // `V` takes that line, `j` the next one with it.
+        press(&mut viewer, "/jumps<CR>V");
+        assert_eq!(
+            viewer.editor.as_ref().unwrap().mode(),
+            editor::Mode::VisualLine
+        );
+        assert_eq!(
+            viewer.editor.as_ref().unwrap().selection(),
+            Some(line.start..line.end)
+        );
+        press(&mut viewer, "j");
+        let two = viewer.editor.as_ref().unwrap().selection().unwrap();
+        assert_eq!(two.start, line.start);
+        assert!(two.end > line.end + 20 && two.end < text.find("\n\nSecond").unwrap());
+        press(&mut viewer, "<Esc>");
+        // `dd` takes the line shown out of its paragraph, and no more.
+        press(&mut viewer, "/jumps<CR>dd");
+        let rest = paragraph(&viewer);
+        assert!(
+            !rest.contains("jumps") && rest.contains("follows here."),
+            "{rest}"
+        );
+        assert_eq!(viewer.text().unwrap().lines().count(), 6);
+        press(&mut viewer, "u");
+        compile(&mut viewer);
+        // At its end and at its start.
+        press(&mut viewer, "/jumps<CR>A!<Esc>");
+        assert_eq!(&viewer.text().unwrap()[line.end..=line.end], "!");
+        press(&mut viewer, "u");
+        compile(&mut viewer);
+        press(&mut viewer, "/jumps<CR>I>><Esc>");
+        assert_eq!(&viewer.text().unwrap()[line.start..line.start + 2], ">>");
+        press(&mut viewer, "u");
+        compile(&mut viewer);
+
+        // A new paragraph below, and Enter ends one.
+        press(&mut viewer, "/jumps<CR>oNew one.<CR>And another.<Esc>");
+        assert!(
+            viewer
+                .text()
+                .unwrap()
+                .contains("follows here.\n\nNew one.\n\nAnd another.\n\nSecond paragraph.")
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn things_are_put_in_from_a_menu() {
+        let (mut viewer, directory) = editing("Some text here.\n\n");
+        let labels = |viewer: &Viewer| -> Vec<String> {
+            let completion = viewer.completion.as_ref();
+            completion.map_or_else(Vec::new, |completion| {
+                let label = |entry: &assist::Entry| entry.candidate.label.clone();
+                completion.candidates.iter().map(label).collect()
+            })
+        };
+        let lines = |viewer: &Viewer| -> Vec<String> {
+            let text = viewer.text().unwrap();
+            text.lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        // Behind a hash: what can be put in, narrowed by what is typed.
+        press(&mut viewer, "Go#");
+        assert_eq!(
+            labels(&viewer)[..3],
+            ["equation", "numbered equation", "inline equation"]
+        );
+        press(&mut viewer, "num");
+        assert_eq!(labels(&viewer)[0], "numbered equation");
+        press(&mut viewer, "<CR>x^2<Esc>");
+        assert_eq!(
+            lines(&viewer)[1],
+            "#math.equation(block: true, numbering: \"(1)\", $ x^2 $)"
+        );
+        compile(&mut viewer);
+        assert_eq!(viewer.state().problems, Vec::<String>::new());
+        // What stands by itself parts the paragraph it is put into.
+        press(&mut viewer, "gg/text<CR>i#fig<Tab>cat.png<Esc>");
+        assert_eq!(
+            lines(&viewer)[..6],
+            [
+                "Some ",
+                "#figure(",
+                "  image(\"cat.png\"),",
+                "  caption: [],",
+                ")",
+                "text here."
+            ]
+        );
+        // What stands in a line does not.
+        press(&mut viewer, "G$a#foot<CR>a note<Esc>");
+        assert!(viewer.text().unwrap().contains("$)#footnote[a note]"));
+        // In an equation the names come up as they are typed: no hash.
+        press(&mut viewer, "Go$sq");
+        assert_eq!(labels(&viewer)[0], "square root");
+        press(&mut viewer, "<Tab>2<Esc>");
+        assert_eq!(lines(&viewer).last().map(String::as_str), Some("$sqrt(2)$"));
+        press(&mut viewer, "i + fra");
+        assert_eq!(labels(&viewer)[0], "fraction");
+        press(&mut viewer, "<C-e><Esc>");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn what_is_typed_shows_where_it_is_typed() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    = Title\n\
+                    Some words and $x^2 + y^2$ in a line.\n";
+        let (mut viewer, directory) = editing(text);
+        // The images laid over the page that are neither its tiles nor a
+        // colour: what was typeset in place.
+        let pieces = |viewer: &mut Viewer| -> Vec<Quad> {
+            let scene = viewer.scene(&|_| false);
+            let drawn = scene.images.iter().filter(|image| image.pixmap.width() > 1);
+            let ours: HashSet<TextureId> = drawn.map(|image| image.id).collect();
+            // Not the status line, which is as wide as the window.
+            let large = |quad: &&Quad| ours.contains(&quad.texture) && quad.width < 900.0;
+            scene.quads.iter().filter(large).copied().collect()
+        };
+        let bars = |viewer: &mut Viewer| tints(viewer, PAGE_BAR);
+        // A document that takes long to typeset: one that does not is
+        // typeset anew instead.
+        viewer.stats.compile_ms = 10.0 * QUICK_COMPILE_MS;
+        press(&mut viewer, "gsgs/Title<CR>");
+        let heading = tints(&mut viewer, PAGE_CURSOR)[0];
+        // Words typed into a heading are not worked into the page: they
+        // are set by themselves and laid where they are typed, in the
+        // heading's size, with the cursor behind them.
+        press(&mut viewer, "A more");
+        assert!(!viewer.is_predicted());
+        let typed = pieces(&mut viewer);
+        assert_eq!(typed.len(), 1, "{typed:?}");
+        assert!(
+            (typed[0].y - heading.y).abs() < 2.0,
+            "on the heading's line"
+        );
+        assert!(
+            (typed[0].height - heading.height).abs() < 2.0,
+            "and as high"
+        );
+        assert!(typed[0].x > heading.x + 3.0 * heading.width);
+        let bar = bars(&mut viewer);
+        assert_eq!(bar.len(), 1);
+        assert!(
+            (bar[0].x - (typed[0].x + typed[0].width)).abs() < 3.0,
+            "{bar:?}"
+        );
+        // Wider with every key.
+        press(&mut viewer, " words");
+        assert!(pieces(&mut viewer)[0].width > typed[0].width + 10.0);
+        press(&mut viewer, "<Esc>");
+        compile(&mut viewer);
+        assert_eq!(pieces(&mut viewer), [], "the page has it now");
+
+        // A new paragraph: under the one it follows, at its left edge.
+        viewer.stats.compile_ms = 10.0 * QUICK_COMPILE_MS;
+        press(&mut viewer, "/Some<CR>");
+        let first = tints(&mut viewer, PAGE_CURSOR)[0];
+        press(&mut viewer, "oNext *one*");
+        let typed = pieces(&mut viewer);
+        assert_eq!(typed.len(), 1);
+        assert!((typed[0].x - first.x).abs() < 2.0, "{typed:?} {first:?}");
+        assert!(typed[0].y > first.y + first.height);
+        assert!(typed[0].y < first.y + 4.0 * first.height);
+        // Half an equation is set as one, with what it lacks.
+        press(&mut viewer, " and $a^");
+        let half = pieces(&mut viewer);
+        assert_eq!(half.len(), 1);
+        assert!(half[0].width > typed[0].width);
+        assert_eq!(bars(&mut viewer).len(), 1);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_delete_key_deletes_forwards() {
+        let (mut viewer, directory) = editing("abc *def* ghi\njkl\n");
+        // What is under the cursor; what is selected; while typing, what
+        // is behind the cursor, the end of a line too.
+        press(&mut viewer, "<Del>");
+        assert_eq!(viewer.text(), Some("bc *def* ghi\njkl\n"));
+        press(&mut viewer, "vl<Del>");
+        assert_eq!(viewer.text(), Some(" *def* ghi\njkl\n"));
+        press(&mut viewer, "A<Del>!<Esc>");
+        assert_eq!(viewer.text(), Some(" *def* ghi!jkl\n"));
+        press(&mut viewer, "0i<Del><Del><Esc>");
+        assert_eq!(viewer.text(), Some("def* ghi!jkl\n"));
+        // At the very end there is nothing to take.
+        press(&mut viewer, "A<Del><Esc>u");
+        assert_eq!(viewer.text(), Some(" *def* ghi!jkl\n"));
+        // On the page, while typing: what is shown behind the cursor, not
+        // a mark that shows as nothing.
+        compile(&mut viewer);
+        press(&mut viewer, "gsgs0i<Del><Esc>");
+        assert_eq!(viewer.text(), Some(" *ef* ghi!jkl\n"));
         let _ = std::fs::remove_dir_all(directory);
     }
 

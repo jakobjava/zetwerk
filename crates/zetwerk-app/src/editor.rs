@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use typst::syntax::{FileId, Source};
 use zetwerk_core::{Buffer, DiskError, DiskStatus, Document, OpenError, Opened, Replace};
-use zetwerk_vim::{Edit, Effect, Engine, Host, Place};
+use zetwerk_vim::{Edit, Effect, Engine, Host, Place, Seek, Shown as ShownLine};
 
 use crate::keys::KeyPress;
 
@@ -52,7 +52,18 @@ pub struct Editor {
 pub trait Rows {
     /// See [`zetwerk_vim::Host::row`].
     fn row(&self, from: usize, rows: isize, across: Option<f64>) -> Option<(usize, f64)>;
+
+    /// See [`zetwerk_vim::Host::stop`]. `Err` if byte `at` is in text
+    /// that is newer than what is shown.
+    fn stop(&self, at: usize, seek: Seek) -> Result<Option<Range<usize>>, Unseen>;
+
+    /// See [`zetwerk_vim::Host::shown_line`].
+    fn line(&self, at: usize) -> Option<ShownLine>;
 }
+
+/// The place asked about is in text that nothing shows yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unseen;
 
 /// What the cursor moves on when it moves by rows.
 pub enum Shown<'a> {
@@ -123,16 +134,58 @@ impl Editor {
             rows,
             shown_revision: before,
         };
+        let length = host.document.text().len();
         let effects = self.engine.key(press, &mut host);
         if self.failure.is_some() {
             // The engine believes in an edit that was not made. The text is
             // what it was; all that can be off is the cursor.
             self.engine
                 .set_cursor(self.engine.cursor(), self.document.text());
+        } else if matches!(shown, Shown::Pages(_)) && self.document.text().len() < length {
+            self.tidy_equation();
         }
         Typed {
             effects,
             changed: self.document.revision() != before,
+        }
+    }
+
+    /// After something was deleted on a page: takes from the equation
+    /// the cursor is in the marks that raise, lower or divide by nothing
+    /// now. They show as nothing, so nobody could delete them there; left
+    /// in, they are no equation. The one being typed into stays.
+    fn tidy_equation(&mut self) {
+        let typing = self.engine.mode() == Mode::Insert;
+        for _ in 0..TIDY_ROUNDS {
+            let source = &self.document.buffer().0;
+            let cursor = self.engine.cursor();
+            let Some(equation) = crate::typst_text::equation_at(source, cursor) else {
+                return;
+            };
+            if cursor <= equation.start {
+                return;
+            }
+            let mut left = crate::typst_text::empty_scripts(source, &equation);
+            left.retain(|script| !(typing && script.start < cursor && cursor <= script.end));
+            if left.is_empty() {
+                return;
+            }
+            let mut cursor = cursor;
+            let mut replaces = Vec::new();
+            // From the last: the bytes before it stay where they are.
+            for script in left.into_iter().rev() {
+                if script.end <= cursor {
+                    cursor -= script.len();
+                } else if script.start < cursor {
+                    cursor = script.start;
+                }
+                replaces.push(Replace::new(script, ""));
+            }
+            if let Err(err) = self.document.edit(&replaces, true) {
+                self.failure = Some(err.to_string());
+                return;
+            }
+            self.engine.set_cursor(cursor, self.document.text());
         }
     }
 
@@ -254,6 +307,11 @@ impl Editor {
 
     #[must_use]
     pub fn mode(&self) -> Mode {
+        // Lines selected on a page are a selection of characters to the
+        // engine; to the user they are lines.
+        if self.engine.selects_lines() {
+            return Mode::VisualLine;
+        }
         self.engine.mode()
     }
 
@@ -429,6 +487,10 @@ struct DocumentHost<'a> {
     shown_revision: u64,
 }
 
+/// How often what a deletion left in an equation is cleared away: what
+/// is cleared may leave something of the kind itself.
+const TIDY_ROUNDS: usize = 4;
+
 /// The rows the cursor moves by.
 enum RowsOf<'a> {
     Source(&'a [Row]),
@@ -503,6 +565,67 @@ impl Host for DocumentHost<'_> {
 
     fn expand(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
         crate::typst_text::snippet(&self.document.buffer().0, at)
+    }
+
+    fn typed(&self, at: usize, c: char) -> Option<(Range<usize>, String, usize)> {
+        crate::typst_text::typed(&self.document.buffer().0, at, c)
+    }
+
+    fn set_off(
+        &self,
+        at: usize,
+        format: zetwerk_vim::Format,
+    ) -> Option<(Range<usize>, String, usize)> {
+        crate::typst_text::set_off(&self.document.buffer().0, at, format)
+    }
+
+    fn unmake(&self, at: usize) -> Option<Range<usize>> {
+        crate::typst_text::unmake(&self.document.buffer().0, at)
+    }
+
+    fn next_field(&self, at: usize) -> Option<usize> {
+        matches!(self.rows, RowsOf::Pages(_))
+            .then(|| crate::typst_text::next_field(&self.document.buffer().0, at))?
+    }
+
+    fn stop(&self, at: usize, seek: Seek) -> Option<Range<usize>> {
+        let RowsOf::Pages(Some(pages)) = &self.rows else {
+            return None;
+        };
+        if self.document.revision() != self.shown_revision {
+            return None;
+        }
+        match pages.stop(at, seek) {
+            Ok(stop) => stop,
+            // Text typed since the pages were made: it will show as it
+            // was typed, character by character.
+            Err(Unseen) if matches!(seek, Seek::At | Seek::After | Seek::Before) => {
+                let text = self.document.text();
+                let c = text.get(at..)?.chars().next().filter(|c| *c != '\n')?;
+                Some(at..at + c.len_utf8())
+            }
+            Err(Unseen) => None,
+        }
+    }
+
+    fn shown_line(&self, at: usize) -> Option<ShownLine> {
+        let RowsOf::Pages(Some(pages)) = &self.rows else {
+            return None;
+        };
+        if self.document.revision() != self.shown_revision {
+            return None;
+        }
+        pages.line(at)
+    }
+
+    fn open(&self, at: usize, below: bool) -> Option<(usize, String, usize)> {
+        matches!(self.rows, RowsOf::Pages(_))
+            .then(|| crate::typst_text::open(&self.document.buffer().0, at, below))
+    }
+
+    fn line_break(&self, at: usize) -> Option<String> {
+        matches!(self.rows, RowsOf::Pages(_))
+            .then(|| crate::typst_text::line_break(&self.document.buffer().0, at))
     }
 
     fn redo(&mut self) -> Option<Range<usize>> {

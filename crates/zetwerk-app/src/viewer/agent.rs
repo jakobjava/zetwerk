@@ -751,7 +751,8 @@ impl Viewer {
             .source(file)
             .map_err(|_| "the compiled source is gone".to_owned())?;
         let near = self.cursor_page.get();
-        let position = zetwerk_typst::locate(&document, &source, offset, near)
+        let shown = world.shown_at(file, offset);
+        let position = zetwerk_typst::locate(&document, &source, shown, near)
             .ok_or("nothing of that place or near it is on a page")?;
         // That is the line; the page map knows the character.
         let exact = document.pages().get(position.page).and_then(|page| {
@@ -797,7 +798,7 @@ impl Viewer {
         // The file may be another than the one being edited: a chapter
         // the main file includes.
         let source = world
-            .source(found)
+            .written(found)
             .map_err(|_| "the file of the text there is gone".to_owned())?;
         let name = found.vpath().get_without_slash().to_owned();
         let (line, column) = line_column(source.text(), offset);

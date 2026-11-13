@@ -306,8 +306,50 @@ impl Project {
             sources: self.sources.clone(),
             external: Arc::clone(&self.external),
             time: Time::system(),
+            shown: None,
         }
     }
+
+    /// A view of the project in which `file` is not quite as it is
+    /// written: with each of `put` (a byte of the file and a text, in
+    /// the order of the bytes) put into it. That is what Typst is given
+    /// to typeset, so that something half written shows as what it is
+    /// going to be; what is asked about the pages is answered in bytes
+    /// of the file as it is written (see [`ProjectWorld::written_at`]).
+    #[must_use]
+    pub fn snapshot_showing(&self, file: FileId, put: &[(usize, &str)]) -> ProjectWorld {
+        let mut world = self.snapshot();
+        let Some(written) = self.sources.get(&file) else {
+            return world;
+        };
+        let text = written.text();
+        let in_order = put.windows(2).all(|pair| pair[0].0 <= pair[1].0);
+        let in_text = put.iter().all(|(at, _)| text.is_char_boundary(*at));
+        if put.is_empty() || !in_order || !in_text {
+            return world;
+        }
+        let mut shown = written.clone();
+        for (at, with) in put.iter().rev() {
+            shown.edit(*at..*at, with);
+        }
+        world.sources.insert(file, shown);
+        world.shown = Some(Shown {
+            file,
+            written: written.clone(),
+            put: put.iter().map(|(at, with)| (*at, with.len())).collect(),
+        });
+        world
+    }
+}
+
+/// How a file is shown otherwise than it is written.
+struct Shown {
+    file: FileId,
+    /// The file as it is written.
+    written: Source,
+    /// What was put in to show it: at which byte of the file as written,
+    /// and how many bytes.
+    put: Vec<(usize, usize)>,
 }
 
 /// A project frozen at one revision. This is what Typst compiles.
@@ -318,9 +360,63 @@ pub struct ProjectWorld {
     sources: HashMap<FileId, Source>,
     external: Arc<ExternalFiles>,
     time: Time,
+    shown: Option<Shown>,
 }
 
 impl ProjectWorld {
+    /// The source of `id` as it is written, which is not what Typst is
+    /// given where something was put in to show it (see
+    /// [`Project::snapshot_showing`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`World::source`].
+    pub fn written(&self, id: FileId) -> FileResult<Source> {
+        match &self.shown {
+            Some(shown) if shown.file == id => Ok(shown.written.clone()),
+            _ => self.source(id),
+        }
+    }
+
+    /// Whether a file is shown otherwise than it is written.
+    #[must_use]
+    pub fn shows_more(&self) -> bool {
+        self.shown.is_some()
+    }
+
+    /// The byte of `id` as it is written that byte `offset` of what
+    /// Typst was given is: itself, unless something was put in before
+    /// it. What was put in is all at the byte it was put in at.
+    #[must_use]
+    pub fn written_at(&self, id: FileId, offset: usize) -> usize {
+        let Some(shown) = self.shown.as_ref().filter(|shown| shown.file == id) else {
+            return offset;
+        };
+        let mut more = 0;
+        for (at, length) in &shown.put {
+            if offset < at + more {
+                break;
+            }
+            if offset < at + more + length {
+                return *at;
+            }
+            more += length;
+        }
+        offset - more
+    }
+
+    /// The other way round: where in what Typst was given byte `offset`
+    /// of `id` as it is written is. At a byte something was put in at,
+    /// before that.
+    #[must_use]
+    pub fn shown_at(&self, id: FileId, offset: usize) -> usize {
+        let Some(shown) = self.shown.as_ref().filter(|shown| shown.file == id) else {
+            return offset;
+        };
+        let before = shown.put.iter().take_while(|(at, _)| *at < offset);
+        offset + before.map(|(_, length)| length).sum::<usize>()
+    }
+
     /// Whether edits to this file are possible at all: whether it is a
     /// file of the project. The files of packages are not; a file of the
     /// project that is not open for editing can be opened.

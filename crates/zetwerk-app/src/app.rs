@@ -602,6 +602,7 @@ fn translate(key: &WinitKey) -> Option<Key> {
             NamedKey::Enter => Key::Enter,
             NamedKey::Escape => Key::Escape,
             NamedKey::Backspace => Key::Backspace,
+            NamedKey::Delete => Key::Delete,
             NamedKey::Tab => Key::Tab,
             NamedKey::Space => Key::Char(' '),
             NamedKey::ArrowUp => Key::Up,

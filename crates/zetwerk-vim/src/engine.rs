@@ -60,6 +60,76 @@ pub trait Host {
         None
     }
 
+    /// A place the cursor can be on what the host shows in place of the
+    /// text's characters (a typeset page), as the bytes of the text that
+    /// are shown there: a letter, or all that a reference turned into.
+    /// Which one is asked for, `seek` says. `None` where there is none,
+    /// and always where the host shows the text as it is: then the
+    /// cursor goes by characters.
+    fn stop(&self, at: usize, seek: Seek) -> Option<Range<usize>> {
+        let _ = (at, seek);
+        None
+    }
+
+    /// The line byte `at` is shown in, where the host shows the text in
+    /// lines of its own making. `0`, `$`, `dd` and `V` go by it.
+    fn shown_line(&self, at: usize) -> Option<Shown> {
+        let _ = at;
+        None
+    }
+
+    /// Where and what to put into the text to begin a new paragraph (or
+    /// item of a list) below the one byte `at` is in, or above it: the
+    /// byte, the text, and how far into that text the cursor goes. `o`
+    /// and `O` ask where lines are not the host's to show.
+    fn open(&self, at: usize, below: bool) -> Option<(usize, String, usize)> {
+        let _ = (at, below);
+        None
+    }
+
+    /// What Enter typed at byte `at` puts into the text, where that is
+    /// not simply a line break.
+    fn line_break(&self, at: usize) -> Option<String> {
+        let _ = at;
+        None
+    }
+
+    /// What typing the character `c` at byte `at` does to the text, where
+    /// that is not simply putting `c` there: the bytes to replace, the
+    /// text to put there, and how far into it the cursor goes. A host
+    /// that shows the text as a page takes what is typed for what is
+    /// meant to be read, and writes it so that it is.
+    fn typed(&self, at: usize, c: char) -> Option<(Range<usize>, String, usize)> {
+        let _ = (at, c);
+        None
+    }
+
+    /// What to do at byte `at` to begin text set off as `format` there
+    /// (or to end it, where the cursor is at the end of such text): the
+    /// bytes to replace, the text to put there, and how far into it the
+    /// cursor goes. Asked for Ctrl-B and Ctrl-I in insert mode.
+    fn set_off(&self, at: usize, format: Format) -> Option<(Range<usize>, String, usize)> {
+        let _ = (at, format);
+        None
+    }
+
+    /// What Backspace takes at byte `at` where that is not what stands
+    /// before it: a place to fill in that nothing was filled into (what
+    /// was to be raised or lowered, a fraction with no parts) goes as a
+    /// whole, with the marks that made it.
+    fn unmake(&self, at: usize) -> Option<Range<usize>> {
+        let _ = at;
+        None
+    }
+
+    /// Where Tab leads from byte `at`, where the text has places to fill
+    /// in one after the other: the arguments of a call, the cells of a
+    /// table.
+    fn next_field(&self, at: usize) -> Option<usize> {
+        let _ = at;
+        None
+    }
+
     /// What the word before byte `at` stands for, if it is the name of a
     /// snippet where it is: the bytes to replace, the text to put there,
     /// and how far into that text the cursor goes. Asked when Tab is
@@ -120,6 +190,31 @@ enum Operator {
     Upper,
     /// Not Vim's: set the text off the way the host's language does.
     Format(Format),
+}
+
+/// Which of the places the cursor can be on (see [`Host::stop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seek {
+    /// The one that begins at the byte.
+    At,
+    /// The first that begins at the byte or behind it.
+    After,
+    /// The last that begins at the byte or before it.
+    Before,
+    /// The one after the one at the byte, in the same line.
+    Next,
+    /// The one before it, in the same line.
+    Previous,
+}
+
+/// A line of what the host shows (see [`Host::shown_line`]): the byte it
+/// begins with, the byte its last place for the cursor begins with, and
+/// the byte behind what it shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown {
+    pub start: usize,
+    pub last: usize,
+    pub end: usize,
 }
 
 /// A way to set text off that only the host knows how to write: the
@@ -369,6 +464,13 @@ pub struct Engine {
     rows_first: bool,
     /// Whether a bracket typed brings its closing one along (not Vim's).
     pairs: bool,
+    /// Whether a selection begun with `V` is of lines the host shows:
+    /// then it is a selection of characters that is kept to whole lines.
+    line_select: bool,
+    /// Where what is shown under the cursor ends in the text, and what
+    /// is shown under the other end of a selection, where the host shows
+    /// other things than characters.
+    extent: Option<(usize, usize)>,
     /// The texts that were put in whole (see [`Key::Text`]): how many
     /// characters before the cursor each replaced, the text, and how far
     /// into it the cursor went.
@@ -451,6 +553,8 @@ impl Engine {
             last_search: None,
             rows_first: false,
             pairs: false,
+            line_select: false,
+            extent: None,
             texts: Vec::new(),
             row_goal: None,
             page_lines: 40,
@@ -584,11 +688,28 @@ impl Engine {
                 // line, whose line break is not there to be taken.
                 let on_last_break =
                     text.char_at(high) == Some('\n') && text.next_line(high).is_none();
-                Some(low..if on_last_break { high } else { text.next(high) })
+                let end = if on_last_break { high } else { text.next(high) };
+                // What is shown at the later end may be more than one
+                // character of the text.
+                let shown = self.extent.map_or(end, |(cursor, anchor)| {
+                    if self.cursor >= self.anchor {
+                        cursor
+                    } else {
+                        anchor
+                    }
+                });
+                Some(low..end.max(shown.min(text.len())))
             }
             Mode::VisualLine => Some(text.line_start(low)..line_end_inclusive(text, high)),
             _ => None,
         }
+    }
+
+    /// Whether the selection is one of whole lines: `V`, also where the
+    /// lines are the host's.
+    #[must_use]
+    pub fn selects_lines(&self) -> bool {
+        self.mode == Mode::VisualLine || (self.mode == Mode::Visual && self.line_select)
     }
 
     /// The contents of a register and whether they are whole lines.
@@ -601,6 +722,74 @@ impl Engine {
 
     /// Handles one key press.
     pub fn key(&mut self, press: KeyPress, host: &mut impl Host) -> Vec<Effect> {
+        let before = self.cursor;
+        let effects = self.key_as_typed(press, host);
+        self.rest_on_shown(before, host);
+        effects
+    }
+
+    /// Brings the cursor to rest where the host shows something, after a
+    /// key: a host that shows the text as a page has places for the
+    /// cursor that are not the characters of the text. Markup that shows
+    /// as nothing is none; what a reference shows is one.
+    fn rest_on_shown(&mut self, before: usize, host: &impl Host) {
+        if self.mode != Mode::Visual {
+            self.line_select = false;
+        }
+        self.extent = None;
+        if !self.rows_first || !matches!(self.mode, Mode::Normal | Mode::Visual) {
+            return;
+        }
+        let rest = |at: usize, forward: bool| {
+            if host.stop(at, Seek::At).is_some() {
+                return at;
+            }
+            let (first, then) = if forward {
+                (Seek::After, Seek::Before)
+            } else {
+                (Seek::Before, Seek::After)
+            };
+            let stop = host.stop(at, first).or_else(|| host.stop(at, then));
+            stop.map_or(at, |stop| stop.start)
+        };
+        let moved = rest(self.cursor, self.cursor >= before);
+        if moved != self.cursor {
+            self.cursor = moved;
+            self.wanted_column = None;
+        }
+        if self.mode == Mode::Visual && self.line_select {
+            // Both ends at the ends of their lines, the lines between
+            // and the two themselves taken whole.
+            let lines = (host.shown_line(self.anchor), host.shown_line(self.cursor));
+            if let (Some(anchor), Some(cursor)) = lines {
+                if self.cursor >= self.anchor {
+                    (self.anchor, self.cursor) = (anchor.start, cursor.last);
+                } else {
+                    (self.anchor, self.cursor) = (anchor.last, cursor.start);
+                }
+            }
+        }
+        let end = |at: usize| host.stop(at, Seek::At).map(|stop| stop.end);
+        // The other end only where there is one: asking about a place
+        // far from the cursor is not free.
+        let anchor = if self.mode == Mode::Visual {
+            end(self.anchor)
+        } else {
+            None
+        };
+        self.extent = end(self.cursor).zip(anchor.or(Some(0)));
+    }
+
+    fn key_as_typed(&mut self, press: KeyPress, host: &mut impl Host) -> Vec<Effect> {
+        // Outside insert mode the Delete key is `x`, as in Vim: what is
+        // under the cursor, or what is selected.
+        let deletes =
+            press.key == Key::Delete && !matches!(self.mode, Mode::Insert | Mode::Command);
+        let press = if deletes {
+            KeyPress::plain(Key::Char('x'))
+        } else {
+            press
+        };
         self.effects.clear();
         if let Some((_, keys)) = &mut self.recording {
             keys.push(press);
@@ -1380,6 +1569,7 @@ impl Engine {
     /// Commands that only exist in normal mode proper.
     fn command_key_normal(&mut self, c: char, host: &mut impl Host) {
         match c {
+            'x' | 'X' | 's' if self.shown_shorthand(c, host) => {}
             'x' => self.shorthand(Operator::Delete, 'l', host),
             'X' => self.shorthand(Operator::Delete, 'h', host),
             's' => self.shorthand(Operator::Change, 'l', host),
@@ -1596,12 +1786,109 @@ impl Engine {
                 self.pending.operator_count = self.pending.count.take();
             }
             // Doubled (`dd`, `guu`): the operator with the motion `_`.
-            Some(pending) if pending == operator => self.motion_key('_', host),
+            Some(pending) if pending == operator => {
+                if let Some(lines) = self.shown_lines(operator, host) {
+                    self.pending.operator = None;
+                    return self.operate(operator, lines, 1, lines.start, host);
+                }
+                self.motion_key('_', host);
+            }
             Some(_) => self.fail(),
         }
     }
 
+    /// The lines the host shows that a doubled operator with a count is
+    /// about, from the cursor's on: as characters, since they are not
+    /// lines of the text. `None` where the host shows the text's own
+    /// lines, and for operators that are about those in any case.
+    fn shown_lines(&mut self, operator: Operator, host: &impl Host) -> Option<Object> {
+        if !self.rows_first || matches!(operator, Operator::Indent | Operator::Dedent) {
+            return None;
+        }
+        let first = host.shown_line(self.cursor)?;
+        let (count, _) = self.take_count();
+        let last = if count > 1 {
+            let rows = isize::try_from(count - 1).unwrap_or(isize::MAX);
+            let (below, _) = host.row(self.cursor, rows, None)?;
+            host.shown_line(below)?
+        } else {
+            first
+        };
+        let (start, mut end) = (first.start.min(last.start), first.end.max(last.end));
+        // With the blank that parts them from what follows, unless the
+        // lines are to be written anew.
+        let text = Text(host.text());
+        let follows = (text.char_at(end), text.char_at(text.next(end)));
+        let blank = matches!(follows, (Some(' '), _))
+            || matches!(follows, (Some('\n'), next) if next != Some('\n'));
+        if blank && operator != Operator::Change {
+            end = text.next(end);
+        }
+        Some(Object {
+            start,
+            end,
+            linewise: false,
+        })
+    }
+
+    /// `x`, `X` and `s` on what the host shows under the cursor (or, for
+    /// `X`, before it), where that is not a character of the text.
+    /// Returns whether it was done.
+    fn shown_shorthand(&mut self, c: char, host: &mut impl Host) -> bool {
+        if !self.rows_first || self.mode != Mode::Normal {
+            return false;
+        }
+        let Some(mut stop) = host.stop(self.cursor, Seek::At) else {
+            return false;
+        };
+        let (count, _) = self.take_count();
+        if c == 'X' {
+            let Some(before) = host.stop(self.cursor, Seek::Previous) else {
+                self.fail();
+                return true;
+            };
+            stop = before;
+        } else {
+            for _ in 1..count {
+                match host.stop(stop.start, Seek::Next) {
+                    Some(next) => stop = stop.start.min(next.start)..stop.end.max(next.end),
+                    None => break,
+                }
+            }
+        }
+        let operator = if c == 's' {
+            Operator::Change
+        } else {
+            Operator::Delete
+        };
+        let object = Object {
+            start: stop.start,
+            end: stop.end,
+            linewise: false,
+        };
+        self.reset_pending();
+        self.operate(operator, object, 1, object.start, host);
+        true
+    }
+
     fn visual_key(&mut self, c: char, host: &impl Host) {
+        // Lines the host shows are selected as characters, kept to whole
+        // lines.
+        if self.rows_first && host.shown_line(self.cursor).is_some() {
+            self.pending = Pending::default();
+            let lines = c == 'V';
+            if self.mode == Mode::Visual && self.line_select == lines {
+                self.mode = Mode::Normal;
+                self.line_select = false;
+            } else {
+                if self.mode == Mode::Normal {
+                    self.anchor = self.cursor;
+                }
+                self.mode = Mode::Visual;
+                self.line_select = lines;
+            }
+            return;
+        }
         let wanted = if c == 'v' {
             Mode::Visual
         } else {
@@ -1832,6 +2119,19 @@ impl Engine {
                 column: Column::Reset,
             })
         };
+        // The start and the end of a line are those of the line the host
+        // shows, where it shows lines of its own.
+        if self.rows_first
+            && matches!(c, '0' | '^' | '$')
+            && count == 1
+            && let Some(line) = host.shown_line(pos)
+        {
+            return match c {
+                '$' if operating => horizontal(line.end, Kind::Exclusive),
+                '$' => horizontal(line.last, Kind::Inclusive),
+                _ => horizontal(line.start, Kind::Exclusive),
+            };
+        }
         match c {
             // Backspace is `h` that goes on into the line before; with an
             // operator it stays in its line here.
@@ -2789,9 +3089,41 @@ impl Engine {
         self.mode == Mode::Insert && self.replacing
     }
 
+    /// `a`, `A`, `I`, `o` and `O` where the host shows other things than
+    /// the text's characters and lines: they go by what it shows. Returns
+    /// `i` once the cursor is where typing begins, the key itself where
+    /// there is nothing of the host's to go by.
+    fn start_insert_shown(&mut self, c: char, host: &mut impl Host) -> char {
+        if !self.rows_first {
+            return c;
+        }
+        let Some(line) = host.shown_line(self.cursor) else {
+            return c;
+        };
+        match c {
+            'a' => {
+                if let Some(stop) = host.stop(self.cursor, Seek::At) {
+                    self.cursor = stop.end;
+                }
+            }
+            'I' => self.cursor = line.start,
+            'A' => self.cursor = line.end,
+            'o' | 'O' => {
+                let Some((at, with, within)) = host.open(self.cursor, c == 'o') else {
+                    return c;
+                };
+                self.edit(host, at..at, &with);
+                self.cursor = at + within.min(with.len());
+            }
+            _ => return c,
+        }
+        'i'
+    }
+
     fn start_insert(&mut self, c: char, host: &mut impl Host) {
         let (count, _) = self.take_count();
         self.reset_pending();
+        let c = self.start_insert_shown(c, host);
         let text = Text(host.text());
         let column = self
             .wanted_column
@@ -2916,6 +3248,34 @@ impl Engine {
         }
     }
 
+    /// Ctrl-B and Ctrl-I where the host shows the text as pages: begins
+    /// strong (or emphasised) text at the cursor, or leaves it. Returns
+    /// whether it did anything.
+    fn insert_set_off(&mut self, strong: bool, host: &mut impl Host) -> bool {
+        let format = if strong { Format::Strong } else { Format::Emph };
+        let Some((range, with, within)) = host.set_off(self.cursor, format) else {
+            return false;
+        };
+        if !(range.is_empty() && with.is_empty()) {
+            self.edit(host, range.clone(), &with);
+        }
+        self.cursor = (range.start + within).min(host.text().len());
+        true
+    }
+
+    /// Types `c` where the host shows the text as pages: as what the
+    /// host takes it to mean, if it has a say.
+    fn insert_as_meant(&mut self, c: char, host: &mut impl Host) {
+        match host.typed(self.cursor, c) {
+            Some((range, with, within)) => {
+                self.edit(host, range.clone(), &with);
+                self.cursor = range.start + within.min(with.len());
+            }
+            None if self.pairs => self.insert_paired(c, host),
+            None => self.insert_text(&c.to_string(), host),
+        }
+    }
+
     /// What a key other than Escape and the cursor keys does in insert
     /// mode. Returns whether it did anything.
     fn insert_apply(&mut self, press: KeyPress, host: &mut impl Host) -> bool {
@@ -2946,9 +3306,22 @@ impl Engine {
                 let to = self.stop_at_insert_start(host.text(), start);
                 self.insert_delete(to, host);
             }
+            (Key::Char(c @ ('b' | 'i')), true) if self.rows_first => {
+                return self.insert_set_off(c == 'b', host);
+            }
+            (Key::Char(c), false) if self.rows_first && !self.replacing => {
+                self.insert_as_meant(c, host);
+            }
             (Key::Char(c), false) if self.pairs && !self.replacing => self.insert_paired(c, host),
             (Key::Char(c), false) => self.insert_text(&c.to_string(), host),
-            (Key::Enter, _) => self.insert_text("\n", host),
+            (Key::Enter, _) => {
+                let typed = if self.rows_first {
+                    host.line_break(self.cursor)
+                } else {
+                    None
+                };
+                self.insert_text(typed.as_deref().unwrap_or("\n"), host);
+            }
             (Key::Tab, _) => {
                 // The name of a snippet becomes the snippet.
                 if let Some((range, with, within)) = host.expand(self.cursor)
@@ -2959,10 +3332,35 @@ impl Engine {
                     self.cursor = range.start + within.min(with.len());
                     return true;
                 }
+                // To the next place to fill in, where there is one.
+                if let Some(next) = host.next_field(self.cursor) {
+                    self.cursor = next.min(host.text().len());
+                    return true;
+                }
+                // Blanks set nothing apart on a page.
+                if self.rows_first {
+                    return false;
+                }
                 let column = text.column(self.cursor);
                 self.insert_text(&" ".repeat(SHIFT_WIDTH - column % SHIFT_WIDTH), host);
             }
             (Key::Backspace, _) => return self.insert_backspace(host),
+            (Key::Delete, _) => {
+                // What is behind the cursor: what the host shows there,
+                // or else the next character, the end of the line too.
+                let shown = if self.rows_first {
+                    host.stop(self.cursor, Seek::After)
+                } else {
+                    None
+                };
+                let next = text.next(self.cursor);
+                let behind = shown.unwrap_or(self.cursor..next);
+                // Not the line break the text ends with.
+                if behind.is_empty() || behind.end > text.len() || next >= text.len() {
+                    return false;
+                }
+                self.edit(host, behind, "");
+            }
             (Key::Text(number), _) => {
                 let Some((replaced, with, within)) = self.texts.get(number as usize).cloned()
                 else {
@@ -3055,6 +3453,34 @@ impl Engine {
         if self.cursor == 0 {
             return false;
         }
+        if self.rows_first && !self.replacing {
+            // An empty place to fill in goes itself.
+            if let Some(place) = host.unmake(self.cursor)
+                && place.start < place.end
+                && place.end <= host.text().len()
+            {
+                self.edit(host, place.clone(), "");
+                self.cursor = place.start;
+                return true;
+            }
+            // What the host shows before the cursor goes, not the markup
+            // that may stand between it and the cursor.
+            let before = Text(host.text()).prev(self.cursor);
+            // So does a symbol written with several letters that stood
+            // there before typing began: it shows as one thing. What
+            // was just typed goes letter by letter, as it came.
+            if let Some(stop) = host.stop(before, Seek::Before)
+                && (stop.end < self.cursor
+                    || (stop.end == self.cursor && self.stood_before_insert(host.text(), &stop)))
+            {
+                let to = self.stop_at_insert_start(host.text(), stop.start);
+                if to == stop.start {
+                    self.edit(host, stop.clone(), "");
+                    self.cursor = stop.start;
+                    return true;
+                }
+            }
+        }
         if self.pairs && !self.replacing {
             // Between a pair with nothing in it: both go.
             let text = Text(host.text());
@@ -3096,6 +3522,19 @@ impl Engine {
             self.insert_start = place(host.text(), self.cursor);
         }
         true
+    }
+
+    /// Whether bytes `stop` of `text`, which end at the cursor, are more
+    /// than one character and were there before this insert began.
+    fn stood_before_insert(&self, text: &str, stop: &Range<usize>) -> bool {
+        let (line, column) = self.insert_start;
+        let lines = Text(text);
+        let several = text
+            .get(stop.clone())
+            .is_some_and(|shown| shown.chars().count() > 1);
+        several
+            && lines.line_index(self.cursor) == line
+            && stop.end <= lines.line_start(self.cursor) + column
     }
 
     /// Where a deletion back to `to` really ends: at the start of the
@@ -3335,6 +3774,7 @@ fn key_of(c: char) -> KeyPress {
         '\u{e006}' => special(Key::End),
         '\u{e007}' => special(Key::PageUp),
         '\u{e008}' => special(Key::PageDown),
+        '\u{e009}' => special(Key::Delete),
         '\u{e100}'..='\u{f8ff}' => special(Key::Text(c as u32 - TEXT_KEYS)),
         '\u{1}'..='\u{1f}' => KeyPress {
             key: Key::Char(char::from(c as u8 | 0x60)),
@@ -3364,6 +3804,7 @@ fn char_of(press: KeyPress) -> char {
         Key::End => '\u{e006}',
         Key::PageUp => '\u{e007}',
         Key::PageDown => '\u{e008}',
+        Key::Delete => '\u{e009}',
         // The rest of the private use area numbers the texts put in
         // whole; beyond that many, the last stands for all.
         Key::Text(number) => {

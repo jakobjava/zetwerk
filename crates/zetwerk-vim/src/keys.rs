@@ -11,6 +11,8 @@ pub enum Key {
     Enter,
     Escape,
     Backspace,
+    /// The key that deletes forwards (`Entf` on a German keyboard).
+    Delete,
     Tab,
     Up,
     Down,
@@ -91,6 +93,7 @@ fn parse_special(name: &str) -> Result<KeyPress, String> {
         ("esc", ..) => Key::Escape,
         ("cr" | "enter" | "return", ..) => Key::Enter,
         ("bs" | "backspace", ..) => Key::Backspace,
+        ("del" | "delete", ..) => Key::Delete,
         ("tab", ..) => Key::Tab,
         ("space", ..) => Key::Char(' '),
         ("lt", ..) => Key::Char('<'),

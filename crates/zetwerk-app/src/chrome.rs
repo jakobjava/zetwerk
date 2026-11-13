@@ -6,12 +6,14 @@
 
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tiny_skia::Pixmap;
 use typst::utils::hash128;
-use zetwerk_typst::{Environment, Project};
+use typst::{World, WorldExt};
+use zetwerk_typst::{Environment, PageMap, Project};
 
 use crate::gpu::TextureId;
 
@@ -66,6 +68,21 @@ pub struct Chrome {
     /// The width of a cell of the source pane in pixels, at the scale
     /// (as bits) it was measured for.
     cell: Option<(u64, f64)>,
+    /// Where the text of pieces set in place ends (see
+    /// [`Chrome::render_in_place`]).
+    ends: HashMap<TextureId, TextEnd>,
+    /// Where cursors stand in pieces set in place (see
+    /// [`Chrome::caret_in_place`]), by piece and byte.
+    carets: HashMap<(TextureId, usize), Option<TextEnd>>,
+}
+
+/// Where the text of a typeset piece ends: how far across the piece the
+/// last glyph ends, and the top and the bottom of its line, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextEnd {
+    pub x: f64,
+    pub top: f64,
+    pub bottom: f64,
 }
 
 impl Chrome {
@@ -80,6 +97,8 @@ impl Chrome {
             clock: 0,
             sizes: HashMap::new(),
             cell: None,
+            ends: HashMap::new(),
+            carets: HashMap::new(),
         })
     }
 
@@ -87,6 +106,90 @@ impl Chrome {
     #[must_use]
     pub fn id(markup: &str, scale: f64) -> TextureId {
         TextureId(hash128(&(markup, scale.to_bits())))
+    }
+
+    /// Renders `markup` as [`Chrome::render`] does, and says where its
+    /// text ends: where a cursor behind it belongs.
+    pub fn render_in_place(&mut self, markup: &str, scale: f64) -> Option<(Image, TextEnd)> {
+        let id = Self::id(markup, scale);
+        if let (Some(end), true) = (self.ends.get(&id).copied(), self.cache.contains_key(&id)) {
+            return Some((self.render(markup, scale)?, end));
+        }
+        self.project.set_main_text(markup);
+        let document = zetwerk_typst::compile(&self.project.snapshot()).document?;
+        let page = document.pages().first()?;
+        let mut end = None;
+        last_text(&page.frame, typst::layout::Point::zero(), &mut end);
+        let (x, top, bottom) = end.unwrap_or_default();
+        let end = TextEnd {
+            x: x * scale,
+            top: top * scale,
+            bottom: bottom * scale,
+        };
+        if self.ends.len() >= SIZES_KEPT {
+            self.ends.clear();
+        }
+        self.ends.insert(id, end);
+        Some((self.render(markup, scale)?, end))
+    }
+
+    /// Where in the piece typeset of `markup` a cursor at byte `at` of
+    /// `markup` stands: how far across, and the top and the bottom of
+    /// what it stands by, in pixels. `None` if nothing of the piece shows
+    /// that place or what is before it.
+    pub fn caret_in_place(&mut self, markup: &str, scale: f64, at: usize) -> Option<TextEnd> {
+        let key = (Self::id(markup, scale), at);
+        if let Some(known) = self.carets.get(&key) {
+            return *known;
+        }
+        let caret = self.find_caret(markup, scale, at);
+        if self.carets.len() >= SIZES_KEPT {
+            self.carets.clear();
+        }
+        self.carets.insert(key, caret);
+        caret
+    }
+
+    fn find_caret(&mut self, markup: &str, scale: f64, at: usize) -> Option<TextEnd> {
+        self.project.set_main_text(markup);
+        let world = self.project.snapshot();
+        let document = zetwerk_typst::compile(&world).document?;
+        let map = PageMap::build(&world, &document.pages().first()?.frame);
+        let file = world.main();
+        let caret = map.caret(file, at).or_else(|| map.caret_before(file, at))?;
+        let x = if caret.after {
+            caret.cell.max.x
+        } else {
+            caret.cell.min.x
+        };
+        Some(TextEnd {
+            x: x.to_pt() * scale,
+            top: caret.cell.min.y.to_pt() * scale,
+            bottom: caret.cell.max.y.to_pt() * scale,
+        })
+    }
+
+    /// Whether `markup` can be typeset at all.
+    pub fn typesets(&mut self, markup: &str) -> bool {
+        self.project.set_main_text(markup);
+        zetwerk_typst::compile(&self.project.snapshot())
+            .document
+            .is_some()
+    }
+
+    /// The bytes of `markup` that keep it from being typeset because
+    /// they are names of nothing: a word of an equation that is not, or
+    /// not yet, the name of a symbol.
+    pub fn unknown_in(&mut self, markup: &str) -> Vec<Range<usize>> {
+        self.project.set_main_text(markup);
+        let world = self.project.snapshot();
+        let compiled = zetwerk_typst::compile(&world);
+        compiled
+            .errors
+            .iter()
+            .filter(|error| error.message.starts_with("unknown variable"))
+            .filter_map(|error| world.range(error.span))
+            .collect()
     }
 
     fn rasterize(&mut self, markup: &str, scale: f64) -> Option<Pixmap> {
@@ -201,6 +304,88 @@ impl Chrome {
         Some(Image { id, pixmap })
     }
 }
+
+/// Finds the text item of `frame` that comes last, and notes where it
+/// ends and from where to where its line reaches down, in points.
+fn last_text(
+    frame: &typst::layout::Frame,
+    origin: typst::layout::Point,
+    end: &mut Option<(f64, f64, f64)>,
+) {
+    for (position, item) in frame.items() {
+        let at = origin + *position;
+        match item {
+            typst::layout::FrameItem::Group(group) => last_text(&group.frame, at, end),
+            typst::layout::FrameItem::Text(text) => {
+                let metrics = text.font.metrics();
+                let width: f64 = text
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x_advance.at(text.size).to_pt())
+                    .sum();
+                *end = Some((
+                    at.x.to_pt() + width,
+                    (at.y - metrics.ascender.at(text.size)).to_pt(),
+                    (at.y - metrics.descender.at(text.size)).to_pt(),
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// How a piece set in place is to look: like the text around it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InPlace<'a> {
+    /// The font of the text around it; `None` to leave it to Typst, as
+    /// for an equation.
+    pub family: Option<&'a str>,
+    /// Its size in points, its weight (100 to 900), whether it is italic.
+    pub size: f64,
+    pub weight: u16,
+    pub italic: bool,
+    /// The room there is for it, in points, before it has to be broken
+    /// into lines.
+    pub width: f64,
+}
+
+/// Markup that sets `source` (Typst markup) by itself the way the text
+/// around it is set, on a slip of paper as high as its lines; or, with
+/// `literal`, sets the characters of `source` as they are.
+#[must_use]
+pub fn in_place_markup(source: &str, style: &InPlace, literal: bool) -> String {
+    let font = style
+        .family
+        .map_or_else(String::new, |family| format!("font: {}, ", string(family)));
+    let slant = if style.italic { "italic" } else { "normal" };
+    let body = if literal {
+        format!("#{}", string(source))
+    } else {
+        source.to_owned()
+    };
+    // As wide as its text, but no wider than the room there is: then it
+    // is broken into lines.
+    format!(
+        "#set page(width: auto, height: auto, margin: 0pt, fill: white)\n\
+         #set text({font}size: {size}pt, weight: {weight}, style: \"{slant}\", \
+         top-edge: \"ascender\", bottom-edge: \"descender\")\n\
+         #set par(justify: false)\n\
+         #context {{\n  let piece = [{body}]\n  \
+         if measure(piece).width > {width}pt {{ block(width: {width}pt, piece) }} else {{ piece }}\n}}",
+        size = style.size,
+        weight = style.weight,
+        width = style.width.max(20.0),
+    )
+}
+
+/// Where in markup made by [`in_place_markup`] the piece itself begins.
+#[must_use]
+pub fn in_place_body(markup: &str) -> Option<usize> {
+    markup.find(PIECE).map(|at| at + PIECE.len())
+}
+
+/// What the piece of [`in_place_markup`] follows.
+const PIECE: &str = "let piece = [";
 
 /// What the status line shows.
 pub struct Status<'a> {
@@ -341,6 +526,16 @@ pub fn list_markup(
 #stack(
   spacing: 6pt,
 {lines})"#
+    )
+}
+
+/// Markup that sets `equation` (Typst source, dollar signs and all) by
+/// itself on a slip of paper: what it will look like on the page.
+#[must_use]
+pub fn equation_markup(equation: &str) -> String {
+    format!(
+        "#set page(width: auto, height: auto, margin: 7pt, fill: white)\n\
+         #set text(size: 13pt)\n{equation}"
     )
 }
 

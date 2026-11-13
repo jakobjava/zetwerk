@@ -8,6 +8,8 @@
 
 use zetwerk_typst::Candidate;
 
+use crate::typst_text::{Insert, MATH_INSERTS, TEXT_INSERTS};
+
 use super::{Scene, TextureId, Viewer, chrome};
 use crate::editor;
 use crate::keys::{Key, KeyPress};
@@ -20,10 +22,18 @@ const TOOLTIP_COLUMNS: usize = 84;
 
 /// The list of what could be typed at the cursor.
 pub(super) struct Completion {
-    /// The byte from which on a candidate replaces what was typed.
-    from: usize,
-    pub(super) candidates: Vec<Candidate>,
+    pub(super) candidates: Vec<Entry>,
     chosen: usize,
+}
+
+/// One of the things that could be typed.
+pub(super) struct Entry {
+    pub(super) candidate: Candidate,
+    /// The byte from which on it replaces what was typed.
+    from: usize,
+    /// What it is, if it is one of the things of the insert menu and not
+    /// a name Typst knows.
+    insert: Option<Insert>,
 }
 
 /// A list of places to go, narrowed by typing.
@@ -44,6 +54,69 @@ pub(super) enum Target {
     Offset(usize),
     /// A file of the project.
     File(std::path::PathBuf),
+    /// Text to put in at the cursor, in place of the last `typed`
+    /// characters before it; the cursor goes `within` bytes into it.
+    Put {
+        text: String,
+        within: usize,
+        typed: usize,
+    },
+}
+
+/// How deep below the document's folder files are looked for, and how
+/// many are looked at.
+const FILES_DEEP: usize = 4;
+const FILES_SEEN: usize = 4000;
+
+/// The calls whose first argument is a file, and what such files end in.
+const FILE_CALLS: &[(&str, &[&str])] = &[
+    (
+        "image(\"",
+        &["png", "jpg", "jpeg", "gif", "svg", "webp", "pdf"],
+    ),
+    ("bibliography(\"", &["bib", "yml", "yaml"]),
+    ("include \"", &["typ"]),
+];
+
+/// The files in and below `folder` whose names end in one of `endings`,
+/// as paths from `folder`.
+fn files_below(folder: &std::path::Path, endings: &[&str]) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut seen = 0;
+    let mut folders = vec![(folder.to_path_buf(), 0)];
+    while let Some((here, depth)) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&here) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > FILES_SEEN {
+                return found;
+            }
+            let path = entry.path();
+            let hidden = entry.file_name().to_string_lossy().starts_with('.');
+            if hidden {
+                continue;
+            }
+            if path.is_dir() {
+                if depth < FILES_DEEP && entry.file_name() != "target" {
+                    folders.push((path, depth + 1));
+                }
+                continue;
+            }
+            let ending = path.extension().and_then(|ending| ending.to_str());
+            let wanted = ending.is_some_and(|ending| {
+                endings
+                    .iter()
+                    .any(|wanted| wanted.eq_ignore_ascii_case(ending))
+            });
+            if let (true, Ok(within)) = (wanted, path.strip_prefix(folder)) {
+                found.push(within.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 /// How well `query` is found in `text`, all its characters in their
@@ -79,6 +152,56 @@ fn cut(text: &str, columns: usize) -> String {
     shown
 }
 
+/// The things of the insert menu that go with `typed`, each with how
+/// well: behind a hash in running text, by their names in an equation.
+/// `begun` is the byte the typed word begins at.
+fn menu_entries(in_math: bool, hash: bool, typed: &str, begun: usize) -> Vec<(i32, Entry)> {
+    let (inserts, from) = match (in_math, hash) {
+        (false, true) => (TEXT_INSERTS, begun.saturating_sub(1)),
+        (true, false) => (MATH_INSERTS, begun),
+        _ => return Vec::new(),
+    };
+    let mut entries = Vec::new();
+    for insert in inserts {
+        // What begins as typed (in any of its words) before what Typst
+        // knows by that beginning; what only has the letters in it,
+        // behind that.
+        let lower = typed.to_lowercase();
+        let begins = insert.name.split(' ').any(|word| word.starts_with(&lower));
+        let named = if insert.short == typed && !typed.is_empty() {
+            Some(3000)
+        } else if begins {
+            Some(2000)
+        } else if in_math {
+            None
+        } else {
+            score(insert.name, typed).map(|score| 500 + score.clamp(0, 400))
+        };
+        let Some(score) = named else {
+            continue;
+        };
+        let (text, cursor) = crate::typst_text::insert_text(insert, false, false);
+        let candidate = Candidate {
+            label: insert.name.to_owned(),
+            kind: if insert.short.is_empty() {
+                "insert"
+            } else {
+                insert.short
+            },
+            detail: Some(insert.body.replace('|', "").replace('\n', " ")),
+            text,
+            cursor,
+        };
+        let entry = Entry {
+            candidate,
+            from,
+            insert: Some(*insert),
+        };
+        entries.push((score, entry));
+    }
+    entries
+}
+
 impl Viewer {
     /// A key that may be for a list on screen. Returns whether it was.
     pub(super) fn assist_key(&mut self, press: KeyPress) -> bool {
@@ -107,6 +230,13 @@ impl Viewer {
             (press.key, press.ctrl),
             (Key::Tab, _) | (Key::Char('y'), true)
         );
+        // Enter too, for a thing of the insert menu: nobody means a new
+        // paragraph behind half a name.
+        let chosen_insert = self.completion.as_ref().is_some_and(|completion| {
+            let chosen = completion.candidates.get(completion.chosen);
+            chosen.is_some_and(|entry| entry.insert.is_some())
+        });
+        let take = take || (press.key == Key::Enter && chosen_insert);
         let asked = matches!((press.key, press.ctrl), (Key::Char('n' | ' '), true));
         let Some(completion) = &mut self.completion else {
             if asked {
@@ -122,6 +252,10 @@ impl Viewer {
             completion.chosen = (completion.chosen + 1) % count;
         } else if previous {
             completion.chosen = (completion.chosen + count - 1) % count;
+        } else if take && self.typed_is_chosen() {
+            // Nothing to take: the key is for the text.
+            self.completion = None;
+            return false;
         } else if take {
             self.take_completion();
         } else if matches!((press.key, press.ctrl), (Key::Char('e'), true)) {
@@ -150,44 +284,82 @@ impl Viewer {
             .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '-')
             .len();
         let trigger = text[..begun].chars().next_back();
-        if !(explicit || was_open || matches!(trigger, Some('#' | '@'))) {
+        let typed = &text[begun..cursor];
+        let source = editor.source().clone();
+        let in_math = crate::typst_text::is_in_equation(&source, begun.saturating_sub(1));
+        let hash = trigger == Some('#');
+        // In an equation a list comes with the second letter: there,
+        // nearly every word is a name of something.
+        let naming = in_math && typed.chars().count() >= 2 && !hash;
+        if !(explicit || was_open || naming || matches!(trigger, Some('#' | '@'))) {
             return;
         }
-        let source = editor.source().clone();
+        // A list that was up goes when the word it was for is over.
+        if typed.is_empty() && !explicit && !matches!(trigger, Some('#' | '@')) {
+            return;
+        }
+
+        let mut entries = menu_entries(in_math, hash, typed, begun);
+
+        // And what Typst itself knows could stand here.
         self.project.set_source(source.clone());
         let world = self.project.snapshot();
         let document = self.document.as_deref();
-        let Some((from, mut candidates)) =
-            zetwerk_typst::complete(&world, document, &source, cursor, explicit)
-        else {
-            return;
-        };
-        let Some(typed) = source.text().get(from..cursor) else {
-            return;
-        };
-        // What begins with what was typed comes first, then what has it
-        // in it; each label once.
-        let mut ranked: Vec<(i32, Candidate)> = Vec::new();
-        candidates.dedup_by(|a, b| a.label == b.label);
-        for candidate in candidates {
-            let label = candidate.label.trim_start_matches(['#', '@', '<']);
-            let begins = label
-                .to_lowercase()
-                .starts_with(&typed.to_lowercase())
-                .then_some(1000);
-            if let Some(score) = begins.or_else(|| score(label, typed)) {
-                ranked.push((score, candidate));
+        let asked = explicit || naming;
+        if let Some((from, mut candidates)) =
+            zetwerk_typst::complete(&world, document, &source, cursor, asked)
+            && let Some(typed) = source.text().get(from..cursor)
+        {
+            candidates.dedup_by(|a, b| a.label == b.label);
+            for candidate in candidates {
+                let label = candidate.label.trim_start_matches(['#', '@', '<']);
+                // What begins as typed, letter for letter, before what
+                // only does so but for its capitals.
+                let begins = label
+                    .to_lowercase()
+                    .starts_with(&typed.to_lowercase())
+                    .then_some(1000 + i32::from(label.starts_with(typed)));
+                // In an equation, only what begins with what was typed.
+                let found = begins.or_else(|| score(label, typed).filter(|_| !naming));
+                if let Some(score) = found {
+                    let entry = Entry {
+                        candidate,
+                        from,
+                        insert: None,
+                    };
+                    entries.push((score, entry));
+                }
             }
         }
-        ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-        if ranked.is_empty() {
+        // The best first. Among equals: the things of the menu in their
+        // order, Typst's names the shortest first (of two that begin as
+        // typed, the shorter is the nearer).
+        entries.sort_by_key(|(score, entry)| {
+            let length = match entry.insert {
+                Some(_) => 0,
+                None => entry.candidate.label.len(),
+            };
+            (std::cmp::Reverse(*score), length)
+        });
+        if entries.is_empty() {
             return;
         }
         self.completion = Some(Completion {
-            from,
-            candidates: ranked.into_iter().map(|(_, candidate)| candidate).collect(),
+            candidates: entries.into_iter().map(|(_, entry)| entry).collect(),
             chosen: 0,
         });
+    }
+
+    /// Whether what is typed is the chosen completion already, whole.
+    fn typed_is_chosen(&self) -> bool {
+        let (Some(completion), Some(editor)) = (&self.completion, &self.editor) else {
+            return false;
+        };
+        let Some(entry) = completion.candidates.get(completion.chosen) else {
+            return false;
+        };
+        let typed = editor.text().get(entry.from..editor.cursor());
+        entry.insert.is_none() && typed == Some(entry.candidate.text.as_str())
     }
 
     /// Puts the chosen completion into the text, as part of what is
@@ -196,17 +368,31 @@ impl Viewer {
         let Some(completion) = self.completion.take() else {
             return;
         };
-        let (Some(candidate), Some(editor)) = (
-            completion.candidates.get(completion.chosen),
-            &mut self.editor,
-        ) else {
+        let Some(entry) = completion.candidates.get(completion.chosen) else {
             return;
         };
-        let typed = editor
-            .text()
-            .get(completion.from..editor.cursor())
+        if let Some(insert) = entry.insert
+            && self.insert_with_file(&insert, entry.from)
+        {
+            return;
+        }
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let (text, cursor) = (editor.text(), editor.cursor());
+        let typed = text
+            .get(entry.from..cursor)
             .map_or(0, |typed| typed.chars().count());
-        let press = editor.completed(typed, candidate.text.clone(), candidate.cursor);
+        let (with, within) = match &entry.insert {
+            // What stands by itself gets a paragraph of its own, where
+            // it is put into the middle of one.
+            Some(insert) => {
+                let (before, behind) = crate::typst_text::around(text, entry.from, cursor);
+                crate::typst_text::insert_text(insert, before, behind)
+            }
+            None => (entry.candidate.text.clone(), entry.candidate.cursor),
+        };
+        let press = editor.completed(typed, with, within);
         self.editor_key(press);
     }
 
@@ -291,6 +477,105 @@ impl Viewer {
         self.open_picker(title, items, chosen);
     }
 
+    /// Where a file is to be named (the cursor is in the empty name of
+    /// an image, a bibliography, a file to include), puts up the files
+    /// there are to choose from: nobody knows their paths by heart.
+    pub(super) fn offer_files(&mut self) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let (text, cursor) = (editor.text(), editor.cursor());
+        let (Some(before), Some(behind)) = (text.get(..cursor), text.get(cursor..)) else {
+            return;
+        };
+        let wanted = FILE_CALLS
+            .iter()
+            .find(|(call, _)| before.ends_with(call) && behind.starts_with('"'));
+        let Some((_, endings)) = wanted else {
+            return;
+        };
+        let put = |file: String| Target::Put {
+            within: file.len(),
+            text: file,
+            typed: 0,
+        };
+        let items: Vec<(String, Target)> = self
+            .files_beside(endings)
+            .into_iter()
+            .map(|file| (file.clone(), put(file)))
+            .collect();
+        if items.is_empty() {
+            self.notice("no such files beside the document yet: type its path");
+            return;
+        }
+        self.open_picker("files", items, 0);
+    }
+
+    /// The files in and below the folder of the file being edited whose
+    /// names end in one of `endings`, as paths from there: as a call in
+    /// that file names them.
+    fn files_beside(&self, endings: &[&str]) -> Vec<String> {
+        let Some(editor) = &self.editor else {
+            return Vec::new();
+        };
+        let path = editor.path();
+        let folder = match path.parent() {
+            Some(folder) if !folder.as_os_str().is_empty() => folder,
+            _ => std::path::Path::new("."),
+        };
+        let own = path.file_name().map(|name| name.to_string_lossy());
+        let mut files = files_below(folder, endings);
+        files.retain(|file| Some(file.as_str()) != own.as_deref());
+        files
+    }
+
+    /// Where the thing of the insert menu at `entry` needs a file (a
+    /// figure its image), puts up the files there are: the one chosen
+    /// goes into the text with it, whole, and nothing before that.
+    /// Returns whether it did.
+    fn insert_with_file(&mut self, insert: &Insert, from: usize) -> bool {
+        let Some(editor) = &self.editor else {
+            return false;
+        };
+        let wanted = FILE_CALLS
+            .iter()
+            .find(|(call, _)| insert.body.contains(&format!("{call}|\"")));
+        let Some((_, endings)) = wanted else {
+            return false;
+        };
+        let (text, cursor) = (editor.text(), editor.cursor());
+        let typed = text
+            .get(from..cursor)
+            .map_or(0, |typed| typed.chars().count());
+        let (before, behind) = crate::typst_text::around(text, from, cursor);
+        let (with, at) = crate::typst_text::insert_text(insert, before, behind);
+        let rest = insert.body.split('|').nth(1).map_or(0, str::len);
+        let items: Vec<(String, Target)> = self
+            .files_beside(endings)
+            .into_iter()
+            .map(|file| {
+                let mut text = with.clone();
+                text.insert_str(at, &file);
+                // On to what is to be written next: the caption.
+                let named = at + file.len();
+                let within = text[named..named + rest]
+                    .find("[]")
+                    .map_or(named + rest, |caption| named + caption + 1);
+                let put = Target::Put {
+                    text,
+                    within,
+                    typed,
+                };
+                (file, put)
+            })
+            .collect();
+        if items.is_empty() {
+            return false;
+        }
+        self.open_picker("files", items, 0);
+        true
+    }
+
     /// Puts up a list of places to choose from.
     pub(super) fn open_picker(
         &mut self,
@@ -328,6 +613,17 @@ impl Viewer {
                         self.follow_cursor();
                     }
                     (Some(Target::File(path)), _) => self.open_path(&path, false),
+                    (
+                        Some(Target::Put {
+                            text,
+                            within,
+                            typed,
+                        }),
+                        Some(editor),
+                    ) => {
+                        let press = editor.completed(typed, text, within);
+                        self.editor_key(press);
+                    }
                     _ => {}
                 }
             }
@@ -355,7 +651,12 @@ impl Viewer {
         let margin = super::PANEL_MARGIN * self.scale;
         let bottom = height - f64::from(self.status_height()) - margin;
         // Under the cursor's line; above it where there is no room.
-        let anchor = self.caret_at.or(self.cursor_at);
+        // Under the cursor's line; or, where there is no room, above
+        // what is being typed, not over it.
+        let anchor = match (self.caret_at, self.cursor_at) {
+            (Some(caret), Some(site)) => Some((caret.0, site.1.min(caret.1), caret.2)),
+            (caret, site) => caret.or(site),
+        };
         let near = move |size: (f64, f64)| {
             let within = (margin, margin, width - margin, bottom);
             super::lens_place(anchor, size, within, 2.0)
@@ -370,12 +671,15 @@ impl Viewer {
                 .iter()
                 .skip(first)
                 .take(LIST_ROWS)
-                .map(|candidate| (cut(&candidate.label, 40), candidate.kind.to_owned()))
+                .map(|entry| {
+                    let candidate = &entry.candidate;
+                    (cut(&candidate.label, 40), candidate.kind.to_owned())
+                })
                 .collect();
             let detail = completion
                 .candidates
                 .get(completion.chosen)
-                .and_then(|candidate| candidate.detail.as_deref())
+                .and_then(|entry| entry.candidate.detail.as_deref())
                 .map(|detail| cut(detail, 70));
             let markup =
                 chrome::list_markup(None, &rows, completion.chosen - first, detail.as_deref());

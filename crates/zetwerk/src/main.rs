@@ -281,6 +281,13 @@ fn run_script(
     let Some(path) = screenshot else {
         return Ok(());
     };
+    // Of what the keys led to, once that is typeset.
+    let (settled, when_settled) = mpsc::channel();
+    handle
+        .send(Request::WhenSettled(settled))
+        .then_some(())
+        .ok_or_else(gone)?;
+    when_settled.recv_timeout(SCRIPT_TIMEOUT).map_err(timeout)?;
     let (reply, shot) = mpsc::channel();
     handle
         .send(Request::Screenshot(reply))

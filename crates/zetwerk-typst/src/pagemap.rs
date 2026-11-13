@@ -20,6 +20,9 @@ use typst::text::TextItem;
 
 use crate::ProjectWorld;
 
+/// How many bytes behind a glyph a place still counts as being by it.
+const NEAR: usize = 2;
+
 /// Where the glyphs of one page come from.
 pub struct PageMap {
     runs: Vec<TextRun>,
@@ -38,6 +41,12 @@ pub struct TextRun {
     /// This run's glyphs within [`PageMap::glyphs`], in the same order as in
     /// the text item.
     pub glyphs: Range<usize>,
+    /// The font it is set in: its family, its size in points, its weight
+    /// (100 to 900) and whether it is italic.
+    pub family: String,
+    pub size: f64,
+    pub weight: u16,
+    pub italic: bool,
 }
 
 /// One glyph on the page.
@@ -54,6 +63,8 @@ pub struct MappedGlyph {
     /// Whether the glyph is part of what every page has around its text:
     /// a header, a footer, a background.
     pub furniture: bool,
+    /// Whether the glyph shows nothing: a blank between words.
+    pub blank: bool,
 }
 
 /// What a glyph on the page corresponds to in the source.
@@ -116,9 +127,16 @@ impl PageMap {
             enclosing: Enclosing::Unknown,
         };
         builder.frame(frame, Transform::identity());
+        let mut glyphs = builder.glyphs;
+        if world.shows_more() {
+            // In bytes of the files as they are written.
+            for glyph in &mut glyphs {
+                glyph.origin.as_written(world);
+            }
+        }
         Self {
             runs: builder.runs,
-            glyphs: builder.glyphs,
+            glyphs,
         }
     }
 
@@ -140,7 +158,11 @@ impl PageMap {
     #[must_use]
     pub fn caret(&self, file: FileId, offset: usize) -> Option<Caret> {
         let mut inside = None;
+        let mut size = None;
         let mut behind = None;
+        // The glyph that ends nearest before the place: where it ends,
+        // and how many bytes it stands for.
+        let mut near: Option<(usize, usize, Caret)> = None;
         for glyph in &self.glyphs {
             if matches!(glyph.origin, Origin::Object { .. }) {
                 // Those are for `object` to find, whole.
@@ -149,22 +171,72 @@ impl PageMap {
             let Some(range) = glyph.origin.range_in(file) else {
                 continue;
             };
+            let caret = |after| Caret {
+                cell: glyph.rect,
+                after,
+                run: glyph.run,
+            };
             if range.start == offset {
                 // The glyph that begins here: nothing fits better.
-                return Some(Caret {
-                    cell: glyph.rect,
-                    after: false,
-                });
+                return Some(caret(false));
             }
             if range.contains(&offset) {
-                inside.get_or_insert(glyph.rect);
+                // Of several that the place is in (a symbol of an
+                // equation, and the equation's number, which stands for
+                // all of it), the one that is nearest to it.
+                if size.is_none_or(|size| range.len() < size) {
+                    size = Some(range.len());
+                    inside = Some(caret(false));
+                }
             } else if range.end == offset {
-                behind = Some(glyph.rect);
+                behind = Some((range.len(), caret(true)));
+            } else if range.end < offset
+                && range.end + NEAR >= offset
+                && near.as_ref().is_none_or(|(end, _, _)| range.end >= *end)
+            {
+                near = Some((range.end, range.len(), caret(true)));
             }
         }
-        inside
-            .map(|cell| Caret { cell, after: false })
-            .or(behind.map(|cell| Caret { cell, after: true }))
+        // A blank or two behind a symbol is by that symbol, not "in"
+        // what stands for all of the equation (its number).
+        if let (Some(size), None, Some((end, length, caret))) = (size, &behind, near)
+            && size > length + (offset - end)
+        {
+            return Some(caret);
+        }
+        // Behind a glyph that shows a few bytes rather than "in" one
+        // that stands for a whole equation.
+        match (inside, size, behind) {
+            (Some(_), Some(size), Some((length, behind))) if size > length => Some(behind),
+            (Some(inside), ..) => Some(inside),
+            (None, _, behind) => behind.map(|(_, caret)| caret),
+        }
+    }
+
+    /// Where a cursor is that stands behind the last text of `file` shown
+    /// on this page before byte `offset`: behind the glyph that ends
+    /// nearest before it. For a place that shows as nothing itself, such
+    /// as the end of a paragraph.
+    #[must_use]
+    pub fn caret_before(&self, file: FileId, offset: usize) -> Option<Caret> {
+        let mut nearest: Option<(usize, Caret)> = None;
+        for glyph in &self.glyphs {
+            if matches!(glyph.origin, Origin::Object { .. }) {
+                continue;
+            }
+            let Some(range) = glyph.origin.range_in(file) else {
+                continue;
+            };
+            if range.end <= offset && nearest.is_none_or(|(end, _)| range.end > end) {
+                let caret = Caret {
+                    cell: glyph.rect,
+                    after: true,
+                    run: glyph.run,
+                };
+                nearest = Some((range.end, caret));
+            }
+        }
+        nearest.map(|(_, caret)| caret)
     }
 
     /// The object that byte `offset` of `file` is in the source of, as
@@ -240,12 +312,16 @@ impl PageMap {
             // Text the document makes itself (a number, a reference) is
             // no place for the cursor, but part of its line: without it
             // the line would fall into pieces.
-            let entry = glyph.origin.place().map(|(file, range)| LineGlyph {
+            // So is what only shows that something is missing (see
+            // `Project::snapshot_showing`): it stands for no bytes.
+            let place = glyph.origin.place().filter(|(_, range)| !range.is_empty());
+            let entry = place.map(|(file, range)| LineGlyph {
                 left,
                 right,
                 file,
                 offset: range.start,
                 end: range.end,
+                blank: glyph.blank || matches!(glyph.origin, Origin::Space { .. }),
             });
             match lines
                 .iter_mut()
@@ -267,7 +343,33 @@ impl PageMap {
             }
         }
         lines.retain(|line| !line.glyphs.is_empty());
-        PageLines { lines }
+        // The places for a cursor: each glyph, but all the glyphs one
+        // thing made (a reference, a call) as one.
+        let mut stops: Vec<Stop> = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            let mut across: Vec<&LineGlyph> = line.glyphs.iter().collect();
+            across.sort_by(|a, b| order(a.left, b.left));
+            // The blank a line was broken at shows as nothing: it is no
+            // place for a cursor.
+            while across.len() > 1 && across.last().is_some_and(|glyph| glyph.blank) {
+                across.pop();
+            }
+            for glyph in across {
+                let known = stops.iter().any(|stop| {
+                    stop.line == index && (stop.file, stop.start, stop.end) == glyph.place()
+                });
+                if !known {
+                    stops.push(Stop {
+                        line: index,
+                        file: glyph.file,
+                        start: glyph.offset,
+                        end: glyph.end,
+                        blank: glyph.blank,
+                    });
+                }
+            }
+        }
+        PageLines { lines, stops }
     }
 
     /// The cells of the glyphs that show bytes `range` of `file`, joined
@@ -313,6 +415,22 @@ fn join(rects: &mut Vec<Rect>, cell: Rect) {
 #[derive(Debug)]
 pub struct PageLines {
     lines: Vec<PageLine>,
+    /// The places for a cursor, line by line and in each from left to
+    /// right.
+    stops: Vec<Stop>,
+}
+
+/// A place for a cursor on a page: the bytes of a file that are shown
+/// there, and the line it is in.
+#[derive(Debug, Clone, Copy)]
+struct Stop {
+    line: usize,
+    file: FileId,
+    start: usize,
+    end: usize,
+    /// Whether it is the blank between two words: at the end of a line
+    /// it shows as nothing.
+    blank: bool,
 }
 
 /// A stretch of glyphs side by side with no gap to speak of. The lines of
@@ -337,6 +455,8 @@ struct LineGlyph {
     file: FileId,
     offset: usize,
     end: usize,
+    /// Whether it is the blank between two words.
+    blank: bool,
 }
 
 impl LineGlyph {
@@ -344,6 +464,10 @@ impl LineGlyph {
     /// before it when it comes back a hair off.
     fn middle(&self) -> f64 {
         self.left + (self.right - self.left) / 2.0
+    }
+
+    fn place(&self) -> (FileId, usize, usize) {
+        (self.file, self.offset, self.end)
     }
 
     /// Whether the glyph shows byte `offset` of `file`.
@@ -531,6 +655,84 @@ impl PageLines {
         nearest(&|_| true).map(|index| (index, across))
     }
 
+    /// Whether byte `offset` of `file` is within what the page shows of
+    /// that file: not before the first byte it shows nor behind the last.
+    #[must_use]
+    pub fn covers(&self, file: FileId, offset: usize) -> bool {
+        let of_file = || self.stops.iter().filter(|stop| stop.file == file);
+        let first = of_file().map(|stop| stop.start).min();
+        let last = of_file().map(|stop| stop.end).max();
+        matches!((first, last), (Some(first), Some(last)) if first <= offset && offset <= last)
+    }
+
+    /// The place for a cursor that begins at byte `offset` of `file`, as
+    /// the bytes shown there; `None` if none begins there.
+    #[must_use]
+    pub fn stop_at(&self, file: FileId, offset: usize) -> Option<Range<usize>> {
+        let at = |stop: &&Stop| stop.file == file && stop.start == offset;
+        self.stops.iter().find(at).map(|stop| stop.start..stop.end)
+    }
+
+    /// The first place for a cursor of `file` that begins at byte
+    /// `offset` or behind it (`forward`), or the last that begins at it
+    /// or before it.
+    #[must_use]
+    pub fn stop_near(&self, file: FileId, offset: usize, forward: bool) -> Option<Range<usize>> {
+        let of_file = self.stops.iter().filter(|stop| stop.file == file);
+        let found = if forward {
+            of_file
+                .filter(|stop| stop.start >= offset)
+                .min_by_key(|stop| stop.start)
+        } else {
+            of_file
+                .filter(|stop| stop.start <= offset)
+                .max_by_key(|stop| stop.start)
+        };
+        found.map(|stop| stop.start..stop.end)
+    }
+
+    /// The place for a cursor after the one that begins at byte `offset`
+    /// of `file` (`forward`), or before it, in its line and of its file.
+    #[must_use]
+    pub fn stop_beside(&self, file: FileId, offset: usize, forward: bool) -> Option<Range<usize>> {
+        let at = self
+            .stops
+            .iter()
+            .position(|stop| stop.file == file && stop.start == offset)?;
+        let line = self.stops[at].line;
+        let in_line = |stop: &&Stop| stop.line == line && stop.file == file;
+        let beside = if forward {
+            self.stops[at + 1..].iter().find(in_line)
+        } else {
+            self.stops[..at].iter().rev().find(in_line)
+        };
+        beside.map(|stop| stop.start..stop.end)
+    }
+
+    /// The line that shows byte `offset` of `file`, as bytes of that
+    /// file: the byte its first place for a cursor begins with, the byte
+    /// its last one begins with, and the byte behind that one. The line
+    /// is the one of the place that begins at the byte, or else of the
+    /// nearest before it.
+    #[must_use]
+    pub fn line_span(&self, file: FileId, offset: usize) -> Option<(usize, usize, usize)> {
+        let of_file = || self.stops.iter().filter(|stop| stop.file == file);
+        let line = of_file()
+            .filter(|stop| stop.start <= offset)
+            .max_by_key(|stop| stop.start)
+            .or_else(|| of_file().min_by_key(|stop| stop.start))?
+            .line;
+        let in_line = || of_file().filter(|stop| stop.line == line);
+        let first = in_line().next()?;
+        // The blank a line ends with is where it was broken: the line
+        // ends before it.
+        let last = in_line()
+            .rev()
+            .find(|stop| !stop.blank)
+            .or_else(|| in_line().next_back())?;
+        Some((first.start.min(last.start), last.start, last.end))
+    }
+
     /// The file and the byte that line `line` begins with: those of its
     /// leftmost glyph.
     #[must_use]
@@ -609,6 +811,8 @@ pub struct Caret {
     /// Whether the cursor is behind that glyph (at the end of the text it
     /// shows) and not on it.
     pub after: bool,
+    /// The run the glyph is of, in [`PageMap::runs`].
+    pub run: usize,
 }
 
 impl Origin {
@@ -621,6 +825,18 @@ impl Origin {
             | Self::Math { file, range }
             | Self::Object { file, range, .. } => Some((*file, range)),
             Self::Atomic(_) => None,
+        }
+    }
+
+    /// Makes the bytes this glyph stands for those of the file as it is
+    /// written, from those of what Typst was given.
+    fn as_written(&mut self, world: &ProjectWorld) {
+        if let Self::Text { file, range }
+        | Self::Space { file, range }
+        | Self::Math { file, range }
+        | Self::Object { file, range, .. } = self
+        {
+            *range = world.written_at(*file, range.start)..world.written_at(*file, range.end);
         }
     }
 
@@ -825,12 +1041,18 @@ impl Builder<'_> {
                 origin,
                 run,
                 furniture: self.furniture.is_some(),
+                blank: shown.is_some_and(|shown| shown.trim().is_empty()),
             });
         }
+        let info = text.font.info();
         self.runs.push(TextRun {
             path: self.path.clone(),
             transform,
             glyphs: first..self.glyphs.len(),
+            family: info.family.clone(),
+            size: text.size.to_pt(),
+            weight: info.variant.weight.to_number(),
+            italic: info.variant.style != typst::text::FontStyle::Normal,
         });
     }
 

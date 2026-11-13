@@ -11,4 +11,4 @@ mod motion;
 mod object;
 mod text;
 
-pub use engine::{Edit, Effect, Engine, Format, Host, Mode, Place};
+pub use engine::{Edit, Effect, Engine, Format, Host, Mode, Place, Seek, Shown};
