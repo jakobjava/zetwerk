@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 pub use client::{Output, call};
 pub use server::{Running, Tools, serve, serve_stdio};
-pub use socket::{find_socket, proxy_stdio, socket_path};
+pub use socket::{find_socket, find_socket_of, proxy_stdio, socket_of, socket_path};
 
 /// What the server needs from the editor it exposes. Called on worker
 /// threads; implementations block until they have the answer.

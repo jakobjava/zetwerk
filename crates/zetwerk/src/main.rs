@@ -429,11 +429,12 @@ fn mcp(args: &Args) -> Result<(), String> {
             let _ = thread.join();
             served.map_err(|err| format!("the connection to the agent failed: {err}"))
         }
-        // A window has the document: the agent works in that.
+        // A window has the document: the agent works in that, and in no
+        // other window.
         Err(headless::OpenError::AlreadyOpen) => {
-            let socket = zetwerk_mcp::find_socket().map_err(|_| {
+            let socket = zetwerk_mcp::find_socket_of(&options.path).map_err(|why| {
                 format!(
-                    "{} is open in another zetwerk that cannot be reached",
+                    "{} is open in another zetwerk that cannot be reached: {why}",
                     options.path.display()
                 )
             })?;

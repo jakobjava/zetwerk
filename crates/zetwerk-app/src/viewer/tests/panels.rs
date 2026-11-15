@@ -316,3 +316,56 @@ fn a_list_wider_than_the_window_begins_in_it() {
     assert!(list.x >= 0.0, "it begins at {}", list.x);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+#[ignore = "exploration: the bibliography manager on a broken file"]
+fn sources_of_a_broken_file() {
+    for bib in [
+        "@book{a,\n  title = {Unclosed\n",
+        "@book{a, title = {One}, year = {2000}}\n@misc{b, title = {Two\n\n@article{c, title = {Three}, year = 2001}\n",
+        "garbage only\n",
+        "@book{a, title = {One}, year = {2000}}\n@book{a, title = {Same key}, year = {2001}}\n",
+    ] {
+        let directory = directory("Text @a.\n#bibliography(\"refs.bib\")\n");
+        std::fs::write(directory.join("refs.bib"), bib).unwrap();
+        let (mut viewer, _) = open(&directory);
+        viewer.execute("bib");
+        let listed = viewer
+            .picker
+            .as_ref()
+            .map(|picker| picker.listing().1.join(" / "));
+        println!("{bib:?}\n  listed: {listed:?} said: {}", said(&viewer));
+        press(&mut viewer, "<Esc>");
+        viewer.execute("bib new book");
+        let after = std::fs::read_to_string(directory.join("refs.bib")).unwrap();
+        println!("  said: {}\n  file now: {after:?}", said(&viewer));
+        let entries = crate::bib::parse(&after);
+        let keys: Vec<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
+        println!("  parsed keys: {keys:?}");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+}
+
+#[test]
+fn a_list_of_files_and_the_completions_are_not_up_at_once() {
+    let directory = directory("Words.\n");
+    std::fs::write(directory.join("plot.png"), b"").unwrap();
+    std::fs::write(directory.join("other.png"), b"").unwrap();
+    let (mut viewer, _) = open(&directory);
+    press(&mut viewer, "Go#image(\"");
+    let completion = viewer.completion.is_some();
+    let picker = viewer
+        .picker
+        .as_ref()
+        .map(|picker| picker.listing().1.len());
+    println!(
+        "completion {completion}, picker {picker:?}, text {:?}",
+        viewer.text()
+    );
+    assert!(picker.is_some(), "the files are offered");
+    assert!(!completion, "and nothing else");
+    // Escape leaves the list and nothing else.
+    press(&mut viewer, "<Esc>");
+    assert!(viewer.picker.is_none());
+    let _ = std::fs::remove_dir_all(&directory);
+}

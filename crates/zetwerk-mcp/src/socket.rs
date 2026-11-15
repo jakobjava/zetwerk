@@ -2,7 +2,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// The directory windows put their sockets in, if the session has a runtime
@@ -21,10 +21,52 @@ pub fn socket_path() -> Option<PathBuf> {
 /// The socket of a running window: the most recently started one that
 /// accepts connections.
 pub fn find_socket() -> Result<PathBuf, String> {
-    let nothing = "no zetwerk window is running".to_owned();
     let directory = socket_directory().ok_or("XDG_RUNTIME_DIR is not set")?;
-    let Ok(entries) = std::fs::read_dir(&directory) else {
-        return Err(nothing);
+    live_sockets(&directory)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no zetwerk window is running".to_owned())
+}
+
+/// The socket of the running window that has the document of `file`
+/// open. With several windows, the one that shows that file: an agent
+/// asked to work on one document is never put to work on another.
+pub fn find_socket_of(file: &Path) -> Result<PathBuf, String> {
+    let directory = socket_directory().ok_or("XDG_RUNTIME_DIR is not set")?;
+    socket_of(&directory, file)
+}
+
+/// The socket in `directory` of the window that has the document of
+/// `file` open: the only window there is, or the one that shows `file`.
+pub fn socket_of(directory: &Path, file: &Path) -> Result<PathBuf, String> {
+    let sockets = live_sockets(directory);
+    if let [only] = sockets.as_slice() {
+        return Ok(only.clone());
+    }
+    let file = std::path::absolute(file).unwrap_or_else(|_| file.to_owned());
+    let shows = |socket: &PathBuf| {
+        let Ok(outputs) = crate::call(socket, "get_state", serde_json::Map::new()) else {
+            return false;
+        };
+        let [crate::Output::Text(text)] = outputs.as_slice() else {
+            return false;
+        };
+        serde_json::from_str::<crate::EditorState>(text)
+            .is_ok_and(|state| !state.file.is_empty() && file.ends_with(&state.file))
+    };
+    sockets.into_iter().find(shows).ok_or_else(|| {
+        format!(
+            "{} is open in a zetwerk window that does not show it now",
+            file.display()
+        )
+    })
+}
+
+/// The sockets of the windows running in `directory`, the most recently
+/// started first.
+fn live_sockets(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
     };
     let mut sockets: Vec<(SystemTime, PathBuf)> = entries
         .flatten()
@@ -40,8 +82,8 @@ pub fn find_socket() -> Result<PathBuf, String> {
         .into_iter()
         .rev()
         .map(|(_, path)| path)
-        .find(is_alive)
-        .ok_or(nothing)
+        .filter(is_alive)
+        .collect()
 }
 
 /// Whether a window is listening on `socket`. A socket nobody listens on

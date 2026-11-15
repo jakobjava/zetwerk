@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Map, Value, json};
 use zetwerk_mcp::{
     Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, NewNote,
-    NoteAnchor, NoteAnswer, Output, Place, Selection, Tools, call, serve,
+    NoteAnchor, NoteAnswer, Output, Place, Selection, Tools, call, serve, socket_of,
 };
 
 /// An editor that records the keys it was sent and the changes it was
@@ -17,6 +17,8 @@ struct FakeEditor {
     changes: Mutex<Vec<Change>>,
     notes: Mutex<Vec<NewNote>>,
     answers: Mutex<Vec<NoteAnswer>>,
+    /// The file it shows, if not `thesis.typ`.
+    file: Option<&'static str>,
 }
 
 const PLAIN: Tools = Tools {
@@ -29,7 +31,7 @@ const PNG: &[u8] = b"\x89PNG not really";
 impl Editor for FakeEditor {
     fn state(&self) -> Result<EditorState, String> {
         Ok(EditorState {
-            file: "thesis.typ".to_owned(),
+            file: self.file.unwrap_or("thesis.typ").to_owned(),
             pages: 12,
             page: 3,
             zoom: 1.5,
@@ -720,4 +722,28 @@ fn every_tool_says_what_it_does() {
         "{}",
         said("add_source")
     );
+}
+
+#[test]
+fn an_agent_is_put_to_work_in_the_window_of_its_document() {
+    let directory =
+        std::env::temp_dir().join(format!("zetwerk-mcp-test-windows-{}", std::process::id()));
+    let _scratch = Scratch(directory.clone());
+    let (older, newer) = (directory.join("1.sock"), directory.join("2.sock"));
+    let _thesis = serve(&older, Arc::new(FakeEditor::default()), PLAIN)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    let lone = socket_of(&directory, std::path::Path::new("/somewhere/else.typ"));
+    assert_eq!(lone, Ok(older.clone()), "the only window is the one");
+    // The one started last is not the one an agent of the thesis is for.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let notes = FakeEditor {
+        file: Some("notes.typ"),
+        ..FakeEditor::default()
+    };
+    let _notes =
+        serve(&newer, Arc::new(notes), PLAIN).unwrap_or_else(|err| panic!("server starts: {err}"));
+    let of = |file: &str| socket_of(&directory, std::path::Path::new(file));
+    assert_eq!(of("/home/someone/thesis.typ"), Ok(older));
+    assert_eq!(of("/home/someone/notes.typ"), Ok(newer));
+    assert!(of("/home/someone/other.typ").is_err());
 }
