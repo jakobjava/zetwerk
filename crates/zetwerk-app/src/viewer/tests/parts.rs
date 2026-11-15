@@ -773,3 +773,48 @@ fn the_whole_comes_without_a_jump_where_the_page_breaks_otherwise() {
     );
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn what_is_drawn_over_the_page_follows_the_lines_a_part_moves() {
+    // Below a paragraph begun by itself: the note on words, the marks of
+    // a search, the numbers of the lines, the tags beside them. A frame
+    // after the part draws them where the frame after the whole does.
+    let text = "#set page(width: 300pt, height: 400pt)\n\
+                Before it.\n\n= Head <lab>\n\nSome words of the text. // said\n\n\
+                More words here.\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, "gsgs/\\=Some<CR>:note look here<CR>");
+    press(&mut viewer, "/words<CR>/\\=Before it<CR>A<CR>a");
+    assert!(viewer.stats.local > 0, "{:?}", viewer.declined);
+    assert_eq!(
+        viewer.document_revision,
+        Some(viewer.revision),
+        "{:?}",
+        viewer.declined
+    );
+    let drawn = |viewer: &mut Viewer| {
+        let scene = viewer.scene(&|_| false);
+        let height = f64::from(viewer.view.height) as f32;
+        let mut quads: Vec<(u128, [i32; 4])> = scene
+            .quads
+            .iter()
+            .filter(|quad| quad.y < height)
+            .map(|quad| {
+                let place = [quad.x, quad.y, quad.width, quad.height];
+                (quad.texture.0, place.map(|v| v.round() as i32))
+            })
+            .collect();
+        quads.sort_unstable();
+        quads
+    };
+    let typed = drawn(&mut viewer);
+    compile(&mut viewer);
+    let typeset = drawn(&mut viewer);
+    let gone: Vec<_> = typed.iter().filter(|q| !typeset.contains(q)).collect();
+    let came: Vec<_> = typeset.iter().filter(|q| !typed.contains(q)).collect();
+    assert!(
+        gone.is_empty() && came.is_empty(),
+        "only after the part: {gone:?}; only after the whole: {came:?}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
