@@ -461,3 +461,31 @@ fn a_name_being_typed_is_not_complained_of_beside_its_line() {
     assert_eq!(bars(&mut viewer), 1);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn what_is_wrong_is_one_sentence_in_the_panel() {
+    assert_eq!(
+        refused::sentence("Typst knows nothing called “xyz”"),
+        "Typst knows nothing called “xyz”."
+    );
+    assert_eq!(
+        refused::sentence("Typst knows nothing called “pagsgse”; “page”, perhaps?"),
+        "Typst knows nothing called “pagsgse”; “page”, perhaps?"
+    );
+}
+
+#[test]
+fn the_margin_says_what_is_wrong_in_the_same_words() {
+    let text = "#set page(width: 300pt, height: 300pt)\nSome words.\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, "gsgs");
+    press(&mut viewer, "/words<CR>i#xyz <Esc>");
+    landed(&mut viewer);
+    assert_eq!(viewer.text(), Some(&*text.replace("words", "#xyz words")));
+    let _ = viewer.scene(&|_| false);
+    assert_eq!(
+        viewer.margin_texts(0),
+        vec!["Typst knows nothing called “xyz”".to_owned()]
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}

@@ -121,6 +121,16 @@ fn shortened(text: &str, most: usize) -> String {
     cut
 }
 
+/// `said` as a sentence: with a full stop, unless it ends in one or in
+/// a question.
+pub(super) fn sentence(said: &str) -> String {
+    if said.ends_with(['.', '?', '!']) {
+        said.to_owned()
+    } else {
+        format!("{said}.")
+    }
+}
+
 /// Markup for the panel: `title` in the colour of alerts, then `lines`;
 /// in the interface's font and colours, a little larger than other
 /// panels, as nothing is more in the way than this.
@@ -797,7 +807,7 @@ impl Viewer {
         if refusal.range.is_some() {
             lines.push(refusal.place());
         }
-        lines.push(format!("{}.", refusal.said));
+        lines.push(sentence(&refusal.said));
         match refusal.more {
             0 => {}
             1 => lines.push("And one thing more (]d goes to each).".to_owned()),

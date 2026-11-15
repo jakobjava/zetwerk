@@ -515,7 +515,8 @@ impl Margin {
                 count => format!(" (+{})", count - 1),
             };
             let colour = if error { ERROR } else { WARNING };
-            pieces.push((format!("{}{more}", cut(message, MESSAGE)), colour));
+            let said = super::refused::for_writer(message);
+            pieces.push((format!("{}{more}", cut(&said, MESSAGE)), colour));
         }
         let hidden = tags.len().saturating_sub(TAGS);
         pieces.extend(tags.into_iter().take(TAGS));
@@ -771,6 +772,18 @@ impl Viewer {
                     .is_some_and(|(_, message)| message == *typed)
             })
             .map(|note| (note.line, note.top, note.bottom))
+    }
+
+    /// The text of the marks beside the lines of page `index`, as last
+    /// drawn.
+    #[cfg(test)]
+    pub(super) fn margin_texts(&self, index: usize) -> Vec<String> {
+        let notes = self.margin.notes.get(&index).map_or(&[][..], Vec::as_slice);
+        notes
+            .iter()
+            .flat_map(|note| self.margin.pieces(note, None, true))
+            .map(|(text, _)| text)
+            .collect()
     }
 
     /// The first complaint beside `note`, if complaints are shown: whether
