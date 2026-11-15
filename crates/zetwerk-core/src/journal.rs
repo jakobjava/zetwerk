@@ -13,7 +13,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use crate::change::Change;
 use crate::disk::{self, Hash};
@@ -271,6 +271,11 @@ impl Journal {
     #[must_use]
     pub fn unsynced_since(&self) -> Option<Instant> {
         self.unsynced_since
+    }
+
+    /// Makes the file say it was last written at `when`.
+    pub fn set_modified(&self, when: SystemTime) -> io::Result<()> {
+        self.file.set_modified(when)
     }
 }
 

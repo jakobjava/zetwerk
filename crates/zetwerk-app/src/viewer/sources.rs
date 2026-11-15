@@ -19,7 +19,6 @@
 //! what is there twice in `sources_look`; the way back for the file in
 //! `sources_undo`.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::assist::Target;
@@ -31,22 +30,16 @@ use crate::typst_text;
 const USUAL_FILE: &str = "refs.bib";
 
 /// Writes `text` to `path` so that the file is the old one or the new
-/// one whatever happens: beside it first, then in its place.
+/// one whatever happens: beside it first, then in its place. The file a
+/// link leads to is written, and who may read and write it stays as it
+/// was.
 pub(super) fn write_whole(path: &Path, text: &str) -> Result<(), String> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-    let name = path.file_name().map(|name| name.to_string_lossy());
-    let name = name.ok_or_else(|| format!("{} is no file", path.display()))?;
-    let beside = path.with_file_name(format!(".{name}.zetwerk-new"));
-    let write = || -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&beside)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&beside, &path)
-    };
-    write().map_err(|err| {
-        let _ = std::fs::remove_file(&beside);
-        format!("cannot write {}: {err}", path.display())
-    })
+    if path.file_name().is_none() {
+        return Err(format!("{} is no file", path.display()));
+    }
+    zetwerk_core::write_atomically(&path, text.as_bytes())
+        .map_err(|err| format!("cannot write {}: {err}", path.display()))
 }
 
 /// The sources of a document as its file holds them.

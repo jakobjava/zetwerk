@@ -1020,9 +1020,10 @@ impl Viewer {
             .to_string_lossy()
             .into_owned();
         self.opened.push(editor.file());
+        let restored = editor.restored();
         self.editor = Some(editor);
         self.panes = Panes::Split;
-        self.announce(opened);
+        self.announce(opened, restored);
         self.arrange();
         self
     }
@@ -1549,6 +1550,8 @@ impl Viewer {
                 // the source in their place.
                 self.document = Some(document);
                 self.arrange();
+                // Now that it is known which files the document is made of.
+                self.announce_unsaved_elsewhere();
             } else {
                 self.document = Some(document);
             }
@@ -2001,7 +2004,8 @@ impl Viewer {
             "" => {}
             "q" | "quit" if modified => {
                 self.alert(format!(
-                    "unsaved changes in {}: :wq saves them, :q! leaves them unsaved",
+                    "unsaved changes in {}: :wq saves them, :q! leaves them unsaved \
+                     (they are back when the file is opened again)",
                     unwritten.join(", ")
                 ));
             }
@@ -2693,11 +2697,7 @@ impl Viewer {
             .editing
             .as_ref()
             .is_some_and(|editing| editing.modified);
-        let name = if modified {
-            format!("{} [+]", self.file)
-        } else {
-            self.file.clone()
-        };
+        let name = self.file_label(modified);
         let problem = self
             .problems
             .first()
@@ -2753,6 +2753,22 @@ impl Viewer {
         let markup = chrome::status_markup(&status, f64::from(self.window.0) / self.scale);
         let y = f64::from(self.window.1) - f64::from(self.status_height());
         self.panel(scene, has, &markup, |_| (0.0, y));
+    }
+
+    /// The file's name as the status line shows it, `modified` or not.
+    fn file_label(&self, modified: bool) -> String {
+        let restored = self.editor.as_ref().and_then(Editor::restored);
+        match restored {
+            // Until written or dropped: brought back from an earlier
+            // session, and perhaps forgotten.
+            Some(then) if modified => format!(
+                "{} [+ restored, last changed {}]",
+                self.file,
+                start::ago(then, std::time::SystemTime::now())
+            ),
+            _ if modified => format!("{} [+]", self.file),
+            _ => self.file.clone(),
+        }
     }
 
     fn performance(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {

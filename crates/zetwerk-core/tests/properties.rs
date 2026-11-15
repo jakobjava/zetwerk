@@ -325,7 +325,15 @@ impl Session {
                 other => panic!("unexpected outcome {other:?}"),
             }
             assert_eq!(document.text(), file);
-            self.model.states = vec![file];
+            // The file's text is a new state on top of the history: what
+            // the document held is one undo away.
+            assert_eq!(document.history().len(), history.len() + 1);
+            assert_eq!(
+                document.text_at(history.current()).as_deref(),
+                Some(before.as_str()),
+                "undo leads back to the text as it was"
+            );
+            self.model.states.push(file);
         }
         self.model.seen = self.model.file.clone();
         self.document = Some(document);

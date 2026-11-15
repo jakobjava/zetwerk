@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use typst::syntax::{FileId, LinkedNode, Side, SyntaxKind};
 use zetwerk_core::Opened;
 
-use super::{Edited, Viewer, assist};
+use super::{Edited, Viewer, assist, start};
 use crate::editor::{self, Editor, Shown};
 use crate::keys::{Key, KeyPress};
 
@@ -48,22 +48,75 @@ impl Viewer {
         shown.to_string_lossy().into_owned()
     }
 
-    /// Says what opening a file found, where it is worth saying.
-    pub(super) fn announce(&mut self, opened: &Opened) {
+    /// Says what opening a file found, where it is worth saying;
+    /// `restored` is when changes brought back were last made.
+    pub(super) fn announce(&mut self, opened: &Opened, restored: Option<std::time::SystemTime>) {
         match opened {
             Opened::Clean => {}
-            Opened::Restored => self.notice("unsaved changes from the last session are back"),
-            Opened::ChangedWhileClosed => {
-                self.notice("the file changed since the last session; its undo history is gone");
+            // Loud: text the user may have forgotten, or never meant to
+            // keep, is not what the file holds.
+            Opened::Restored => {
+                let when = restored.map_or_else(
+                    || "in the last session".to_owned(),
+                    |then| start::ago(then, std::time::SystemTime::now()),
+                );
+                self.alert(format!(
+                    "unsaved changes, last made {when}, are back; not in the file: \
+                     :w writes them, :e! drops them (u brings them back)"
+                ));
             }
-            Opened::Conflict { journal, .. } => self.alert(format!(
-                "the file changed while unsaved changes were pending; they are kept in {}",
-                journal.display()
-            )),
+            Opened::ChangedWhileClosed => {
+                self.notice(
+                    "the file changed since the last session: u brings back the text as it was",
+                );
+            }
+            Opened::Conflict { .. } => self.alert(
+                "the file changed while unsaved changes were pending: it is shown as it is \
+                 now, u brings back the unsaved text",
+            ),
             Opened::JournalUnusable { journal } => self.alert(format!(
                 "the journal could not be read and was set aside as {}",
                 journal.display()
             )),
+        }
+    }
+
+    /// Says which files of the document that are not open hold changes
+    /// left unsaved in an earlier session (the window was closed, or
+    /// `:q!`): the pages show those files as the disk has them, and the
+    /// changes come back only when the file is opened.
+    pub(super) fn announce_unsaved_elsewhere(&mut self) {
+        let Some(state_dir) = self.state_dir.clone() else {
+            return;
+        };
+        let open: Vec<PathBuf> = self
+            .editor
+            .iter()
+            .chain(&self.others)
+            .map(|editor| editor.path().to_owned())
+            .collect();
+        let waiting: Vec<String> = self
+            .project
+            .dependencies()
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|ending| ending == "typ"))
+            .filter(|path| !open.iter().any(|open| same_file(open, path)))
+            .filter(|path| zetwerk_core::has_unsaved_changes(path, &state_dir))
+            .map(|path| self.name_of(&path))
+            .collect();
+        let Some(first) = waiting.first() else {
+            return;
+        };
+        let said = format!(
+            "unsaved changes from an earlier session wait in {}: :e /{first} brings them back",
+            waiting.join(", ")
+        );
+        match &self.message {
+            Some(message) if message.alert => {
+                let both = format!("{}; {said}", message.text);
+                self.alert(both);
+            }
+            _ => self.alert(said),
         }
     }
 
@@ -124,7 +177,7 @@ impl Viewer {
             };
             match opened {
                 Ok((editor, opened)) => {
-                    self.announce(&opened);
+                    self.announce(&opened, editor.restored());
                     restored = !matches!(opened, Opened::Clean);
                     self.opened.push(file);
                     editor

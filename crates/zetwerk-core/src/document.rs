@@ -33,6 +33,9 @@ pub struct Document<B: Buffer> {
     /// was no file.
     disk_hash: Option<Hash>,
     revision: u64,
+    /// When the unsaved changes that opening brought back from the
+    /// journal were last made, until the text is saved or loaded.
+    restored: Option<SystemTime>,
 }
 
 /// What opening a document found.
@@ -44,13 +47,15 @@ pub enum Opened {
     /// journal. The file is untouched; the document is modified.
     Restored,
     /// The file was changed by something else since zetwerk last saw it, and
-    /// there was nothing unsaved. The text is the file's; the old undo
-    /// history no longer applies and was dropped.
+    /// there was nothing unsaved. The text is the file's, as one step on top
+    /// of the history: undo brings back the text as zetwerk last had it.
     ChangedWhileClosed,
     /// The file was changed by something else *and* the journal holds
-    /// changes that were never saved. The text is the file's. The unsaved
-    /// version is handed over here and its journal is kept at `journal`, so
-    /// that neither version is lost and the user decides.
+    /// changes that were never saved. The text is the file's, as one step
+    /// on top of the history, so that undo brings back the unsaved
+    /// version; that version is also handed over here, and a copy of the
+    /// journal as it was is kept at `journal`. Neither version is lost and
+    /// the user decides.
     Conflict { recovered: String, journal: PathBuf },
     /// A journal existed but could not be read. The text is the file's; the
     /// journal is kept at `journal`.
@@ -373,9 +378,9 @@ fn journal_path(state_dir: &Path, path: &Path) -> PathBuf {
         .join(format!("{}.journal", &name[..32]))
 }
 
-/// Moves a journal that will not be used out of the way without deleting
-/// it. Returns where it went.
-fn set_aside(journal: &Path, why: &str) -> io::Result<PathBuf> {
+/// A name beside `journal` that no file has yet, for keeping it as it is
+/// because of `why`.
+fn aside(journal: &Path, why: &str) -> PathBuf {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
@@ -385,6 +390,13 @@ fn set_aside(journal: &Path, why: &str) -> io::Result<PathBuf> {
         attempt += 1;
         kept = journal.with_extension(format!("{why}-{seconds}-{attempt}"));
     }
+    kept
+}
+
+/// Moves a journal that will not be used out of the way without deleting
+/// it. Returns where it went.
+fn set_aside(journal: &Path, why: &str) -> io::Result<PathBuf> {
+    let kept = aside(journal, why);
     std::fs::rename(journal, &kept)?;
     Ok(kept)
 }
@@ -449,18 +461,50 @@ fn reconcile(
         Some((state, _)) => state != current,
         None => !text.is_empty(),
     };
+    // Either way the history goes on and the file's text is put on top of
+    // it (see `Document::open`): what zetwerk had is one undo away, never
+    // dropped.
     if unsaved {
-        let journal = set_aside(journal_path, "conflict")?;
+        let journal = aside(journal_path, "conflict");
+        std::fs::copy(journal_path, &journal)?;
         Ok((
             Opened::Conflict {
-                recovered: text,
+                recovered: text.clone(),
                 journal,
             },
-            None,
+            Some((history, text, None)),
         ))
     } else {
-        Ok((Opened::ChangedWhileClosed, None))
+        Ok((Opened::ChangedWhileClosed, Some((history, text, None))))
     }
+}
+
+/// Whether the journal under `state_dir` of the file at `path` holds
+/// changes that were never saved and that the file does not hold: what
+/// opening the file would bring back, or hand over if the file changed
+/// since. Only reads: for files of a document that are not open, so that
+/// unsaved work in them is not forgotten.
+#[must_use]
+pub fn has_unsaved_changes(path: &Path, state_dir: &Path) -> bool {
+    let path = std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_owned());
+    let Ok(Some(bytes)) = disk::read(&journal_path(state_dir, &path)) else {
+        return false;
+    };
+    let Some(replayed) = journal::decode(&bytes).and_then(|(records, _)| replay(&records)) else {
+        return false;
+    };
+    let unsaved = match replayed.saved {
+        Some((state, _)) => state != replayed.history.current(),
+        None => !replayed.text.is_empty(),
+    };
+    let in_file = match read_file(&path) {
+        Ok(Some(file)) => file.text == replayed.text,
+        Ok(None) => replayed.text.is_empty(),
+        Err(_) => false,
+    };
+    unsaved && !in_file
 }
 
 /// Removes temporary files that a session which died while saving left next
@@ -510,6 +554,10 @@ impl<B: Buffer> Document<B> {
             Err(err) => return Err(OpenError::Io(path.to_owned(), err)),
         };
         let journal_path = journal_path(state_dir, &path);
+        // When the last session last wrote it, before it is compacted.
+        let last_written = std::fs::metadata(&journal_path)
+            .and_then(|meta| meta.modified())
+            .ok();
         let journal_dir = journal_path.parent().unwrap_or(state_dir);
         disk::create_private_dir(journal_dir).map_err(io(journal_dir))?;
         let lock_path = journal_path.with_extension("lock");
@@ -540,7 +588,13 @@ impl<B: Buffer> Document<B> {
         let saved_record = saved.zip(file_hash);
         let journal = Journal::create(&journal_path, &compact(&history, &text, saved_record))
             .map_err(io(&journal_path))?;
-        let document = Self {
+        let restored = last_written.filter(|_| opened == Opened::Restored);
+        if let Some(when) = restored {
+            // Compacting is no change: how old the unsaved changes are is
+            // still known when the file is opened the next time.
+            let _ = journal.set_modified(when);
+        }
+        let mut document = Self {
             path,
             buffer: buffer(text),
             bom,
@@ -550,8 +604,26 @@ impl<B: Buffer> Document<B> {
             saved,
             disk_hash: file_hash,
             revision: 0,
+            restored,
         };
+        if matches!(opened, Opened::ChangedWhileClosed | Opened::Conflict { .. }) {
+            // The file's text, as one undo step on top of the history.
+            let path = document.path.clone();
+            document
+                .reload()
+                .map_err(|err| OpenError::Io(path, io::Error::other(err.to_string())))?;
+            document.revision = 0;
+        }
         Ok((document, opened))
+    }
+
+    /// When the unsaved changes that opening brought back from the
+    /// journal (see [`Opened::Restored`]) were last made, as far as the
+    /// journal's file tells; `None` if none were brought back, or once
+    /// the text has been saved or loaded from the file since.
+    #[must_use]
+    pub fn restored(&self) -> Option<SystemTime> {
+        self.restored
     }
 
     /// The file, with symbolic links resolved.
@@ -732,6 +804,7 @@ impl<B: Buffer> Document<B> {
         let state = self.history.current();
         self.disk_hash = Some(hash);
         self.saved = Some(state);
+        self.restored = None;
         self.journal
             .append(&Record::Saved { state, hash })
             .and_then(|()| self.journal.sync())
@@ -761,6 +834,7 @@ impl<B: Buffer> Document<B> {
         self.bom = file.bom;
         self.disk_hash = Some(file.hash);
         self.saved = Some(state);
+        self.restored = None;
         self.journal
             .append(&Record::Saved {
                 state,

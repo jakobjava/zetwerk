@@ -207,11 +207,40 @@ fn a_file_changed_while_closed_wins_when_nothing_was_unsaved() {
         document.save(false).unwrap_or_else(|err| panic!("{err}"));
     }
     scratch.write("theirs");
-    let (document, opened) = scratch.open();
+    let (mut document, opened) = scratch.open();
     assert_eq!(opened, Opened::ChangedWhileClosed);
     assert_eq!(document.text(), "theirs");
-    assert_eq!(document.history().len(), 1);
     assert!(!document.is_modified());
+    assert_eq!(scratch.read(), "theirs", "the file is never touched");
+    // What zetwerk had is not dropped: undo brings it back.
+    assert_eq!(document.history().len(), 3);
+    assert!(document.undo().is_ok_and(|state| state.is_some()));
+    assert_eq!(document.text(), "mine!");
+    assert!(document.undo().is_ok_and(|state| state.is_some()));
+    assert_eq!(document.text(), "mine");
+}
+
+#[test]
+fn a_file_emptied_while_closed_keeps_the_text_in_reach() {
+    // `zetwerk paper.typ` makes an empty file where there is none (git
+    // checkout, an agent): the journal's text must survive that.
+    let scratch = Scratch::new("emptied");
+    scratch.write("precious");
+    drop(scratch.open());
+    scratch.write("");
+    let (document, opened) = scratch.open();
+    assert_eq!(opened, Opened::ChangedWhileClosed);
+    assert_eq!(document.text(), "");
+    drop(document);
+    // Not even a second opening loses it.
+    let (mut again, opened) = scratch.open();
+    assert_eq!(opened, Opened::Clean);
+    assert!(again.undo().is_ok_and(|state| state.is_some()));
+    assert_eq!(again.text(), "precious");
+    drop(again);
+    let (document, opened) = scratch.open();
+    assert_eq!(opened, Opened::Restored);
+    assert_eq!(document.text(), "precious");
 }
 
 #[test]
@@ -223,13 +252,18 @@ fn a_conflict_keeps_both_versions() {
         insert(&mut document, 4, " + my unsaved work");
     }
     scratch.write("base + their change");
-    let (document, opened) = scratch.open();
+    let (mut document, opened) = scratch.open();
     let Opened::Conflict { recovered, journal } = opened else {
         panic!("expected a conflict, got {opened:?}")
     };
     assert_eq!(recovered, "base + my unsaved work");
     assert_eq!(document.text(), "base + their change");
     assert!(!document.is_modified());
+    // The unsaved version is one undo away, not only in a journal that
+    // nobody can read.
+    assert!(document.undo().is_ok_and(|state| state.is_some()));
+    assert_eq!(document.text(), "base + my unsaved work");
+    assert!(document.redo().is_ok_and(|state| state.is_some()));
     assert!(
         journal.exists(),
         "the old journal is kept at {}",
@@ -450,6 +484,36 @@ fn the_journal_is_compacted_on_open() {
 }
 
 #[test]
+fn restored_changes_say_how_old_they_are_until_saved() {
+    let scratch = Scratch::new("restored-age");
+    scratch.write("one");
+    {
+        let (mut document, _) = scratch.open();
+        assert_eq!(document.restored(), None);
+        insert(&mut document, 3, " two");
+    }
+    let three_days_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(72);
+    std::fs::File::options()
+        .append(true)
+        .open(scratch.journal())
+        .and_then(|file| file.set_modified(three_days_ago))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let (document, opened) = scratch.open();
+    assert_eq!(opened, Opened::Restored);
+    assert_eq!(document.restored(), Some(three_days_ago));
+    drop(document);
+    // Opening again, without a change, does not make them younger.
+    let (mut document, _) = scratch.open();
+    assert_eq!(document.restored(), Some(three_days_ago));
+    document.save(false).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(document.restored(), None);
+    drop(document);
+    let (document, opened) = scratch.open();
+    assert_eq!(opened, Opened::Clean);
+    assert_eq!(document.restored(), None);
+}
+
+#[test]
 fn leftovers_of_a_killed_save_are_removed_only_if_provably_ours() {
     let scratch = Scratch::new("leftovers");
     scratch.write("one");
@@ -476,4 +540,29 @@ fn leftovers_of_a_killed_save_are_removed_only_if_provably_ours() {
         foreign.exists() && unrelated.exists(),
         "other files are left alone"
     );
+}
+
+#[test]
+fn unsaved_changes_of_a_closed_file_can_be_asked_about() {
+    let scratch = Scratch::new("pending");
+    let pending = || zetwerk_core::has_unsaved_changes(&scratch.file(), &scratch.state());
+    scratch.write("one");
+    assert!(!pending(), "no journal at all");
+    {
+        let (mut document, _) = scratch.open();
+        assert!(!pending());
+        insert(&mut document, 3, " two");
+        assert!(pending(), "asked while open");
+    }
+    assert!(pending());
+    // A file that has what the journal has holds nothing back.
+    scratch.write("one two");
+    assert!(!pending());
+    scratch.write("other");
+    assert!(pending());
+    {
+        let (mut document, _) = scratch.open();
+        document.save(true).unwrap_or_else(|err| panic!("{err}"));
+    }
+    assert!(!pending());
 }

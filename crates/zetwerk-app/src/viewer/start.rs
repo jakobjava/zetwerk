@@ -189,7 +189,7 @@ fn shown(path: &Path) -> String {
 }
 
 /// How long ago `then` was, as it is said.
-fn ago(then: SystemTime, now: SystemTime) -> String {
+pub(super) fn ago(then: SystemTime, now: SystemTime) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;

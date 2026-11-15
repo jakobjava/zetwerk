@@ -575,6 +575,14 @@ impl Editor {
         self.document.is_modified()
     }
 
+    /// When the unsaved changes brought back from the journal on opening
+    /// were last made, until the text is saved or loaded; see
+    /// [`Document::restored`].
+    #[must_use]
+    pub fn restored(&self) -> Option<std::time::SystemTime> {
+        self.document.restored()
+    }
+
     /// Why the last edit was refused, if one was. Asking forgets it.
     pub fn take_failure(&mut self) -> Option<String> {
         self.failure.take()

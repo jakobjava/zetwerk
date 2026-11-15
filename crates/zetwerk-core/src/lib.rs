@@ -14,5 +14,7 @@ mod journal;
 
 pub use change::{Buffer, Change, Direction, EditError, Replace};
 pub use disk::{Hash, leftovers, write_atomically};
-pub use document::{DiskError, DiskStatus, Document, DocumentError, OpenError, Opened};
+pub use document::{
+    DiskError, DiskStatus, Document, DocumentError, OpenError, Opened, has_unsaved_changes,
+};
 pub use history::{History, ROOT, StateId, Step};

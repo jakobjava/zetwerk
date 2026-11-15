@@ -1164,14 +1164,16 @@ impl Engine {
         );
         self.joined = true;
         self.changed = true;
-        // A text that is not empty ends with a line break, as Vim writes it.
+        // A text that is not empty ends with a line break, as Vim writes it:
+        // of the kind its lines end with.
         let now = host.text();
         if !now.is_empty() && !now.ends_with('\n') {
             let end = now.len();
+            let ending = if now.contains("\r\n") { "\r\n" } else { "\n" };
             host.edit(
                 &[Edit {
                     range: end..end,
-                    text: "\n".to_owned(),
+                    text: ending.to_owned(),
                 }],
                 true,
             );
