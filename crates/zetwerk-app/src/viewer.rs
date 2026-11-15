@@ -822,6 +822,9 @@ pub struct Viewer {
     /// of them.
     keymap: Keymap,
     typed: Vec<KeyPress>,
+    /// When the keys typed are taken as they are, and how to take back
+    /// those of them typed already (see `keymap`).
+    mapping: keymap::Waiting,
     /// The revision that document was compiled from. Differs from
     /// `compiled_revision` while the newest text has errors.
     document_revision: Option<u64>,
@@ -970,6 +973,7 @@ impl Viewer {
             equation_set: false,
             keymap: Keymap::default(),
             typed: Vec::new(),
+            mapping: keymap::Waiting::default(),
             document_revision: None,
             predicted: None,
             changed: None,
@@ -3201,6 +3205,7 @@ mod tests {
     mod speed;
     mod typing;
     mod typist;
+    mod vim;
 
     /// A viewer in an 800×620 window showing `pages` A4 pages.
     fn viewer(pages: usize) -> Viewer {

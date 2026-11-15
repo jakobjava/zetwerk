@@ -20,6 +20,9 @@ use crate::keys::{Key, KeyPress};
 
 pub use zetwerk_vim::Mode;
 
+mod mark;
+pub use mark::Mark;
+
 /// How many cells of the source pane a tab takes.
 pub const TAB_CELLS: usize = 4;
 

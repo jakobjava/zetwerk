@@ -274,6 +274,12 @@ impl ApplicationHandler<Event> for App {
         if session.viewer.hints_due(now) {
             session.window.request_redraw();
         }
+        // Keys that may begin a mapping are taken as they are when the
+        // next is too long in coming.
+        if session.viewer.keys_due(now) {
+            session.after_keys();
+            session.window.request_redraw();
+        }
         if session.scheduler.take_due(now) {
             let (revision, world) = session.viewer.snapshot();
             session.compiler.compile(revision, world);
@@ -292,6 +298,7 @@ impl ApplicationHandler<Event> for App {
             session.viewer.autoscroll_at(),
             session.viewer.flash_at(),
             session.viewer.hints_at(),
+            session.viewer.keys_at(),
         ]
         .into_iter()
         .flatten()

@@ -377,7 +377,7 @@ enum Awaiting {
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct Pending {
     /// The count typed before the motion or command.
     count: Option<usize>,
@@ -467,6 +467,7 @@ struct Shape {
 }
 
 /// A Vim.
+#[derive(Clone)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent facts about the command being typed"
