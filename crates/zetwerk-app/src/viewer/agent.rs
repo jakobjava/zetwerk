@@ -195,6 +195,25 @@ impl Viewer {
         self.agent_edits = mode;
     }
 
+    /// Takes over from `before`, the viewer of the document this one
+    /// takes the place of in the window, what agents were told: whether
+    /// their changes are proposed only; and the revision and the numbers
+    /// of proposals, which go on counting, so that what an agent read of
+    /// the other document or proposed for it is never taken for this.
+    pub fn take_over_from(&mut self, before: &Viewer) {
+        self.agent_edits = before.agent_edits;
+        self.revision = self.revision.max(before.revision + 1);
+        self.next_proposal = self.next_proposal.max(before.next_proposal);
+    }
+
+    /// Whether the pages show another state of the text than the one it
+    /// is in, as the user looks through its history: what the compiler
+    /// says of them is not said of the text.
+    #[must_use]
+    pub fn pages_look_back(&self) -> bool {
+        self.looks_back()
+    }
+
     /// The changes agents have proposed to the file being edited, in
     /// the order of its text.
     #[must_use]
@@ -694,7 +713,7 @@ impl Viewer {
         let mut pages: HashMap<Span, usize> = HashMap::new();
         if let (Some(document), true) = (
             &self.document,
-            self.document_revision == Some(self.revision),
+            self.document_revision == Some(self.revision) && !self.looks_back(),
         ) {
             let introspector = document.introspector();
             let headings = introspector.elements().query(&HeadingElem::ELEM.select());

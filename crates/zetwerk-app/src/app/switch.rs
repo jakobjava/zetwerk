@@ -105,6 +105,14 @@ pub(super) fn welcome(viewer: &mut Viewer, options: &Options, new: bool) {
     viewer.welcome(opening, options.templates.clone());
 }
 
+/// What holds on for the document `to` that takes the place of `from`:
+/// whether agents only propose changes (told so once, the user is not
+/// to find an agent changing the next document at will), and revisions
+/// that go on counting (an agent's change for the old text is refused).
+fn carry_over(from: &Viewer, to: &mut Viewer) {
+    to.take_over_from(from);
+}
+
 impl App {
     /// Opens the document the viewer asks for in place of the one it
     /// shows, if it asks for one. Where it cannot be opened, the viewer
@@ -150,6 +158,7 @@ impl Session {
             self.window.scale_factor(),
             options,
         )?;
+        carry_over(&self.viewer, &mut viewer);
         // What compiles the old document may still be at it: its pages
         // are not to be taken for the new one's.
         let compiler = Compiler::spawn(options.power.budget().compile_threads, wake())
@@ -173,6 +182,29 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_that_only_propose_still_do_in_the_next_document() {
+        use crate::viewer::agent::AgentEdits;
+        use zetwerk_typst::FontSet;
+        let viewer = || {
+            let env = Environment::new(FontSet::Embedded);
+            let project = Project::in_memory(
+                Arc::clone(&env),
+                std::env::temp_dir(),
+                "a.typ",
+                String::new(),
+            )
+            .unwrap_or_else(|| panic!("a project"));
+            Viewer::new(env, project, (800, 600), 1.0).unwrap_or_else(|| panic!("a viewer"))
+        };
+        let mut before = viewer();
+        before.set_agent_edits(AgentEdits::Propose);
+        let mut next = viewer();
+        assert_eq!(next.agent_edits(), AgentEdits::Live);
+        carry_over(&before, &mut next);
+        assert_eq!(next.agent_edits(), AgentEdits::Propose);
+    }
 
     #[test]
     fn a_window_is_called_after_its_document() {

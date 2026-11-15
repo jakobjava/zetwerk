@@ -36,7 +36,7 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("equation (while typing)", "$", Does::Tells),
     (
-        "to the next place to fill in, out of brackets",
+        "to the next ‹place to fill in›, or out of brackets",
         "Tab",
         Does::Tells,
     ),
@@ -171,7 +171,6 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("definition"),
     ),
     ("go to a page", ":<number>", Does::Ask("")),
-    ("search", "/", Does::Tells),
     ("open a file of the document", ":files", Does::Run("files")),
     ("open a file by name", ":e <file>", Does::Ask("e ")),
     (
@@ -188,11 +187,6 @@ const ALL: &[(&str, &str, Does)] = &[
         "begin this empty document as an article, report, letter, slides, notes",
         ":new",
         Does::Run("new"),
-    ),
-    (
-        "to the next ‹place to fill in›; what is typed takes its place",
-        "Tab",
-        Does::Tells,
     ),
     (
         "next problem the compiler has",
@@ -273,7 +267,7 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("doc"),
     ),
     (
-        "document: styles — headings, links, code, captions, tables, page head and foot, theorems, …",
+        "document: styles — headings, links, captions, tables, theorems, …",
         ":styles",
         Does::Run("styles"),
     ),
@@ -454,7 +448,7 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("nextkeys"),
     ),
     (
-        "the rest of a name or word, faint behind the cursor (Tab takes it): on or off",
+        "the rest of a word, faint behind the cursor (Tab takes it): on or off",
         ":ghost",
         Does::Run("ghost"),
     ),
@@ -506,7 +500,9 @@ impl Viewer {
                     Does::Ask(command) => Target::Ask((*command).to_owned()),
                     Does::Tells => Target::Nothing,
                 };
-                (format!("{what}   {keys}"), target)
+                // The keys apart: they are what is looked for, and a
+                // long description is cut at its end.
+                (format!("{what}\t{keys}"), target)
             })
             .collect();
         self.open_picker("do", items, 0);
@@ -645,9 +641,11 @@ impl Viewer {
                 }
                 _ => self.alert("how many, please: :columns 2"),
             },
-            ("lang", lang) if !lang.is_empty() => {
-                self.set("text", "lang", &quoted(lang), &format!("language: {lang}"));
+            ("lang", lang) if typst_text::is_language(lang) => {
+                let lang = lang.to_ascii_lowercase();
+                self.set("text", "lang", &quoted(&lang), &format!("language: {lang}"));
             }
+            ("lang", _) => self.alert("a language, as its code: :lang de, :lang en, :lang nl"),
             ("justify" | "indent" | "pagenumbers", _) | ("numbering", "" | "on" | "off") => {
                 let (function, key, values, what) = match name {
                     "justify" => ("par", "justify", ("true", "false"), "justified lines"),

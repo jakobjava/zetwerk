@@ -3046,6 +3046,7 @@ mod tests {
     mod cursor;
     mod files;
     mod left_behind;
+    mod panels;
     mod speed;
     mod typist;
 
