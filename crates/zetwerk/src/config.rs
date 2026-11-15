@@ -6,7 +6,8 @@
 //! # "live": agents change the text (each change is one undo step).
 //! # "propose": their changes wait for you to accept them.
 //! edit_mode = "live"
-//! # Whether agents may write the file. Without it, saving is yours.
+//! # Whether agents may write the file. Without it, saving is yours in a
+//! # window; with no window (`zetwerk mcp <file>`), the agent's.
 //! save = false
 //!
 //! [view]
@@ -242,8 +243,10 @@ impl Keys {
 pub struct Ai {
     #[serde(default)]
     pub edit_mode: EditMode,
+    /// Whether agents may write the file; where it is not set, they may
+    /// only where no window shows the document.
     #[serde(default)]
-    pub save: bool,
+    pub save: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -331,7 +334,7 @@ mod tests {
         let expected = Config {
             ai: Ai {
                 edit_mode: EditMode::Propose,
-                save: true,
+                save: Some(true),
             },
             ..Config::default()
         };

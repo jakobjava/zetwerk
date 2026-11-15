@@ -1120,9 +1120,7 @@ impl Viewer {
     /// If no file is being edited.
     pub fn referables(&mut self) -> Result<Vec<Referable>, String> {
         let offers = self.offers();
-        let text = self
-            .text()
-            .ok_or("this window only shows the document; it cannot read its text")?;
+        let text = self.text().ok_or(super::agent::NOT_EDITING)?;
         let world = self.compiled_world.as_deref();
         let listed = |offer: Offer| {
             let elsewhere = offer.elsewhere.and_then(|span| place_of(span, world));

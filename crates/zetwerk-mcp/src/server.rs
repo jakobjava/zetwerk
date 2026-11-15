@@ -32,6 +32,8 @@ const LIMIT_MAX_PX: u32 = 4000;
 struct Server {
     editor: SharedEditor,
     tool_router: ToolRouter<Self>,
+    /// Whether there is no window: nobody but the agent saves then.
+    headless: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -152,7 +154,11 @@ struct LocateArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ProposalArgs {
     /// The proposal's `id`, as `edit_source` or `list_proposals` gave it.
-    id: u64,
+    id: Option<u64>,
+    /// Several proposals at once, as `proposals` of `edit_source` or
+    /// `move_section` gave them: all are taken back, or none where one
+    /// of them is not there.
+    ids: Option<Vec<u64>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -242,7 +248,10 @@ impl Server {
     /// Report what the editor is showing and what the user is at: file,
     /// page count, current page, revision, mode, the cursor's line and
     /// column, the selected text, compile errors, whether your changes
-    /// are made at once or wait as proposals, and how many wait.
+    /// are made at once or wait as proposals, and how many wait; whether
+    /// a `window` shows the document and who `saves` it; and how many
+    /// questions the user asked you (`open_questions`) and notes of the
+    /// user's (`unanswered_notes`) wait for an answer (`list_notes`).
     #[tool(annotations(title = "Editor state", read_only_hint = true))]
     async fn get_state(&self) -> Result<CallToolResult, ErrorData> {
         let editor = Arc::clone(&self.editor);
@@ -486,7 +495,12 @@ impl Server {
     /// `anyway`. The file may also be a Hayagriva `.yml` file: the
     /// sources are given as BibTeX all the same. zetwerk does not look
     /// up DOIs: resolve one yourself and hand over what it gives.
-    /// Refused while the user wants changes proposed only.
+    /// Where the user wants changes proposed only, the sources are
+    /// proposed: the answer has the `proposal`'s id and no `keys`, and
+    /// nothing is written until the user adds them (`list_proposals`
+    /// shows it with the `source` given; `withdraw_proposal` takes it
+    /// back). Only a file in or below the document's directory is
+    /// written to.
     #[tool(annotations(title = "Add source", read_only_hint = false))]
     async fn add_source(
         &self,
@@ -501,8 +515,9 @@ impl Server {
     /// it only once. The change is one undo step for the user and is not
     /// written to the file: the user saves. Answers with the new
     /// `revision`, the lines changed and the compile errors of the result
-    /// (`diagnostics`; empty if it compiles) — or, for a proposal, with its
-    /// id as `proposal`.
+    /// (`diagnostics`; empty if it compiles) — or, for a proposal, with the
+    /// ids of all it made as `proposals` (one for each place replaced),
+    /// and the last of them as `proposal`.
     #[tool(annotations(title = "Edit source", read_only_hint = false))]
     async fn edit_source(
         &self,
@@ -579,14 +594,23 @@ impl Server {
         self.value(move |editor| editor.change(change)).await
     }
 
-    /// Take back a change you proposed, before the user has decided on it.
+    /// Take back a change you proposed, before the user has decided on
+    /// it: give its `id`, or the `ids` of several (all the `proposals` a
+    /// change made).
     #[tool(annotations(title = "Withdraw proposal", read_only_hint = false))]
     async fn withdraw_proposal(
         &self,
         Parameters(args): Parameters<ProposalArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.value(move |editor| editor.withdraw_proposal(args.id))
-            .await
+        match (args.id, args.ids) {
+            (Some(id), None) => self.value(move |editor| editor.withdraw_proposal(id)).await,
+            (id, Some(mut ids)) => {
+                ids.extend(id);
+                self.value(move |editor| editor.withdraw_proposals(&ids))
+                    .await
+            }
+            (None, None) => Ok(failure("give the `id` of a proposal, or `ids`".to_owned())),
+        }
     }
 }
 
@@ -678,7 +702,9 @@ impl Server {
 #[tool_router(router = saving_tools)]
 impl Server {
     /// Write the text to the document's file. Refused if the file was
-    /// changed by another program since it was read.
+    /// changed by another program since it was read. Offered where the
+    /// user lets agents save, and, unless the user says not, where there
+    /// is no window (see `saves` in `get_state`).
     #[tool(annotations(title = "Save", read_only_hint = false, idempotent_hint = true))]
     async fn save(&self) -> Result<CallToolResult, ErrorData> {
         self.value(crate::Editor::save).await
@@ -716,18 +742,35 @@ impl Server {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerConfig {
+        let instructions = if self.headless {
+            HEADLESS
+        } else {
+            "zetwerk is a WYSIWYG editor for Typst documents. These tools act on the \
+             document open in it, which the user may be looking at and typing into at \
+             the same time. Read with read_source, change with edit_source (exact \
+             text, replaced once), look at the result with render_page. Changes are \
+             undo steps in the user's editor and are saved by the user, unless a save \
+             tool is offered."
+        };
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("zetwerk", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "zetwerk is a WYSIWYG editor for Typst documents. These tools act on the \
-                 document open in it, which the user may be looking at and typing into at \
-                 the same time. Read with read_source, change with edit_source (exact \
-                 text, replaced once), look at the result with render_page. Changes are \
-                 undo steps in the user's editor and are saved by the user, unless a save \
-                 tool is offered.",
-            )
+            .with_instructions(instructions)
     }
 }
+
+/// What an agent is told where no window shows the document.
+const HEADLESS: &str = "zetwerk is a WYSIWYG editor for Typst documents. These tools act on a \
+                        document that no window shows: nobody else sees it or types into it \
+                        in this session. Read with read_source, change with edit_source \
+                        (exact text, replaced once), look at the result with render_page. \
+                        Nothing is written to the file unless you call save: the saves are \
+                        yours to make (where the save tool is offered).";
+
+/// What the save tool says of itself where no window shows the document.
+const HEADLESS_SAVE: &str = "Write the text to the document's file. This session has no \
+                             window: nobody else writes the text, and what you change is \
+                             in the file only once you save. Refused if the file was \
+                             changed by another program since it was read.";
 
 /// Runs an editor call off the async thread; editor calls block.
 async fn blocking<T: Send + 'static>(
@@ -790,6 +833,8 @@ pub struct Tools {
     pub save: bool,
     /// Driving and capturing the window itself, for developing zetwerk.
     pub development: bool,
+    /// There is no window: the document is open for the agent alone.
+    pub headless: bool,
 }
 
 impl Server {
@@ -799,6 +844,9 @@ impl Server {
         tool_router += Self::notes_tools();
         if tools.save {
             tool_router += Self::saving_tools();
+            if let (true, Some(save)) = (tools.headless, tool_router.map.get_mut("save")) {
+                save.attr.description = Some(HEADLESS_SAVE.into());
+            }
         }
         if tools.development {
             tool_router += Self::development_tools();
@@ -806,6 +854,7 @@ impl Server {
         Self {
             editor,
             tool_router,
+            headless: tools.headless,
         }
     }
 }

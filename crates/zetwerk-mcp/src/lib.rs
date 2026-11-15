@@ -67,6 +67,16 @@ pub trait Editor: Send + Sync + 'static {
     /// Takes back proposal `id`.
     fn withdraw_proposal(&self, id: u64) -> Result<serde_json::Value, String>;
 
+    /// Takes back the proposals `ids`, all of them or, where one is not
+    /// there, none.
+    fn withdraw_proposals(&self, ids: &[u64]) -> Result<serde_json::Value, String> {
+        let mut waiting = serde_json::Value::Null;
+        for id in ids {
+            waiting = self.withdraw_proposal(*id)?["waiting"].take();
+        }
+        Ok(serde_json::json!({ "withdrawn": ids, "waiting": waiting }))
+    }
+
     /// Writes the document as a PDF to `path`, or beside its main file:
     /// all of it, or the pages `pages` names (`3-7`, `5`, `1,4-6`).
     fn export_pdf(
@@ -283,4 +293,30 @@ pub struct EditorState {
     /// Empty if it succeeded. While there are errors, the pages shown are
     /// those of the last revision that compiled.
     pub problems: Vec<String>,
+    /// Whether a window shows the document to the user. Without one
+    /// (`zetwerk mcp <file>` with no window open on it) nobody sees the
+    /// pages or types into them.
+    #[serde(default = "shown")]
+    pub window: bool,
+    /// Who writes the text to its file: `user` (with `:w` in the window),
+    /// `user or agent` (the user lets agents `save` too), `agent` (there
+    /// is no window: nothing is written unless you call `save`), or
+    /// `nobody` (no window, and the user does not let agents save: what
+    /// is changed is kept in zetwerk's journal, and comes back when the
+    /// document is opened next).
+    #[serde(default)]
+    pub saves: String,
+    /// Questions the user asked you about the text that wait for your
+    /// answer (`list_notes`, `answer_note`).
+    #[serde(default)]
+    pub open_questions: usize,
+    /// Notes the user left on the text that nobody has answered or
+    /// resolved yet.
+    #[serde(default)]
+    pub unanswered_notes: usize,
+}
+
+/// A window, where nothing says otherwise.
+const fn shown() -> bool {
+    true
 }

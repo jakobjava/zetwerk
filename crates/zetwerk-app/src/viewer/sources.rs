@@ -305,7 +305,21 @@ impl Viewer {
         // The first thing it lacks comes up chosen: to be typed next.
         let lacking = asked.iter().position(|field| entry.field(field).is_none());
         let lacking = lacking.filter(|_| !sources.hayagriva);
-        let chosen = lacking.map_or(0, |field| field + 2);
+        let mut chosen = lacking.map_or(0, |field| field + 2);
+        // Others cited by the same key: a citation is of one of them.
+        let clashing = super::sources_broken::clashing(&sources.entries);
+        if let Some(count) = clashing.get(key) {
+            items.insert(
+                0,
+                (
+                    format!(
+                        "{count} sources are cited as {key}: give the others keys of their own"
+                    ),
+                    Target::Command(format!("bib unclash {key}")),
+                ),
+            );
+            chosen = 0;
+        }
         self.open_picker_for("source", items, chosen, "bib".to_owned(), None);
         Ok(())
     }

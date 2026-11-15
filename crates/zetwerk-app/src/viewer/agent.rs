@@ -623,6 +623,9 @@ impl Viewer {
     /// Drops proposal `id`, for the agent that made it and thought better
     /// of it.
     pub fn withdraw_proposal(&mut self, id: u64) -> Result<(), String> {
+        if self.withdraw_proposed_sources(id) {
+            return Ok(());
+        }
         let at = self
             .proposals
             .iter()
@@ -631,6 +634,40 @@ impl Viewer {
         self.proposals.remove(at);
         self.sync_proposals();
         Ok(())
+    }
+
+    /// Drops the proposals `ids`, for the agent that made them: all of
+    /// them, or none where one is not there.
+    pub fn withdraw_proposals(&mut self, ids: &[u64]) -> Result<(), String> {
+        let sources = self.proposed_sources();
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|id| !self.proposals.iter().any(|proposal| proposal.id == **id))
+            .filter(|id| !sources.iter().any(|(proposed, _)| proposed == *id))
+            .map(u64::to_string)
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "there is no proposal {}: none was taken back",
+                missing.join(", ")
+            ));
+        }
+        self.proposals
+            .retain(|proposal| !ids.contains(&proposal.id));
+        for id in ids {
+            self.withdraw_proposed_sources(*id);
+        }
+        self.sync_proposals();
+        Ok(())
+    }
+
+    /// What the window shows, that an agent's request is for: the main
+    /// file of the document and the file being edited. What was asked
+    /// of one is not answered from another the window shows by then.
+    #[must_use]
+    pub fn shown_document(&self) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+        let editing = self.editor.as_ref().map(|editor| editor.path().to_owned());
+        (self.main_path(), editing)
     }
 
     /// Puts the cursor on the next proposal after it (`]p`), or the one
@@ -889,4 +926,9 @@ impl Viewer {
     }
 }
 
-const NOT_EDITING: &str = "this window only shows the document; it cannot read or change its text";
+/// What an agent is told where the window has no document: a window
+/// without one is at its start screen, where the user chooses one.
+pub(super) const NOT_EDITING: &str = "no document is open: the window is at its start screen, \
+                                      where the user chooses one. Ask the user to open it \
+                                      (:open <file>, :recent), or work on a file without the \
+                                      window: zetwerk mcp <file.typ>";

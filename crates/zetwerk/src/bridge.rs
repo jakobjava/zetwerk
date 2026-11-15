@@ -1,5 +1,6 @@
 //! Lets the MCP server talk to the window.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -25,11 +26,37 @@ const PATIENT: Duration = Duration::from_secs(60);
 /// An [`Editor`] backed by a window on another thread.
 pub struct Bridge {
     handle: Handle,
+    /// Whether a window shows the document, and whether the agent is
+    /// given `save`: what it is told of who saves.
+    window: bool,
+    save: bool,
 }
+
+/// What the window shows, that a request is for: the main file and the
+/// file being edited.
+type Shown = (Option<PathBuf>, Option<PathBuf>);
+
+/// Why a request that waited is not answered: the user went to another
+/// document meanwhile.
+const SWITCHED: &str = "the window shows another document now: what you asked of the one it \
+                        showed was not done; see get_state for what it shows";
 
 impl Bridge {
     pub fn new(handle: Handle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            window: true,
+            save: false,
+        }
+    }
+
+    /// The same, for a document that a window shows or not, with `save`
+    /// offered to agents or not.
+    #[must_use]
+    pub fn offering(mut self, window: bool, save: bool) -> Self {
+        self.window = window;
+        self.save = save;
+        self
     }
 
     /// Sends a request built around a reply channel and waits for the reply.
@@ -63,6 +90,25 @@ impl Bridge {
         )
     }
 
+    /// What the window shows now.
+    fn shown(&self) -> Result<Shown, String> {
+        self.now(|viewer| viewer.shown_document())
+    }
+
+    /// Like [`Bridge::compiled`], for the document `shown`: where the
+    /// window shows another by the time it is compiled, refused.
+    fn compiled_for<T: Send + 'static>(
+        &self,
+        shown: Shown,
+        task: impl FnOnce(&mut Viewer) -> T + Send + 'static,
+    ) -> Result<T, String> {
+        let answer = self.compiled(move |viewer| {
+            let same = viewer.shown_document() == shown;
+            same.then(|| task(viewer))
+        })?;
+        answer.ok_or_else(|| SWITCHED.to_owned())
+    }
+
     /// Like [`Bridge::now`], once the text as it is has been compiled.
     fn compiled<T: Send + 'static>(
         &self,
@@ -85,7 +131,9 @@ impl Bridge {
     /// compiled. The window only hands over its pages; the files are
     /// made and written here, on the thread of whoever asked.
     fn export(&self, wanted: Wanted) -> Result<Exported, String> {
-        let job = self.compiled(move |viewer| viewer.plan_export(&wanted))??;
+        // Of the document shown when it was asked for, or of none.
+        let shown = self.shown()?;
+        let job = self.compiled_for(shown, move |viewer| viewer.plan_export(&wanted))??;
         job.run().map_err(|why| format!("not exported: {why}"))
     }
 }
@@ -156,6 +204,47 @@ fn inside(name: Option<&str>) -> Result<Option<String>, String> {
     }
 }
 
+/// The path `path` comes to, `..` and `.` taken as they lead, and links
+/// followed where it is there.
+fn resolved(path: &Path) -> PathBuf {
+    use std::path::Component;
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    match (out.parent(), out.file_name()) {
+        (Some(folder), Some(name)) if folder.exists() => resolved(folder).join(name),
+        _ => out,
+    }
+}
+
+/// Whether an agent may write the file at `path` of the document whose
+/// main file is `main`: only in or below the main file's directory, as
+/// [`inside`] has it for what it names.
+fn agent_may_write(path: &Path, main: &Path) -> Result<(), String> {
+    let folder = resolved(main.parent().unwrap_or(Path::new(".")));
+    let within = resolved(path)
+        .strip_prefix(&folder)
+        .map(|within| within.to_string_lossy().into_owned());
+    match within {
+        Ok(within) => inside(Some(&within)).map(|_| ()),
+        Err(_) => Err(format!(
+            "the document's bibliography is {}, outside the document's directory: an agent \
+             writes nowhere else. Ask the user to add the source (:bib)",
+            path.display()
+        )),
+    }
+}
+
 /// The pages `text` names, as an agent wrote them.
 fn named_pages(text: &str) -> Result<Pages, String> {
     Pages::parse(text.trim()).ok_or_else(|| {
@@ -165,15 +254,23 @@ fn named_pages(text: &str) -> Result<Pages, String> {
 
 impl Editor for Bridge {
     fn state(&self) -> Result<EditorState, String> {
-        let (state, focus, panes, agent_edits, proposals) = self.now(|viewer| {
-            (
-                viewer.state(),
-                viewer.focus(),
-                viewer.panes(),
-                viewer.agent_edits(),
-                viewer.proposals().len(),
-            )
-        })?;
+        let (state, focus, panes, agent_edits, proposals, (questions, notes)) =
+            self.now(|viewer| {
+                (
+                    viewer.state(),
+                    viewer.focus(),
+                    viewer.panes(),
+                    viewer.agent_edits(),
+                    viewer.proposals().len() + viewer.proposed_sources().len(),
+                    viewer.notes_waiting(),
+                )
+            })?;
+        let saves = match (self.window, self.save) {
+            (true, false) => "user",
+            (true, true) => "user or agent",
+            (false, true) => "agent",
+            (false, false) => "nobody",
+        };
         let (mode, command) = match (state.mode, &state.editing) {
             (Mode::Command(text), _) => ("command", Some(text)),
             (Mode::Normal, Some(editing)) => {
@@ -226,6 +323,10 @@ impl Editor for Bridge {
             proposals,
             command,
             problems: state.problems,
+            window: self.window,
+            saves: saves.to_owned(),
+            open_questions: questions,
+            unanswered_notes: notes,
         })
     }
 
@@ -244,24 +345,31 @@ impl Editor for Bridge {
             propose,
             reason,
         } = change;
-        let outcome = self.now(move |viewer| {
+        let (outcome, made_ids, shown) = self.now(move |viewer| {
             let first = viewer.next_proposal_id();
             let outcome = made(viewer, what, expected, propose);
             if let (Ok(Outcome::Proposed { .. }), Some(reason)) = (&outcome, &reason) {
                 viewer.explain_proposals(first, reason);
             }
-            outcome
+            // Every proposal it made: one for each place replaced, or for
+            // each part of a section moved.
+            let ids: Vec<u64> = (first..viewer.next_proposal_id())
+                .filter(|id| viewer.proposals().iter().any(|proposal| proposal.id == *id))
+                .collect();
+            outcome.map(|outcome| (outcome, ids, viewer.shown_document()))
         })??;
         match outcome {
             Outcome::Proposed { id, revision } => Ok(json!({
                 "applied": false,
                 "proposal": id,
+                "proposals": made_ids,
                 "revision": revision,
                 "note": "shown to the user, who accepts or rejects it in the window",
             })),
             Outcome::Changed { revision, lines } => {
-                // What the compiler says to the text as it is by then.
-                let (state, now, back) = self.compiled(|viewer| {
+                // What the compiler says to the text as it is by then, if
+                // it is still the text of that document.
+                let (state, now, back) = self.compiled_for(shown, |viewer| {
                     let state = viewer.state();
                     (state.clone(), state.revision, viewer.pages_look_back())
                 })?;
@@ -291,7 +399,9 @@ impl Editor for Bridge {
     }
 
     fn diagnostics(&self) -> Result<Value, String> {
-        let (state, back) = self.compiled(|viewer| (viewer.state(), viewer.pages_look_back()))?;
+        let shown = self.shown()?;
+        let (state, back) =
+            self.compiled_for(shown, |viewer| (viewer.state(), viewer.pages_look_back()))?;
         if back {
             return Err(LOOKING_BACK.to_owned());
         }
@@ -305,8 +415,9 @@ impl Editor for Bridge {
     }
 
     fn outline(&self) -> Result<Value, String> {
+        let shown = self.shown()?;
         let (outline, revision) =
-            self.compiled(|viewer| (viewer.outline(), viewer.state().revision))?;
+            self.compiled_for(shown, |viewer| (viewer.outline(), viewer.state().revision))?;
         let outline = outline?;
         let headings: Vec<Value> = outline
             .headings
@@ -343,14 +454,16 @@ impl Editor for Bridge {
     }
 
     fn locate(&self, place: Place) -> Result<Value, String> {
+        let shown = self.shown()?;
         match place {
             Place::Source { line, column } => {
-                let (page, x, y) = self.compiled(move |viewer| viewer.page_of(line, column))??;
+                let (page, x, y) =
+                    self.compiled_for(shown, move |viewer| viewer.page_of(line, column))??;
                 Ok(json!({ "page": page, "x": round(x), "y": round(y) }))
             }
             Place::Page { page, x, y } => {
                 let (file, line, column) =
-                    self.compiled(move |viewer| viewer.source_of(page, x, y))??;
+                    self.compiled_for(shown, move |viewer| viewer.source_of(page, x, y))??;
                 Ok(json!({ "file": file, "line": line, "column": column }))
             }
         }
@@ -360,7 +473,13 @@ impl Editor for Bridge {
         let proposals = self.now(|viewer| {
             let text = viewer.text().unwrap_or_default();
             let line = |offset: usize| zetwerk_app::viewer::agent::line_column(text, offset).0;
-            viewer
+            // Sources proposed for the bibliography, after the changes
+            // of the text.
+            let sources = viewer
+                .proposed_sources()
+                .into_iter()
+                .map(|(id, given)| json!({ "id": id, "source": given }));
+            let text_ones: Vec<Value> = viewer
                 .proposals()
                 .iter()
                 .map(|proposal| {
@@ -383,9 +502,20 @@ impl Editor for Bridge {
                     }
                     listed
                 })
-                .collect::<Vec<Value>>()
+                .collect();
+            text_ones.into_iter().chain(sources).collect::<Vec<Value>>()
         })?;
         Ok(json!({ "proposals": proposals }))
+    }
+
+    fn withdraw_proposals(&self, ids: &[u64]) -> Result<Value, String> {
+        let wanted = ids.to_vec();
+        let left = self.now(move |viewer| {
+            viewer
+                .withdraw_proposals(&wanted)
+                .map(|()| viewer.proposals().len())
+        })??;
+        Ok(json!({ "withdrawn": ids, "waiting": left }))
     }
 
     fn withdraw_proposal(&self, id: u64) -> Result<Value, String> {
@@ -498,8 +628,10 @@ impl Editor for Bridge {
     }
 
     fn targets(&self) -> Result<Value, String> {
-        let (targets, revision) =
-            self.compiled(|viewer| (viewer.referables(), viewer.state().revision))?;
+        let shown = self.shown()?;
+        let (targets, revision) = self.compiled_for(shown, |viewer| {
+            (viewer.referables(), viewer.state().revision)
+        })?;
         let targets: Vec<Value> = targets?
             .into_iter()
             .map(|target| {
@@ -551,10 +683,27 @@ impl Editor for Bridge {
     fn add_source(&self, bibtex: &str, anyway: bool) -> Result<Value, String> {
         let bibtex = bibtex.to_owned();
         let (added, revision) = self.now(move |viewer| {
+            // The user's `:bib` writes where the document points; an
+            // agent only in or below the document's directory.
+            let path = viewer.sources()?.path;
+            let main = viewer.main_path().or_else(|| viewer.shown_document().1);
+            if let Some(main) = main {
+                agent_may_write(&path, &main)?;
+            }
             viewer
                 .agent_add_sources_checked(&bibtex, anyway)
                 .map(|added| (added, viewer.state().revision))
         })??;
+        if let Some(id) = added.proposal {
+            return Ok(json!({
+                "applied": false,
+                "proposal": id,
+                "keys": [],
+                "revision": revision,
+                "note": "proposed: the user adds it in the window (:bib), or not; nothing \
+                         is written before",
+            }));
+        }
         let there: Vec<Value> = added
             .there
             .iter()
@@ -572,8 +721,9 @@ impl Editor for Bridge {
     }
 
     fn render_page(&self, page: usize, max_px: u32) -> Result<Vec<u8>, String> {
+        let shown = self.shown()?;
         let document = self
-            .ask(Request::Document, PATIENT)?
+            .compiled_for(shown, |viewer| viewer.document().cloned())?
             .ok_or("the document has not compiled yet; see `problems` in get_state")?;
         let pages = document.pages();
         let page = page
@@ -1416,5 +1566,107 @@ mod tests {
                 },
             ] })
         );
+    }
+
+    #[test]
+    fn every_proposal_of_a_change_is_told_and_taken_back_at_once() {
+        let session = session("A cat, a cat, a dog.\n", AgentEdits::Propose);
+        let bridge = &session.bridge;
+        let change = Change {
+            what: ChangeKind::Replace {
+                old: "cat".to_owned(),
+                new: "cow".to_owned(),
+                all: true,
+            },
+            expected_revision: None,
+            propose: false,
+            reason: None,
+        };
+        let proposed = bridge.change(change).unwrap();
+        let ids: Vec<u64> = proposed["proposals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_u64().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2, "{proposed}");
+        // The field there was, for those who read it.
+        assert_eq!(proposed["proposal"], json!(ids[1]));
+        assert_eq!(bridge.state().unwrap().proposals, 2);
+        // One that is not there: none goes.
+        assert!(bridge.withdraw_proposals(&[ids[0], 999]).is_err());
+        assert_eq!(bridge.state().unwrap().proposals, 2);
+        let withdrawn = bridge.withdraw_proposals(&ids).unwrap();
+        assert_eq!(withdrawn["waiting"], json!(0));
+        assert_eq!(bridge.proposals().unwrap()["proposals"], json!([]));
+    }
+
+    #[test]
+    fn an_agent_is_told_who_saves() {
+        let session = session(TEXT, AgentEdits::Live);
+        let state = session.bridge.state().unwrap();
+        assert_eq!((state.window, state.saves.as_str()), (true, "user"));
+        for (save, saves) in [(true, "agent"), (false, "nobody")] {
+            let alone = Bridge::new(session.handle.clone()).offering(false, save);
+            let state = alone.state().unwrap();
+            assert_eq!((state.window, state.saves.as_str()), (false, saves));
+        }
+    }
+
+    #[test]
+    fn an_agent_adds_sources_only_in_the_documents_directory() {
+        let bibtex = "@book{knuth, author = {Knuth, Donald}, title = {The TeXbook}, year = {1984}}";
+        let outside = session("Words.\n#bibliography(\"../x.bib\")\n", AgentEdits::Live);
+        let refused = outside.bridge.add_source(bibtex, false).unwrap_err();
+        assert!(
+            refused.contains("outside the document's directory"),
+            "{refused}"
+        );
+        assert!(!outside.directory.with_file_name("x.bib").exists());
+        // Below it is in it.
+        let below = session(
+            "Words.\n#bibliography(\"./sub/../refs.bib\")\n",
+            AgentEdits::Live,
+        );
+        std::fs::create_dir(below.directory.join("sub")).unwrap();
+        let added = below.bridge.add_source(bibtex, false).unwrap();
+        assert_eq!(added["keys"], json!(["knuth"]));
+        assert!(below.directory.join("refs.bib").is_file());
+    }
+
+    #[test]
+    fn a_request_for_a_document_the_window_no_longer_shows_is_refused() {
+        let session = session(TEXT, AgentEdits::Live);
+        let bridge = &session.bridge;
+        let shown = bridge.shown().unwrap();
+        assert!(bridge.compiled_for(shown, |_| ()).is_ok());
+        // Asked while another was shown: not answered from this one.
+        let other = (Some(PathBuf::from("/elsewhere/other.typ")), None);
+        let refused = bridge.compiled_for(other, |_| ()).unwrap_err();
+        assert!(refused.contains("another document"), "{refused}");
+    }
+
+    #[test]
+    fn an_agent_is_told_of_questions_and_notes_that_wait() {
+        let session = session(TEXT, AgentEdits::Live);
+        let bridge = &session.bridge;
+        let state = bridge.state().unwrap();
+        assert_eq!((state.open_questions, state.unanswered_notes), (0, 0));
+        bridge.send_keys(":3<CR>gqIs this right?<CR>").unwrap();
+        bridge.send_keys(":6<CR>gnLater.<CR>").unwrap();
+        let state = bridge.state().unwrap();
+        assert_eq!((state.open_questions, state.unanswered_notes), (1, 1));
+        let id = bridge.notes(false).unwrap()["notes"][0]["id"]
+            .as_u64()
+            .unwrap();
+        bridge
+            .answer_note(NoteAnswer {
+                id,
+                text: "Yes.".to_owned(),
+                change: None,
+                expected_revision: None,
+            })
+            .unwrap();
+        assert_eq!(bridge.state().unwrap().open_questions, 0);
     }
 }

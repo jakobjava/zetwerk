@@ -31,7 +31,9 @@ mod registers;
 mod slides;
 mod sources;
 mod sources_add;
+mod sources_broken;
 mod sources_look;
+mod sources_proposed;
 mod sources_undo;
 pub mod start;
 mod structure;
@@ -1732,6 +1734,9 @@ impl Viewer {
         if self.start_key(press) || self.refused_key(press) || self.margin_key(press) {
             return;
         }
+        if self.bib_undo_key(press) {
+            return;
+        }
         if self.editor.is_some() {
             if !self.assist_key(press) {
                 self.editor_key(press);
@@ -2291,6 +2296,9 @@ impl Viewer {
         let Some(document) = self.document.clone() else {
             return;
         };
+        if self.shows_no_document() {
+            return;
+        }
         let (_, left, pane_width) = self.split();
         if pane_width == 0 {
             return;
@@ -4160,8 +4168,13 @@ mod tests {
         );
         assert!(viewer.agent_add_sources("no entry").is_err());
         assert_eq!(viewer.sources().unwrap().entries.len(), 2);
+        // Where agents only propose, it is a proposal: nothing is added.
         viewer.agent_edits = AgentEdits::Propose;
-        assert!(viewer.agent_add_sources(entry).is_err());
+        assert_eq!(viewer.agent_add_sources(entry), Ok(Vec::new()));
+        assert_eq!(viewer.sources().unwrap().entries.len(), 2);
+        let (proposed, _) = viewer.proposed_sources()[0].clone();
+        viewer.execute(&format!("bib reject {proposed}"));
+        press(&mut viewer, "<Esc>");
         // Taken out, after being asked.
         press(&mut viewer, "gBlovelace<CR>take<CR>yes<CR><Esc>");
         let left = viewer.sources().unwrap();

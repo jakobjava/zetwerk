@@ -337,3 +337,217 @@ fn escape_from_the_styles_leads_back_to_their_row() {
     );
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn a_source_that_cannot_be_read_is_listed_and_mended() {
+    let folder = directory("Words @b.\n#bibliography(\"refs.bib\")\n");
+    let bib = "@book{a,\n  title = {Open,\n}\n\n@book{b, title = {Fine}}\n";
+    std::fs::write(folder.join("refs.bib"), bib).unwrap();
+    let (mut viewer, _) = open(&folder);
+    press(&mut viewer, "gB");
+    let rows = listed(&viewer);
+    let broken = rows.iter().find(|row| row.starts_with("cannot be read"));
+    assert_eq!(
+        broken.map(String::as_str),
+        Some("cannot be read: @book{a, title = {Open, }\tline 1"),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|row| row.starts_with("b · 1×")), "{rows:?}");
+    press(&mut viewer, "cannot<CR>");
+    assert_eq!(
+        listed(&viewer)[0],
+        "close it: add the } it lacks at its end"
+    );
+    press(&mut viewer, "<CR>");
+    let mended = std::fs::read_to_string(folder.join("refs.bib")).unwrap();
+    assert_eq!(
+        mended,
+        "@book{a,\n  title = {Open,\n}}\n\n@book{b, title = {Fine}}\n"
+    );
+    // Taken out, the rest of the file stays as it was.
+    std::fs::write(folder.join("refs.bib"), bib).unwrap();
+    viewer.execute("bib drop 0");
+    let dropped = std::fs::read_to_string(folder.join("refs.bib")).unwrap();
+    assert_eq!(dropped, "@book{b, title = {Fine}}\n");
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn sources_cited_by_one_key_are_said_to_clash_and_one_is_renamed() {
+    let folder = directory("Words @k.\n#bibliography(\"refs.bib\")\n");
+    let bib = "@book{k, author = {Ann Ash}, title = {One}, year = {2001}}\n\n\
+               @book{k, author = {Bo Birch}, title = {Two}, year = {2002}}\n";
+    std::fs::write(folder.join("refs.bib"), bib).unwrap();
+    let (mut viewer, _) = open(&folder);
+    press(&mut viewer, "gB");
+    let rows = listed(&viewer);
+    let clashes = rows
+        .iter()
+        .filter(|row| row.contains("2 sources clash"))
+        .count();
+    assert_eq!(clashes, 2, "{rows:?}");
+    press(&mut viewer, "k · 2<CR>");
+    assert!(listed(&viewer)[0].starts_with("2 sources are cited as k"));
+    press(&mut viewer, "<CR>");
+    let renamed = std::fs::read_to_string(folder.join("refs.bib")).unwrap();
+    assert_eq!(
+        renamed,
+        bib.replacen("@book{k, author = {Bo", "@book{birch2002, author = {Bo", 1)
+    );
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn a_source_an_agent_proposes_is_added_only_when_the_user_takes_it() {
+    use super::super::agent::AgentEdits;
+    let folder = directory("Words.\n#bibliography(\"refs.bib\")\n");
+    std::fs::write(folder.join("refs.bib"), BIB).unwrap();
+    let (mut viewer, _) = open(&folder);
+    viewer.set_agent_edits(AgentEdits::Propose);
+    let entry = "@book{lamport1994, author = {Leslie Lamport}, title = {LaTeX}, year = {1994}}";
+    let added = viewer.agent_add_sources_checked(entry, false).unwrap();
+    let id = added.proposal.unwrap_or_else(|| panic!("proposed"));
+    assert!(added.keys.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(folder.join("refs.bib")).unwrap(),
+        BIB
+    );
+    // Withdrawn by the agent as any proposal.
+    viewer.withdraw_proposal(id).unwrap();
+    assert!(viewer.proposed_sources().is_empty());
+    // Shown first in the list; Enter, and it is added.
+    viewer.agent_add_sources_checked(entry, false).unwrap();
+    press(&mut viewer, "gB");
+    let rows = listed(&viewer);
+    assert!(
+        rows[4].starts_with("an agent proposes: lamport1994"),
+        "{rows:?}"
+    );
+    viewer.execute(&format!("bib proposed {}", viewer.proposed_sources()[0].0));
+    press(&mut viewer, "<CR>");
+    let written = std::fs::read_to_string(folder.join("refs.bib")).unwrap();
+    assert!(written.contains("lamport1994"), "{written}");
+    assert!(viewer.proposed_sources().is_empty());
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn u_right_after_a_change_of_the_bibliography_says_how_that_is_undone() {
+    let folder = directory("Words.\n#bibliography(\"refs.bib\")\n");
+    std::fs::write(folder.join("refs.bib"), BIB).unwrap();
+    let (mut viewer, _) = open(&folder);
+    press(&mut viewer, "xu");
+    assert_eq!(viewer.text(), Some("Words.\n#bibliography(\"refs.bib\")\n"));
+    press(&mut viewer, "x");
+    viewer.execute("bib remove! knuth1984");
+    press(&mut viewer, "<Esc>u");
+    assert!(said(&viewer).contains(":bib undo"), "{}", said(&viewer));
+    assert_eq!(viewer.text(), Some("ords.\n#bibliography(\"refs.bib\")\n"));
+    // Once: then u is the text's again.
+    press(&mut viewer, "u");
+    assert_eq!(viewer.text(), Some("Words.\n#bibliography(\"refs.bib\")\n"));
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn what_a_template_sets_is_said_in_the_document_manager_and_can_be_changed() {
+    let text = "#let conf(doc) = {\n  set text(size: 14pt)\n  set par(justify: true)\n  doc\n}\n\
+                #show: conf\nWords.\n";
+    let (mut viewer, folder) = editing(text);
+    press(&mut viewer, "gD");
+    let rows = listed(&viewer);
+    let row = |name: &str| {
+        let prefix = format!("{name}\t");
+        rows.iter()
+            .find(|row| row.starts_with(&prefix))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        row("font size"),
+        "font size\t14pt  (set by the template)",
+        "{rows:?}"
+    );
+    assert_eq!(
+        row("justified lines"),
+        "justified lines\ton  (set by the template)"
+    );
+    assert_eq!(row("font"), "font\tLibertinus Serif");
+    // Changed here, the rule stands behind the template's and holds.
+    press(&mut viewer, "font size<CR>12pt<CR>");
+    let now = viewer.text().unwrap_or_default();
+    let (template, rule) = (now.find("#show: conf"), now.find("#set text(size: 12pt)"));
+    assert!(template < rule && rule.is_some(), "{now}");
+    press(&mut viewer, "justified<CR>");
+    assert!(
+        viewer.text().unwrap_or_default().contains("justify: false"),
+        "off, from on"
+    );
+    compile(&mut viewer);
+    assert_eq!(viewer.document_revision, Some(viewer.revision));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn what_an_agent_changes_while_the_user_types_is_a_step_of_its_own() {
+    let (mut viewer, folder) = editing("One two.\n\nThree four.\n");
+    press(&mut viewer, "Aabc");
+    viewer
+        .agent_replace("Three", "Five", false, None, false)
+        .unwrap();
+    press(&mut viewer, "def<Esc>");
+    assert_eq!(viewer.text(), Some("One two.abcdef\n\nFive four.\n"));
+    // Back, the last first: the agent's change is never taken back with
+    // the user's typing, nor lost by it.
+    press(&mut viewer, "u");
+    let first = viewer.text().unwrap_or_default().to_owned();
+    assert!(
+        first.contains("Five"),
+        "the agent's change stays: {first:?}"
+    );
+    assert!(!first.contains("def"), "{first:?}");
+    press(&mut viewer, "u");
+    let second = viewer.text().unwrap_or_default().to_owned();
+    assert!(second.contains("Three"), "{second:?}");
+    press(&mut viewer, "u");
+    assert_eq!(viewer.text(), Some("One two.\n\nThree four.\n"));
+    // And forth again, all of it.
+    press(&mut viewer, "<C-r><C-r><C-r>");
+    assert_eq!(viewer.text(), Some("One two.abcdef\n\nFive four.\n"));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn every_insert_of_the_menu_is_put_in_whole_by_enter() {
+    use crate::typst_text::TEXT_INSERTS;
+    let mut wrong = Vec::new();
+    for insert in TEXT_INSERTS {
+        let (mut viewer, folder) = editing("Words.\n");
+        let word = insert.name.split(' ').next().unwrap_or_default();
+        press(&mut viewer, &format!("Go#{word}"));
+        // Down the list to it, as a user would.
+        let chosen = |viewer: &Viewer| {
+            viewer.completion.as_ref().and_then(|completion| {
+                let entry = completion.candidates.get(completion.chosen)?;
+                Some(entry.candidate.label.clone())
+            })
+        };
+        for _ in 0..30 {
+            if chosen(&viewer).as_deref() == Some(insert.name) {
+                break;
+            }
+            press(&mut viewer, "<C-n>");
+        }
+        let taken = chosen(&viewer);
+        press(&mut viewer, "<CR>");
+        // A list of files may be up: it is left.
+        press(&mut viewer, "<Esc><Esc>");
+        let text = viewer.text().unwrap_or_default().to_owned();
+        let left = text.contains(&format!("#{word}\n"));
+        if taken.as_deref() != Some(insert.name) || left {
+            wrong.push(format!("{}: chosen {taken:?}, text {text:?}", insert.name));
+        }
+        let _ = std::fs::remove_dir_all(folder);
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}

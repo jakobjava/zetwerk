@@ -177,6 +177,15 @@ pub(super) fn cut(text: &str, columns: usize) -> String {
     shown
 }
 
+/// What an item of a list is, and (behind a tab) what it is now, each
+/// cut where long: the second has what the first leaves of a row of a
+/// hundred characters, so that what is said of a starter is said whole.
+fn columns(label: &str) -> (String, String) {
+    let (name, now) = label.split_once('\t').unwrap_or((label, ""));
+    let room = 100 - name.chars().count().min(60);
+    (cut(name, 70), cut(now, room))
+}
+
 /// The things of the insert menu that go with `typed`, each with how
 /// well: behind a hash in running text, by their names in an equation.
 /// `begun` is the byte the typed word begins at.
@@ -845,12 +854,7 @@ impl Viewer {
                 .iter()
                 .skip(first)
                 .take(LIST_ROWS)
-                .map(|item| {
-                    // What it is, and (behind a tab) what it is now.
-                    let label = &picker.items[*item].0;
-                    let (name, now) = label.split_once('\t').unwrap_or((label, ""));
-                    (cut(name, 70), cut(now, 40))
-                })
+                .map(|item| columns(&picker.items[*item].0))
                 .collect();
             let title = format!("{}: {}\u{2588}", picker.title, picker.query);
             let chosen = picker.chosen.saturating_sub(first);
@@ -960,5 +964,17 @@ mod tests {
         assert!(score("Main result", "res") > score("Preserved", "res"));
         assert!(score("Proof", "pro") > score("Approximation", "pro"));
         assert!(score("anything", "").is_some());
+    }
+
+    #[test]
+    fn what_is_said_of_an_item_is_cut_only_where_the_row_is_full() {
+        let report = "report\ttitle page, contents, chapters, bibliography";
+        assert_eq!(
+            columns(report).1,
+            "title page, contents, chapters, bibliography"
+        );
+        let long = format!("{}\t{}", "n".repeat(80), "w".repeat(80));
+        let (name, now) = columns(&long);
+        assert_eq!((name.chars().count(), now.chars().count()), (71, 41));
     }
 }

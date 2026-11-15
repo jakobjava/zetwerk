@@ -274,6 +274,16 @@ pub struct Issue {
 /// waiting does no harm.
 pub type Check = Box<dyn FnOnce() -> Result<Report, String> + Send>;
 
+/// The languages of two letters (ISO 639-1), for `:lang`: Typst takes
+/// any two or three letters, and a slip is not a language.
+const LANGUAGE_CODES: &str = "aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br \
+    bs ca ce ch co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga gd \
+    gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja jv ka kg ki kj kk \
+    kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi mk ml mn mr ms mt my na \
+    nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se \
+    sg si sk sl sm sn so sq sr ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk \
+    ur uz ve vi vo wa wo xh yi yo za zh zu";
+
 impl Viewer {
     /// Takes what the user has to say about spelling and grammar.
     pub(super) fn set_language(&mut self, settings: &Settings) {
@@ -650,6 +660,13 @@ impl Viewer {
                 let chosen = wanted.trim_start_matches("take ").parse().ok();
                 self.take_suggestion(chosen);
             }
+            ("spell", language)
+                if !matches!(language, "auto" | "document")
+                    && zetwerk_language::find(language, &self.language.settings.directories)
+                        .is_none() =>
+            {
+                self.offer_dictionaries(language, "spell");
+            }
             ("spell", language) => {
                 let document = matches!(language, "auto" | "document");
                 self.language.settings.language = (!document).then(|| language.to_owned());
@@ -681,6 +698,55 @@ impl Viewer {
             _ => return false,
         }
         true
+    }
+
+    /// Where no dictionary is installed for `language`: says so, and
+    /// puts up those that are, each to be had by `command` (`spell` by
+    /// its name, `lang` by its language).
+    pub(super) fn offer_dictionaries(&mut self, language: &str, command: &str) {
+        let installed = zetwerk_language::installed(&self.language.settings.directories);
+        let mut items: Vec<(String, super::assist::Target)> = Vec::new();
+        for name in installed {
+            let code = name
+                .split(['_', '-'])
+                .next()
+                .unwrap_or(&name)
+                .to_lowercase();
+            let (label, given) = if command == "lang" {
+                (format!("{code}\t{name}"), code)
+            } else {
+                (format!("{name}\t{code}"), name.clone())
+            };
+            if !items
+                .iter()
+                .any(|(listed, _)| listed.split('\t').next() == label.split('\t').next())
+            {
+                items.push((
+                    label,
+                    super::assist::Target::Command(format!("{command} {given}")),
+                ));
+            }
+        }
+        let wanted = zetwerk_language::package(language);
+        if items.is_empty() {
+            return self.alert(format!(
+                "no dictionary for {language} is installed, nor any other: {wanted} or the \
+                 like brings one"
+            ));
+        }
+        self.open_picker("dictionaries installed", items, 0);
+        self.alert(format!(
+            "no dictionary for {language} is installed ({wanted} would bring one): those \
+             that are are listed"
+        ));
+    }
+
+    /// Whether `code` names a language: one of the codes of two letters
+    /// (ISO 639-1), or one a dictionary is installed for.
+    pub(super) fn knows_language(&self, code: &str) -> bool {
+        let code = code.to_ascii_lowercase();
+        LANGUAGE_CODES.split_whitespace().any(|known| known == code)
+            || zetwerk_language::find(&code, &self.language.settings.directories).is_some()
     }
 
     /// Has the thread go by the settings as they are now, and all that
@@ -994,7 +1060,7 @@ impl Viewer {
                 .to_owned());
         }
         let job = self.language_job(Scope::All, true);
-        let job = job.ok_or("the window only shows the document; there is no text to check")?;
+        let job = job.ok_or(super::agent::NOT_EDITING)?;
         let handle = self.language_service().and_then(Service::handle);
         let handle = handle.ok_or("the checker could not be started")?;
         let revision = self.revision;
@@ -1443,5 +1509,36 @@ mod tests {
         press_and_settle(&mut viewer, ":grammar off<CR>");
         assert_eq!(lines(&mut viewer, PAGE_GRAMMAR), []);
         remove(&directory);
+    }
+
+    #[test]
+    fn a_language_without_a_dictionary_is_not_taken_and_those_there_are_offered() {
+        let (mut viewer, directory) = checking("Words.\n", false);
+        let listed = |viewer: &Viewer| -> Vec<String> {
+            let picker = viewer.picker.as_ref();
+            let listing = picker.map(|picker| picker.listing().1).unwrap_or_default();
+            listing.into_iter().map(str::to_owned).collect()
+        };
+        press(&mut viewer, ":spell xyz<CR>");
+        assert_eq!(viewer.language.settings.language, None);
+        assert_eq!(
+            listed(&viewer),
+            ["de_DE\tde", "en_GB\ten", "nl_NL\tnl"],
+            "{:?}",
+            viewer.message.as_ref().map(|message| &message.text)
+        );
+        press(&mut viewer, "nl<CR>");
+        assert_eq!(viewer.language.settings.language.as_deref(), Some("nl_NL"));
+        // The language of the document likewise: a slip is no language.
+        press(&mut viewer, ":lang xq<CR>");
+        assert_eq!(viewer.text(), Some("Words.\n"));
+        assert_eq!(listed(&viewer), ["de\tde_DE", "en\ten_GB", "nl\tnl_NL"]);
+        press(&mut viewer, "<Esc>:lang fr<CR>");
+        assert!(
+            viewer
+                .text()
+                .is_some_and(|text| text.contains("lang: \"fr\""))
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

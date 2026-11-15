@@ -11,6 +11,7 @@
 //! changed here so that nobody has to look at it.
 
 use typst::World;
+use typst::syntax::Source;
 
 use super::assist::Target;
 use super::{Edited, Viewer};
@@ -399,6 +400,100 @@ pub(super) fn nearest(typed: &str, names: impl IntoIterator<Item = String>) -> V
         .collect()
 }
 
+/// Settings that cannot be asked of Typst by name in a context: they
+/// are no field of an element (the paper sets the page's width and
+/// height).
+const UNASKED: &[&str] = &["page.paper"];
+
+/// How far into the main file a template may be applied (`#show: …`)
+/// for what it sets to be asked of Typst: before it, the text is
+/// typeset to ask, and that is not to cost much.
+const TEMPLATE_WITHIN: usize = 20_000;
+
+/// The text that asks Typst for what holds of every setting where it
+/// stands, as a `metadata` labelled `label`: each as Typst writes it.
+fn asking(label: &str) -> String {
+    let asked: Vec<String> = SETTINGS
+        .iter()
+        .map(|setting| {
+            let field = format!("{}.{}", setting.function, setting.key);
+            if UNASKED.contains(&field.as_str()) {
+                "none".to_owned()
+            } else {
+                format!("repr({field})")
+            }
+        })
+        .collect();
+    format!(
+        "\n#context [#metadata(({},)) <{label}>]\n",
+        asked.join(", ")
+    )
+}
+
+/// What a template that `source` applies (`#show: conf.with(…)`) sets:
+/// for each setting, as Typst writes it, where it is not what holds
+/// before the template. Typst is asked, with the text up to the
+/// template typeset by itself in `world`; nothing where there is no
+/// template near the beginning, or that text is not typeset.
+fn template_sets(world: &zetwerk_typst::ProjectWorld, source: &Source) -> Vec<Option<String>> {
+    use typst::foundations::{Label, Value};
+    use typst::introspection::{Introspector, MetadataElem};
+    use typst::syntax::SyntaxKind;
+    use typst::utils::PicoStr;
+    let text = source.text();
+    let root = typst::syntax::LinkedNode::new(source.root());
+    let template = root
+        .children()
+        .filter(|node| node.kind() == SyntaxKind::ShowRule)
+        .find(|node| {
+            let rule = &text[node.range()];
+            let rest = rule.strip_prefix("show").map(str::trim_start);
+            rest.is_some_and(|rest| rest.starts_with(':'))
+        });
+    let Some(template) = template.filter(|node| node.offset() <= TEMPLATE_WITHIN) else {
+        return Vec::new();
+    };
+    let before = text[..template.offset()].trim_end_matches('#');
+    let asked = format!(
+        "{before}{}#{}\n{}",
+        asking("zetwerk-before"),
+        &text[template.range()],
+        asking("zetwerk-behind")
+    );
+    let world = world.with_text(Source::new(source.id(), asked));
+    let compiled = zetwerk_typst::compile(&world);
+    let Some(document) = compiled.document else {
+        return Vec::new();
+    };
+    let said = |label: &str| -> Option<Vec<String>> {
+        let label = Label::new(PicoStr::intern(label))?;
+        let found = document.introspector().query_label(label).ok()?;
+        let metadata = found.to_packed::<MetadataElem>()?;
+        let Value::Array(values) = &metadata.value else {
+            return None;
+        };
+        let written = |value: &Value| match value {
+            Value::Str(text) => Some(text.as_str().to_owned()),
+            _ => None,
+        };
+        Some(
+            values
+                .iter()
+                .map(written)
+                .map(Option::unwrap_or_default)
+                .collect(),
+        )
+    };
+    let (Some(before), Some(behind)) = (said("zetwerk-before"), said("zetwerk-behind")) else {
+        return Vec::new();
+    };
+    before
+        .into_iter()
+        .zip(behind)
+        .map(|(before, behind)| (before != behind && !behind.is_empty()).then_some(behind))
+        .collect()
+}
+
 /// A text as Typst writes a string.
 fn quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
@@ -505,15 +600,20 @@ impl Viewer {
             return;
         };
         let source = editor.source();
+        // What a template sets, where the document's own rules do not.
+        let main = self.project.source(self.project.main()).unwrap_or(source);
+        let templated = template_sets(&self.project.snapshot(), main);
         let mut items: Vec<(String, Target)> = SETTINGS
             .iter()
             .enumerate()
             .map(|(row, setting)| {
                 let written = typst_text::rule_value(source, setting.function, setting.key);
-                let now = written.map_or_else(
-                    || setting.usual.to_owned(),
-                    |written| listed(setting, &written),
-                );
+                let template = templated.get(row).and_then(Option::as_deref);
+                let now = match (written, template) {
+                    (Some(written), _) => listed(setting, &written),
+                    (None, Some(set)) => format!("{}  (set by the template)", listed(setting, set)),
+                    (None, None) => setting.usual.to_owned(),
+                };
                 (format!("{}\t{now}", setting.name), Target::Choose(row))
             })
             .collect();
@@ -537,7 +637,11 @@ impl Viewer {
             } else {
                 other.1
             };
-            let now = written.as_deref().unwrap_or(usual);
+            // Or what a template makes it.
+            let main = self.project.source(self.project.main());
+            let templated = main.map(|main| template_sets(&self.project.snapshot(), main));
+            let template = templated.and_then(|mut set| set.get_mut(row).and_then(Option::take));
+            let now = written.as_deref().or(template.as_deref()).unwrap_or(usual);
             let (label, value) = if now == one.1 { other } else { one };
             return self.apply_setting(row, value, label);
         }
@@ -685,6 +789,9 @@ impl Viewer {
             fonts.contains(&typed.trim().to_lowercase())
         };
         match typed_value(setting.free, typed) {
+            Some(_) if setting.free == Free::Language && !self.knows_language(typed.trim()) => {
+                self.refuse_setting(row, typed);
+            }
             Some(value) if setting.free != Free::Font || installed() => {
                 self.apply_setting(row, &value, typed.trim());
             }
@@ -796,5 +903,28 @@ mod tests {
                 setting.name
             );
         }
+    }
+
+    #[test]
+    fn every_setting_but_those_unasked_can_be_asked_of_typst() {
+        use std::sync::Arc;
+        use zetwerk_typst::{Environment, FontSet, Project};
+        let env = Environment::new(FontSet::Embedded);
+        let text = format!("Words.{}", asking("asked"));
+        let project = Project::in_memory(
+            Arc::clone(&env),
+            std::path::PathBuf::from("/"),
+            "main.typ",
+            text,
+        )
+        .unwrap_or_else(|| panic!("a project"));
+        let world = project.snapshot();
+        let compiled = zetwerk_typst::compile(&world);
+        let said: Vec<String> = compiled
+            .errors
+            .iter()
+            .map(|error| zetwerk_typst::describe(&world, error))
+            .collect();
+        assert!(said.is_empty(), "{said:?}");
     }
 }
