@@ -36,7 +36,7 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("equation (while typing)", "$", Does::Tells),
     (
-        "to the next place to fill in (‹…›, or out of brackets); what is typed takes its place",
+        "to the next ‹place to fill in›, or out of brackets",
         "Tab",
         Does::Tells,
     ),
@@ -267,7 +267,7 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("doc"),
     ),
     (
-        "document: styles — headings, links, code, captions, tables, page head and foot, theorems, …",
+        "document: styles — headings, links, captions, tables, theorems, …",
         ":styles",
         Does::Run("styles"),
     ),
@@ -448,7 +448,7 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("nextkeys"),
     ),
     (
-        "the rest of a name or word, faint behind the cursor (Tab takes it): on or off",
+        "the rest of a word, faint behind the cursor (Tab takes it): on or off",
         ":ghost",
         Does::Run("ghost"),
     ),
@@ -500,7 +500,9 @@ impl Viewer {
                     Does::Ask(command) => Target::Ask((*command).to_owned()),
                     Does::Tells => Target::Nothing,
                 };
-                (format!("{what}   {keys}"), target)
+                // The keys apart: they are what is looked for, and a
+                // long description is cut at its end.
+                (format!("{what}\t{keys}"), target)
             })
             .collect();
         self.open_picker("do", items, 0);

@@ -249,7 +249,12 @@ fn an_agent_never_changes_the_next_document_by_a_revision_of_the_last() {
 #[test]
 #[ignore = "exploration: where the lists stand in small windows"]
 fn lists_in_small_windows() {
-    for (ui, window) in [(1.0, (1000, 620)), (1.6, (1000, 620)), (1.6, (700, 500)), (1.0, (500, 400))] {
+    for (ui, window) in [
+        (1.0, (1000, 620)),
+        (1.6, (1000, 620)),
+        (1.6, (700, 500)),
+        (1.0, (500, 400)),
+    ] {
         for command in ["help", "styles", "doc", "bib", "recent"] {
             let (mut viewer, directory) = editing(RICH);
             std::fs::write(directory.join("refs.bib"), BIB).unwrap();
@@ -258,10 +263,56 @@ fn lists_in_small_windows() {
             viewer.scale = viewer.display * ui;
             viewer.arrange();
             viewer.execute(command);
-            let _ = viewer.scene(&|_| false);
-            let placed = viewer.pointer.placed;
-            println!("{ui} {window:?} {command:8} {placed:?}");
+            let scene = viewer.scene(&|_| false);
+            let top = (f64::from(window.1) / 4.0).round() as f32;
+            let placed: Vec<(f32, f32, f32, f32)> = scene
+                .quads
+                .iter()
+                .filter(|quad| (quad.y - top).abs() < 1.0)
+                .map(|quad| (quad.x, quad.y, quad.width, quad.height))
+                .collect();
+            println!("ui {ui} {window:?} {command:8} {placed:?}");
             let _ = std::fs::remove_dir_all(directory);
         }
     }
+}
+
+#[test]
+fn the_list_of_all_there_is_to_do_shows_every_entrys_keys_whole() {
+    let (mut viewer, directory) = editing("Words.\n");
+    press(&mut viewer, "g?");
+    let Some(picker) = &viewer.picker else {
+        panic!("the list is up");
+    };
+    let (_, shown, _) = picker.listing();
+    let keys: Vec<&str> = palette::entries().map(|(keys, _)| keys).collect();
+    assert_eq!(shown.len(), keys.len());
+    for (label, keys) in shown.iter().zip(keys) {
+        // What it is, cut where long, and its keys in a column of their
+        // own, which is not.
+        let (what, listed) = label.split_once('\t').unwrap_or((label, ""));
+        assert_eq!(listed, keys, "{label}");
+        assert!(what.chars().count() <= 70, "{what} is cut");
+        assert!(keys.chars().count() <= 40, "{keys} is cut");
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_list_wider_than_the_window_begins_in_it() {
+    let (mut viewer, directory) = editing(RICH);
+    viewer.resize((500, 400), 1.0);
+    viewer.ui = 1.6;
+    viewer.scale = viewer.display * viewer.ui;
+    viewer.arrange();
+    press(&mut viewer, "g?");
+    let scene = viewer.scene(&|_| false);
+    let list = scene
+        .quads
+        .iter()
+        .find(|quad| (quad.y - 100.0).abs() < 1.0)
+        .unwrap_or_else(|| panic!("the list is drawn a quarter down"));
+    assert!(list.width > 500.0, "the list is wider than the window");
+    assert!(list.x >= 0.0, "it begins at {}", list.x);
+    let _ = std::fs::remove_dir_all(directory);
 }

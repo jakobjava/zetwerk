@@ -830,9 +830,12 @@ impl Viewer {
             let title = format!("{}: {}\u{2588}", picker.title, picker.query);
             let chosen = picker.chosen.saturating_sub(first);
             let markup = chrome::list_markup(Some(&title), &rows, chosen, None);
-            // In the middle, a third of the way down.
+            // In the middle, a third of the way down; where the window is
+            // too narrow for it, from its left edge: what is cut off is
+            // the end of the lines, not their beginning.
             self.panel(scene, has, &markup, |(panel_width, _)| {
-                ((width - panel_width) / 2.0, (height / 4.0).max(margin))
+                let left = ((width - panel_width) / 2.0).max(margin.min(width / 2.0));
+                (left, (height / 4.0).max(margin))
             });
             self.pointer.listed(true, first, rows.len(), 1, 0);
         }
