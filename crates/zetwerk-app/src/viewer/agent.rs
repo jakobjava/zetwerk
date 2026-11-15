@@ -715,7 +715,7 @@ impl Viewer {
             &self.document,
             self.document_revision == Some(self.revision) && !self.looks_back(),
         ) {
-            let introspector = document.introspector();
+            let introspector = document.document().introspector();
             let headings = introspector.elements().query(&HeadingElem::ELEM.select());
             for heading in &headings {
                 let position = heading
@@ -772,7 +772,7 @@ impl Viewer {
             .map_err(|_| "the compiled source is gone".to_owned())?;
         let near = self.cursor_page.get();
         let shown = world.shown_at(file, offset);
-        let position = zetwerk_typst::locate(&document, &source, shown, near)
+        let position = zetwerk_typst::locate(document.pages(), &source, shown, near)
             .ok_or("nothing of that place or near it is on a page")?;
         // That is the line; the page map knows the character.
         let exact = document.pages().get(position.page).and_then(|page| {
@@ -844,7 +844,7 @@ impl Viewer {
     pub fn for_export(&self) -> Result<Export, String> {
         let (_, document, world) = self.current_pages()?;
         Ok(Export {
-            document: document.clone(),
+            document: document.document().clone(),
             world: world.clone(),
             main: self.project.main_path().map(std::path::Path::to_owned),
         })
@@ -858,7 +858,7 @@ impl Viewer {
     ) -> Result<
         (
             &super::Editor,
-            &std::sync::Arc<typst_layout::PagedDocument>,
+            &super::local::Pages,
             &std::sync::Arc<zetwerk_typst::ProjectWorld>,
         ),
         String,

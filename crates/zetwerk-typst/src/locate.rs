@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use typst::layout::{Frame, FrameItem, Point, Transform};
 use typst::syntax::{LinkedNode, Side, Source, Span};
-use typst_layout::PagedDocument;
+use typst_layout::Page;
 
 /// How many syntax leaves on either side of the cursor are tried.
 const REACH: usize = 48;
@@ -24,10 +24,10 @@ pub struct PagePosition {
     pub y: f64,
 }
 
-/// Where the text at byte `offset` of `source` is on the pages of
-/// `document`, or the text nearest to it that is on a page at all.
+/// Where the text at byte `offset` of `source` is on `pages`, or the
+/// text nearest to it that is on a page at all.
 ///
-/// `source` has to be the very source the document was compiled from: an
+/// `source` has to be the very source the pages were compiled from: an
 /// edit gives its syntax nodes new numbers, and the glyphs carry the old.
 ///
 /// The search begins at page `near` and goes outwards from it, and ends
@@ -35,13 +35,8 @@ pub struct PagePosition {
 /// where it was, and of text that is on many pages (a heading and its
 /// running title) the nearest is the one meant.
 #[must_use]
-pub fn locate(
-    document: &PagedDocument,
-    source: &Source,
-    offset: usize,
-    near: usize,
-) -> Option<PagePosition> {
-    locate_near(document, source, offset, near, usize::MAX)
+pub fn locate(pages: &[Page], source: &Source, offset: usize, near: usize) -> Option<PagePosition> {
+    locate_near(pages, source, offset, near, usize::MAX)
 }
 
 /// [`locate`], looking no further than `reach` pages from page `near`
@@ -49,7 +44,7 @@ pub fn locate(
 /// page (just typed) is not looked for through all of a long document.
 #[must_use]
 pub fn locate_near(
-    document: &PagedDocument,
+    pages: &[Page],
     source: &Source,
     offset: usize,
     near: usize,
@@ -77,7 +72,6 @@ pub fn locate_near(
     // that shows the cursor's place, or the one nearest to that.
     let within = offset.saturating_sub(at.offset());
     let mut best: Option<((usize, usize), PagePosition)> = None;
-    let pages = document.pages();
     let near = near.min(pages.len().saturating_sub(1));
     // `near`, the page after it, the page before it, two after it, ...
     let outwards = (0..pages.len().min(reach.saturating_add(1))).flat_map(|distance| {
@@ -181,7 +175,7 @@ mod tests {
         let source = project.source(project.main()).expect("the main source");
         let page_of = |needle: &str| {
             let offset = text.find(needle).expect("the needle is in the text");
-            locate(&document, source, offset, 0).map(|position| position.page)
+            locate(document.pages(), source, offset, 0).map(|position| position.page)
         };
         assert_eq!(page_of("First"), Some(0));
         assert_eq!(page_of("page* here"), Some(1));
@@ -200,14 +194,15 @@ mod tests {
         let document = compile(&world).document.expect("it compiles");
         let source = project.source(project.main()).expect("the main source");
         let offset = text.find("Fourth").expect("the needle is in the text");
-        let page =
-            |reach| locate_near(&document, source, offset, 0, reach).map(|position| position.page);
+        let page = |reach| {
+            locate_near(document.pages(), source, offset, 0, reach).map(|position| position.page)
+        };
         assert_eq!(page(usize::MAX), Some(3));
         assert_eq!(page(3), Some(3));
         // Not that far: the nearest text on the pages looked at, or none.
         assert_ne!(page(1), Some(3));
         assert_eq!(
-            locate(&document, source, offset, 0).map(|position| position.page),
+            locate(document.pages(), source, offset, 0).map(|position| position.page),
             Some(3)
         );
     }
@@ -232,8 +227,8 @@ mod tests {
         for word in ["w0 ", "w40 ", "w80 ", "w120 ", "w160 ", "w199"] {
             let offset = text.find(word).expect("the word is in the text");
             // Wherever the search begins.
-            let from_end = locate(&document, source, offset, usize::MAX);
-            let position = locate(&document, source, offset, 0).expect("it is on a page");
+            let from_end = locate(document.pages(), source, offset, usize::MAX);
+            let position = locate(document.pages(), source, offset, 0).expect("it is on a page");
             assert_eq!(from_end, Some(position));
             let now = (position.page, position.y);
             assert!(now > last, "{word} at {now:?} after {last:?}");

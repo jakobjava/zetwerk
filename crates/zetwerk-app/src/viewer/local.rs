@@ -8,6 +8,7 @@
 //! at once, as Typst sets it. The whole follows when typing pauses, and
 //! puts right what a part cannot know: numbers, and where pages break.
 
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
@@ -47,6 +48,104 @@ thread_local! {
     pub(super) static PARTS_TYPESET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The pages on screen: those of a document typeset whole, or those with
+/// a part typeset since put into one of them.
+///
+/// What draws a page or finds the text on it asks [`Pages::pages`]. What
+/// asks about the document as a whole (what can be referred to, what a
+/// name stands for) asks [`Pages::whole`]: the pages with a part put in,
+/// wrapped as a document again, cost Typst a look at all of them (15 ms
+/// on 312 pages, a third of a key there), with every key.
+#[derive(Clone)]
+pub(super) struct Pages {
+    /// The document typeset whole, and what it was typeset of.
+    whole: Arc<PagedDocument>,
+    world: Arc<ProjectWorld>,
+    /// Its pages with a part put into one of them, and which, if one is.
+    spliced: Option<(usize, EcoVec<Page>)>,
+    /// Those as a document, made when it is first asked for.
+    wrapped: OnceCell<Arc<PagedDocument>>,
+    /// The items of a page of `whole` that stand around its text, and
+    /// which page, as last asked for (see [`Pages::furniture`]).
+    furniture: RefCell<Option<(usize, Arc<HashSet<usize>>)>>,
+}
+
+impl Pages {
+    /// The pages of `whole`, typeset of `world`, as they are.
+    pub(super) fn new(whole: Arc<PagedDocument>, world: Arc<ProjectWorld>) -> Self {
+        Self {
+            whole,
+            world,
+            spliced: None,
+            wrapped: OnceCell::new(),
+            furniture: RefCell::new(None),
+        }
+    }
+
+    /// The page a part was put into, if one was.
+    pub(super) fn spliced_at(&self) -> Option<usize> {
+        self.spliced.as_ref().map(|(index, _)| *index)
+    }
+
+    /// The items of page `index` of the document typeset whole that stand
+    /// around the text of every page (a running head, the page number):
+    /// what a part put in does not move. Found once for a page that parts
+    /// are put into key after key.
+    fn furniture(&self, index: usize) -> Arc<HashSet<usize>> {
+        if let Some((of, items)) = &*self.furniture.borrow()
+            && *of == index
+        {
+            return Arc::clone(items);
+        }
+        let items = self
+            .whole
+            .pages()
+            .get(index)
+            .map_or_else(HashSet::new, |page| {
+                let map = PageMap::build(&self.world, &page.frame);
+                map.glyphs()
+                    .iter()
+                    .filter(|glyph| glyph.furniture)
+                    .filter_map(|glyph| map.runs().get(glyph.run)?.path.first().copied())
+                    .collect()
+            });
+        let items = Arc::new(items);
+        *self.furniture.borrow_mut() = Some((index, Arc::clone(&items)));
+        items
+    }
+
+    /// The pages, as they are shown.
+    pub(super) fn pages(&self) -> &[Page] {
+        self.spliced
+            .as_ref()
+            .map_or(self.whole.pages(), |(_, pages)| pages)
+    }
+
+    /// The document typeset whole that the pages are of.
+    pub(super) fn whole(&self) -> &Arc<PagedDocument> {
+        &self.whole
+    }
+
+    /// Whether the pages are those of the document typeset whole, with
+    /// no part put in.
+    pub(super) fn is_whole(&self) -> bool {
+        self.spliced.is_none()
+    }
+
+    /// The pages as a document, for what is to be made of them as they
+    /// are shown (a PDF of the text as it is): wrapped the first time it
+    /// is asked for, where a part was put in.
+    pub(super) fn document(&self) -> &Arc<PagedDocument> {
+        let Some((_, pages)) = &self.spliced else {
+            return &self.whole;
+        };
+        self.wrapped.get_or_init(|| {
+            let info = self.whole.info().clone();
+            Arc::new(PagedDocument::new(pages.clone(), info))
+        })
+    }
+}
+
 impl Viewer {
     /// Typesets what changed since the pages on screen were made, by
     /// itself, and puts it into the page it is on. Afterwards the pages
@@ -69,13 +168,20 @@ impl Viewer {
     /// See [`Viewer::typeset_locally`].
     fn put_part_in(&mut self) -> Result<(), String> {
         let started = Instant::now();
-        let (Some(document), Some(before)) = (self.document.clone(), self.compiled_world.clone())
-        else {
+        let (Some(shown), Some(was)) = (self.document.clone(), self.compiled_world.clone()) else {
             return Err("nothing compiled yet".to_owned());
         };
+        // The part holds all that changed since the pages were typeset
+        // whole, and goes into the page as it was then: what a part before
+        // it pushed off the foot of the page comes back where this one is
+        // shorter.
+        let before = Arc::clone(&shown.world);
+        let pages = shown.whole.pages();
+        if self.back_at_whole(&shown) {
+            return Ok(());
+        }
         // The page: where the cursor was last found, or one beside it.
         let near = self.cursor_page.get();
-        let pages = document.pages();
         let page_of = |region: &local::Region| {
             let shows = |index: &usize| {
                 let page = pages.get(*index);
@@ -104,16 +210,7 @@ impl Viewer {
             return Err("a left page with margins of two sides is typeset whole".to_owned());
         }
         // What every page has around its text stays where it is.
-        let map = self
-            .maps
-            .entry(index)
-            .or_insert_with(|| PageMap::build(&before, &page.frame));
-        let stays: HashSet<usize> = map
-            .glyphs()
-            .iter()
-            .filter(|glyph| glyph.furniture)
-            .filter_map(|glyph| map.runs().get(glyph.run)?.path.first().copied())
-            .collect();
+        let stays = shown.furniture(index);
         let foot = local::foot_of_text(&part.typeset).ok_or("the foot of the text is not known")?;
         let frame = local::splice(
             &page.frame,
@@ -128,16 +225,26 @@ impl Viewer {
         if let Some(slot) = patched.make_mut().get_mut(index) {
             slot.frame = frame;
         }
-        let info = document.info().clone();
-        self.document = Some(Arc::new(PagedDocument::new(patched, info)));
-        self.compiled_world = Some(Arc::new(part.world));
+        let other = shown.spliced_at().filter(|other| *other != index);
+        let world = Arc::new(part.world);
+        // The page put in is mapped anew, and the one the part before was
+        // put in, if that is another (it is as typeset whole again); the
+        // others stand as they stood, the text they show moved with what
+        // changed.
+        self.maps_moved(&was, &world, &[Some(index), other]);
+        self.document = Some(Pages {
+            spliced: Some((index, patched)),
+            wrapped: OnceCell::new(),
+            ..shown
+        });
+        self.compiled_world = Some(world);
         self.document_revision = Some(part.revision);
         self.predicted = None;
         self.predicted_at = None;
-        self.maps.clear();
-        self.page_lines.get_mut().clear();
         self.landed.set(None);
-        self.planned.retain(|(planned, _, _), _| *planned != index);
+        self.planned
+            .retain(|(planned, _, _), _| *planned != index && Some(*planned) != other);
+        self.margin_pages_changed(&[Some(index), other]);
         self.stats.local += 1;
         self.stats.local_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(())
@@ -265,6 +372,81 @@ impl Viewer {
             typeset,
         };
         Ok((part, index))
+    }
+}
+
+impl Viewer {
+    /// Shows the pages typeset whole again where the text is what they
+    /// were typeset of (all typed since was taken back), in place of
+    /// those with a part: returns whether it is.
+    fn back_at_whole(&mut self, shown: &Pages) -> bool {
+        let Some(editor) = &self.editor else {
+            return false;
+        };
+        let file = editor.file();
+        let same = shown
+            .world
+            .written(file)
+            .is_ok_and(|written| written.text() == editor.text());
+        if shown.is_whole() || !same || self.stale_files.iter().any(|stale| *stale != file) {
+            return false;
+        }
+        let world = Arc::clone(&shown.world);
+        let other = shown.spliced_at();
+        if let Some(was) = self.compiled_world.clone() {
+            self.maps_moved(&was, &world, &[other]);
+        }
+        self.document = Some(Pages {
+            spliced: None,
+            wrapped: OnceCell::new(),
+            ..shown.clone()
+        });
+        self.compiled_world = Some(world);
+        self.document_revision = Some(self.revision);
+        self.predicted = None;
+        self.predicted_at = None;
+        self.landed.set(None);
+        self.planned
+            .retain(|(planned, _, _), _| Some(*planned) != other);
+        self.margin_pages_changed(&[other]);
+        true
+    }
+
+    /// The maps and the lines of the pages, which were of the text of
+    /// `was`, made those of the text of `now`: where a page stays as it
+    /// was, the text it shows only moved with what changed (as places do,
+    /// see [`super::Change`]). Those of the pages `renew`, and those that
+    /// show any of what changed, are made anew when they are asked for.
+    fn maps_moved(&mut self, was: &ProjectWorld, now: &ProjectWorld, renew: &[Option<usize>]) {
+        let file = self.file_id();
+        let changed = match (was.written(file), now.written(file)) {
+            (Ok(was), Ok(now)) => match difference(was.text(), now.text()) {
+                Difference::Nothing => None,
+                Difference::Replacement {
+                    offset,
+                    removed,
+                    text,
+                } => Some((offset..offset + removed, text.len())),
+            },
+            _ => {
+                self.maps.clear();
+                self.page_lines.get_mut().clear();
+                return;
+            }
+        };
+        let kept = |index: &usize| !renew.contains(&Some(*index));
+        self.maps.retain(|index, map| {
+            kept(index)
+                && changed
+                    .as_ref()
+                    .is_none_or(|(taken, put)| map.shift(file, taken, *put))
+        });
+        self.page_lines.get_mut().retain(|index, lines| {
+            kept(index)
+                && changed
+                    .as_ref()
+                    .is_none_or(|(taken, put)| lines.shift(file, taken, *put))
+        });
     }
 }
 

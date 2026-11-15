@@ -189,6 +189,12 @@ fn placed(world: &ProjectWorld, frame: &typst::layout::Frame) -> Vec<Placed> {
 struct Tally {
     keys: usize,
     local: usize,
+    /// Keys whose page was worked out on its line, and keys after which
+    /// the page waited for all of the text to be typeset.
+    predicted: u64,
+    declined: u64,
+    /// The keys worked out on their line, by what became of the lines.
+    predicted_lines: BTreeMap<String, usize>,
     /// Keys after which a part typeset by itself showed what the whole
     /// does not: by kind, with the first walk that showed it.
     differs: BTreeMap<String, (usize, String)>,
@@ -390,9 +396,13 @@ fn snapshot_aside(viewer: &mut Viewer) -> (u64, ProjectWorld) {
 /// with what all of the text typeset at once makes of it: where every
 /// glyph stands, to a tenth of a point.
 fn compare_prediction(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() -> String) {
-    let Some((index, page)) =
-        (viewer.predicted.as_ref()).map(|shown| (shown.index, shown.page.clone()))
-    else {
+    let Some((index, page, lines)) = (viewer.predicted.as_ref()).map(|shown| {
+        (
+            shown.index,
+            shown.page.clone(),
+            (shown.lines, shown.justified),
+        )
+    }) else {
         return;
     };
     let Some(shown_world) = viewer.compiled_world.clone() else {
@@ -429,7 +439,7 @@ fn compare_prediction(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
             .max()
             .unwrap_or(0);
         format!(
-            "predicted glyphs stand elsewhere (by {} tenths of a point or less)",
+            "predicted glyphs stand elsewhere, lines {lines:?} (by {} tenths of a point or less)",
             if worst <= 5 {
                 5
             } else {
@@ -437,7 +447,7 @@ fn compare_prediction(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
             }
         )
     } else {
-        "the prediction shows a different number of glyphs".to_owned()
+        format!("the prediction shows a different number of glyphs, lines {lines:?}")
     };
     let detail = || {
         let first = here
@@ -545,7 +555,7 @@ fn marks_on_page(viewer: &Viewer) -> Vec<String> {
         return Vec::new();
     };
     let whole = matches!((&viewer.document, &viewer.whole),
-        (Some(document), Some(whole)) if Arc::ptr_eq(document, whole));
+        (Some(document), Some(whole)) if document.is_whole() && Arc::ptr_eq(document.whole(), whole));
     let file = editor.file();
     let (Ok(shown), Ok(written)) = (world.source(file), world.written(file)) else {
         return Vec::new();
@@ -618,7 +628,18 @@ fn walk(files: &[(&str, &str)], seed: u64, steps: usize, tally: &mut Tally) {
         for key in keys::parse(&keys).unwrap_or_else(|err| panic!("{keys}: {err}")) {
             let started = std::time::Instant::now();
             let local = viewer.stats.local;
+            let (predicted, declined) = (viewer.stats.predicted, viewer.stats.declined);
             viewer.key(key);
+            tally.predicted += viewer.stats.predicted - predicted;
+            if viewer.stats.predicted > predicted
+                && let Some(shown) = &viewer.predicted
+            {
+                *tally
+                    .predicted_lines
+                    .entry(format!("{:?}", (shown.lines, shown.justified)))
+                    .or_default() += 1;
+            }
+            tally.declined += viewer.stats.declined - declined;
             let took = started.elapsed().as_secs_f64() * 1000.0;
             asked |= viewer.take_edited().is_some();
             tally.keys += 1;
@@ -753,13 +774,17 @@ fn first_difference(a: &str, b: &str) -> String {
 
 fn report(name: &str, tally: &Tally) {
     println!(
-        "{name}: {} keys, {} typeset in parts ({:.1} ms each), worst key {:.1} ms, {} pauses",
+        "{name}: {} keys, {} typeset in parts ({:.1} ms each), {} worked out on their line, \
+         {} waited for the whole, worst key {:.1} ms, {} pauses",
         tally.keys,
         tally.local,
         tally.local_ms / tally.local.max(1) as f64,
+        tally.predicted,
+        tally.declined,
         tally.worst_key_ms,
         tally.pauses
     );
+    println!("  worked out on their line: {:?}", tally.predicted_lines);
     for (title, map) in [
         ("part and whole differ", &tally.differs),
         ("the whole cannot be typeset", &tally.broken),
@@ -895,7 +920,9 @@ fn compiled_is_whole(viewer: &Viewer) -> bool {
     !viewer.is_compiled()
         || !viewer.problems.is_empty()
         || match (&viewer.document, &viewer.whole) {
-            (Some(document), Some(whole)) => Arc::ptr_eq(document, whole),
+            (Some(document), Some(whole)) => {
+                document.is_whole() && Arc::ptr_eq(document.whole(), whole)
+            }
             (None, _) => true,
             (Some(_), None) => false,
         }

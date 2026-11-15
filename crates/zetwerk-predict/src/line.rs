@@ -283,6 +283,17 @@ impl Line {
         Ok(())
     }
 
+    /// Whether what is left on the line shows nothing: no text but
+    /// blanks, and nothing else.
+    pub fn shows_nothing(&self) -> bool {
+        self.members.iter().all(|member| {
+            member
+                .run
+                .as_ref()
+                .is_some_and(|run| run.item.text.trim().is_empty())
+        })
+    }
+
     /// Whether nothing is left on the line.
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
@@ -563,6 +574,11 @@ impl Line {
         line.justified = line.detect_justification();
         line.limit = line.ragged_limit(parent);
         Ok(line)
+    }
+
+    /// Whether the line is justified: its spaces were stretched or shrunk.
+    pub fn is_justified(&self) -> bool {
+        self.justified
     }
 
     /// Whether spaces on the line were stretched or shrunk.

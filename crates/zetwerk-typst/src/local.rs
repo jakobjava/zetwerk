@@ -95,6 +95,15 @@ pub enum Refusal {
     /// some of it goes to the next page, which is for all of it typeset
     /// at once to show.
     BreaksOtherwise,
+    /// The page shows text below where the text of what was typeset ends:
+    /// that is not where it ends on the page (a rule put all of the text
+    /// into a block, and the mark of the foot stood at the foot of that).
+    FootElsewhere,
+    /// Typst began the part on a later page than the first of what was
+    /// typeset (a heading that breaks the page before it): it is set
+    /// there as on a page it may not be on in the whole, a left one
+    /// where that is a right one.
+    LaterPage,
     /// Cut away from the rest, the part is read otherwise than among it
     /// (a `*` not closed, a list marker on the line of a rule), or Typst
     /// read it anew and numbered its nodes otherwise: what is typeset of
@@ -686,7 +695,8 @@ static SPLICES: AtomicU64 = AtomicU64::new(1);
 /// # Errors
 ///
 /// If the page shows nothing of the region, or it is not in one piece
-/// there or in `typeset`; or if it would reach below `foot` itself.
+/// there or on the first page of `typeset`; or if it would reach below
+/// `foot` itself.
 pub fn splice(
     page: &Frame,
     typeset: &[Page],
@@ -699,10 +709,13 @@ pub fn splice(
         .ok_or(Refusal::NotOnThisPage)?;
     // What was typeset, on the one page it is on.
     let mut made = None;
-    for typeset in typeset {
+    for (index, typeset) in typeset.iter().enumerate() {
         if let Some(run) = region.run(region.now, &typeset.frame)? {
             if made.is_some() {
                 return Err(Refusal::NotInOnePiece);
+            }
+            if index > 0 {
+                return Err(Refusal::LaterPage);
             }
             made = Some((&typeset.frame, run));
         }
@@ -761,6 +774,16 @@ pub fn splice(
     let gone = page.items().skip(old.items.start).take(old.items.len());
     let gone_closed = closed_among(gone.map(|(_, item)| item));
     let lowest = foot.to_pt() + BELOW;
+    // Nothing of the text of the page stands below the foot of its text.
+    for (index, (position, item)) in page.items().enumerate() {
+        if is_rule_across(item) {
+            break;
+        }
+        if !stays(index) && !matches!(item, FrameItem::Tag(_)) && extent(*position, item).1 > lowest
+        {
+            return Err(Refusal::FootElsewhere);
+        }
+    }
     // The part itself does not go below it: the line typed in may be the
     // one that goes to the next page.
     if new.bottom + down.to_pt() > lowest {
