@@ -124,11 +124,19 @@ fn a_paragraph_with_a_reference_shows_what_the_whole_shows() {
 fn a_line_more_on_a_full_page_is_for_the_whole() {
     // A paragraph begun at the foot of a full page: the heading below
     // goes to the next page in the whole, and stood in the margin in the
-    // part. The typist found it: seed 3000, `yyo` in the paper.
-    assert_eq!(
-        after_keys(PAPER, "of the original points.", true, "o"),
-        None
-    );
+    // part. The typist found it: seed 3000, `yyo` in the paper. Where
+    // the page breaks is for the whole to say; nothing is to be shown
+    // below the text (the paper has margins of 2.5 cm).
+    let (mut viewer, directory) = editing(PAPER);
+    press(&mut viewer, "gsgs");
+    if let Some(editor) = viewer.editor.as_mut() {
+        let at = "of the original points.";
+        editor.set_cursor(PAPER.find(at).unwrap_or(0) + at.len());
+    }
+    press(&mut viewer, "o");
+    assert!(viewer.stats.local > 0, "{:?}", viewer.declined);
+    assert_eq!(below_foot(&viewer, 841.89 - 70.87), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]

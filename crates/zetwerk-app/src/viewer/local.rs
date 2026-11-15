@@ -111,7 +111,6 @@ impl Viewer {
             part.typeset.pages(),
             &part.region,
             foot,
-            index + 1 < pages.len(),
             &|item| stays.contains(&item),
         )
         .map_err(|why| format!("{why:?}"))?;

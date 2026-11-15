@@ -274,7 +274,20 @@ fn compare_with_whole(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
         if untouched.is_some_and(|old| hash128(&old.frame) == hash128(&page.frame)) {
             continue;
         }
-        let ends = (index > 0, index + 1 < whole.pages().len());
+        // The places of the text the pages beside this one show.
+        let beside = |pages: &[typst_layout::Page], world: &ProjectWorld| {
+            [index.checked_sub(1), Some(index + 1)]
+                .into_iter()
+                .flatten()
+                .filter_map(|at| pages.get(at))
+                .flat_map(|page| placed(world, &page.frame))
+                .filter_map(|(_, _, byte)| byte)
+                .collect::<std::collections::BTreeSet<usize>>()
+        };
+        let (shown_beside, whole_beside) = (
+            beside(shown.pages(), &shown_world),
+            beside(whole.pages(), &world),
+        );
         let near = local.len() == right.len()
             && local
                 .iter()
@@ -282,7 +295,7 @@ fn compare_with_whole(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
                 .all(|(a, b)| (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1 && a.2 == b.2);
         let kind = if near {
             "glyphs stand a tenth of a point apart".to_owned()
-        } else if breaks_elsewhere(&local, &right, ends) {
+        } else if breaks_elsewhere(&local, &right, &shown_beside, &whole_beside) {
             "the page breaks elsewhere".to_owned()
         } else if local.len() == right.len() {
             let moved = local.iter().zip(&right).filter(|(a, b)| a != b).count();
@@ -321,15 +334,15 @@ fn compare_with_whole(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
 
 /// Whether the glyphs `here` (as [`placed`]) differ from those `there`
 /// only as a page that breaks elsewhere does, which the whole puts right:
-/// lines come or go at its top or foot, and all between them is the same,
-/// moved up or down by as much. What comes or goes is of no place of the
-/// text that the page shows elsewhere. `ends` says whether a page comes
-/// before this one and whether one comes after it: lines come or go only
-/// at an end that meets another page.
+/// what is on one and not the other is on a page beside the other (the
+/// places of the text they show: `shown_beside` beside `here`,
+/// `whole_beside` beside `there`),
+/// and all that both show is the same, moved up or down by as much.
 fn breaks_elsewhere(
     here: &[(i64, i64, Option<usize>)],
     there: &[(i64, i64, Option<usize>)],
-    ends: (bool, bool),
+    shown_beside: &std::collections::BTreeSet<usize>,
+    whole_beside: &std::collections::BTreeSet<usize>,
 ) -> bool {
     use std::collections::{BTreeSet, HashMap};
     let mut shifts: HashMap<i64, usize> = HashMap::new();
@@ -353,24 +366,15 @@ fn breaks_elsewhere(
         .map(|(x, y, byte)| (*x, y + shift, *byte))
         .collect();
     let here_set: BTreeSet<(i64, i64, Option<usize>)> = here.iter().copied().collect();
-    let same: Vec<_> = here_set.intersection(&moved).collect();
-    let (Some(top), Some(foot)) = (
-        same.iter().map(|glyph| glyph.1).min(),
-        same.iter().map(|glyph| glyph.1).max(),
-    ) else {
-        return false;
+    let elsewhere = |glyphs: BTreeSet<_>, beside: &BTreeSet<usize>| {
+        glyphs
+            .iter()
+            .filter_map(|glyph: &&(i64, i64, Option<usize>)| glyph.2)
+            .all(|byte| beside.contains(&byte))
     };
-    let (gone, come): (Vec<_>, Vec<_>) = (
-        here_set.difference(&moved).collect(),
-        moved.difference(&here_set).collect(),
-    );
-    let outside = |glyph: &&(i64, i64, Option<usize>)| {
-        (ends.0 && glyph.1 < top) || (ends.1 && glyph.1 > foot)
-    };
-    let bytes = |glyphs: &[&(i64, i64, Option<usize>)]| -> BTreeSet<usize> {
-        glyphs.iter().filter_map(|glyph| glyph.2).collect()
-    };
-    gone.iter().all(outside) && come.iter().all(outside) && bytes(&gone).is_disjoint(&bytes(&come))
+    here_set.intersection(&moved).next().is_some()
+        && elsewhere(here_set.difference(&moved).collect(), whole_beside)
+        && elsewhere(moved.difference(&here_set).collect(), shown_beside)
 }
 
 /// A snapshot of the text as it is, to compare with: what the pages on

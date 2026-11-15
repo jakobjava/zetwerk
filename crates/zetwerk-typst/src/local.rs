@@ -91,9 +91,9 @@ pub enum Refusal {
     /// Other things stand among the part on the page (a figure that
     /// floats, a footnote), or it was typeset onto several pages.
     NotInOnePiece,
-    /// The part, or what it moves down, would reach into the margin below
-    /// the text of the page: some of it goes to the next page, which is
-    /// for all of it typeset at once to show.
+    /// The part would reach into the margin below the text of the page:
+    /// some of it goes to the next page, which is for all of it typeset
+    /// at once to show.
     BreaksOtherwise,
     /// Cut away from the rest, the part is read otherwise than among it
     /// (a `*` not closed, a list marker on the line of a rule), or Typst
@@ -679,21 +679,19 @@ static SPLICES: AtomicU64 = AtomicU64::new(1);
 /// (the pages made of the text cut down to the region) shows of it. What
 /// is below it on the page moves by as much as Typst set it further
 /// down or up; `stays(index)` says of an item of the page that it does
-/// not move (the page number, a running head). `foot` is where the text
-/// of the page ends.
+/// not move (the page number, a running head). What is pushed below
+/// `foot`, where the text of the page ends, is left out: it goes to the
+/// next page.
 ///
 /// # Errors
 ///
 /// If the page shows nothing of the region, or it is not in one piece
-/// there or in `typeset`; or if it, or what it moves down, would reach
-/// below `foot`; or if it moves anything down on a page that is
-/// `followed` by another.
+/// there or in `typeset`; or if it would reach below `foot` itself.
 pub fn splice(
     page: &Frame,
     typeset: &[Page],
     region: &Region,
     foot: Abs,
-    followed: bool,
     stays: &dyn Fn(usize) -> bool,
 ) -> Result<Frame, Refusal> {
     let old = region
@@ -768,13 +766,6 @@ pub fn splice(
     if new.bottom + down.to_pt() > lowest {
         return Err(Refusal::BreaksOtherwise);
     }
-    // Where a page goes on on the next one, what is below the text was
-    // put there by where Typst breaks pages: a heading keeps to what
-    // follows it, a paragraph leaves no line alone. Moved down, all of it
-    // may go elsewhere though it fits.
-    if followed && moved_by.to_pt() > 0.01 {
-        return Err(Refusal::BreaksOtherwise);
-    }
     let mut moving = true;
     for (index, (position, item)) in page.items().enumerate() {
         if index == old.items.start {
@@ -801,13 +792,19 @@ pub fn splice(
                 None => extent(position, item).0 >= old.bottom - BELOW,
             };
             if moving && below && !stays(index) && !matches!(item, FrameItem::Tag(_)) {
-                // What is pushed below the text goes to the next page,
-                // and maybe more with it (a heading keeps to what follows
-                // it, a paragraph leaves no line alone): that is for all
-                // of it typeset at once to show.
+                // What is pushed below the text goes to the next page
+                // when all of it is typeset (and maybe more with it: a
+                // heading keeps to what follows it): until then it is not
+                // shown, rather than over the foot of the page. Where
+                // elements begin and end in it stays.
                 position.y += moved_by;
                 if extent(position, item).1 > lowest {
-                    return Err(Refusal::BreaksOtherwise);
+                    let mut marks = Vec::new();
+                    open_marks(position, item, &HashSet::new(), &mut marks);
+                    for (position, mark) in marks {
+                        out.push(position, mark);
+                    }
+                    continue;
                 }
             }
         }
