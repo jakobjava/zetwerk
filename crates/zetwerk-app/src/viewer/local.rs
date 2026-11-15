@@ -111,6 +111,7 @@ impl Viewer {
             part.typeset.pages(),
             &part.region,
             foot,
+            index + 1 < pages.len(),
             &|item| stays.contains(&item),
         )
         .map_err(|why| format!("{why:?}"))?;
@@ -191,14 +192,17 @@ impl Viewer {
                 "a footnote put in or taken out is typeset with all of the page".to_owned(),
             );
         }
-        if refers_beyond(&new, &region.bytes) {
+        // What is referred to and not in the part stands in its lead.
+        let stand_ins = typst_text::stand_ins(&new, &region.kept);
+        if stand_ins.is_none() && refers_beyond(&new, &region.bytes) {
             return Err(
                 "a reference to what is not in the part is not typeset by itself".to_owned(),
             );
         }
         // The paragraphs beside it are typeset with it, to place it by,
         // unless they are of the kind that cannot be.
-        let region = if holds(&region.kept).is_some() || refers_beyond(&new, &region.kept) {
+        let alone = stand_ins.is_none() && refers_beyond(&new, &region.kept);
+        let region = if holds(&region.kept).is_some() || alone {
             // Then it is the first paragraph of what is typeset, which
             // Typst does not indent as it does one behind another.
             if new.text().contains("first-line-indent") {
@@ -208,7 +212,10 @@ impl Viewer {
         } else {
             region
         };
-        let lead = typst_text::lead_for_part(&new, region.kept.start);
+        let mut lead = typst_text::lead_for_part(&new, region.kept.start);
+        // Before the numbers of the part are set: the stand-ins count too.
+        let numbers = lead.find("\n#counter(").map_or(lead.len(), |at| at + 1);
+        lead.insert_str(numbers, &stand_ins.unwrap_or_default());
         let cut = local::cut_down(&new, &region, &lead).map_err(|why| format!("{why:?}"))?;
         let alone = world.with_text(cut);
         let compiled = zetwerk_typst::compile(&alone);

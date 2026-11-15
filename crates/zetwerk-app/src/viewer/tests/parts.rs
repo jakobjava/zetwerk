@@ -428,3 +428,24 @@ fn a_list_begun_and_taken_back_at_the_top_leaves_nothing_behind() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn a_paragraph_with_references_is_typeset_by_itself_as_in_the_whole() {
+    // What is referred to stands hidden in the lead of the part: the
+    // references show what they show in the whole, and the part need not
+    // wait for all of it to be typeset (it did, for every key in such a
+    // paragraph, after references were found to show otherwise).
+    let text = "#set page(width: 300pt, height: 400pt)\n#set heading(numbering: \"1.1\")\n\
+                #set math.equation(numbering: \"(1)\")\n\n= Start <sec>\n\nWords.\n\n\
+                $ a = b $ <eq>\n\n#figure(table(columns: 1, [x]), caption: [C]) <fig>\n\n\
+                == More\n\nSee @sec, @eq and @fig, with $x$ in it.\n\nLast words.\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, "gsgs");
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(text.find("$x").unwrap_or(0) + 2);
+    }
+    press(&mut viewer, "a^2");
+    assert!(viewer.stats.local > 0, "{:?}", viewer.declined);
+    assert_eq!(differs_from_whole(&mut viewer), None);
+    let _ = std::fs::remove_dir_all(directory);
+}

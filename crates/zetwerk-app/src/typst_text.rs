@@ -1537,6 +1537,84 @@ pub fn lead_for_part(source: &Source, at: usize) -> String {
     lead
 }
 
+/// What a part of `source` (the bytes `kept`) needs before it so that
+/// its references to what is not in it show what they show in the whole:
+/// the equation, heading or figure referred to, hidden and taking no
+/// room, with the numbers counted up to where it stands. `None` where one
+/// of them cannot be put so (a source of a bibliography, an element in
+/// another file or not at the top of the text).
+#[must_use]
+pub fn stand_ins(source: &Source, kept: &Range<usize>) -> Option<String> {
+    fn labels(node: &LinkedNode, kept: &Range<usize>, out: &mut Vec<String>) {
+        let range = node.range();
+        if range.end <= kept.start || range.start >= kept.end {
+            return;
+        }
+        if node.kind() == SyntaxKind::RefMarker {
+            out.push(node.get().leaf_text().trim_start_matches('@').to_owned());
+        }
+        for child in node.children() {
+            labels(&child, kept, out);
+        }
+    }
+    let text = source.text();
+    let part = text.get(kept.clone())?;
+    let mut referred = Vec::new();
+    if part.contains('@') {
+        labels(&LinkedNode::new(source.root()), kept, &mut referred);
+    }
+    referred.sort();
+    referred.dedup();
+    let mut out = String::new();
+    for label in referred {
+        let mark = format!("<{label}>");
+        if part.contains(&mark) {
+            continue;
+        }
+        // The child of the root it is the label of: a heading may hold
+        // it; an equation, a figure or a heading has it behind it.
+        let (mut offset, mut start) = (0, None);
+        let mut found = None;
+        for child in source.root().children() {
+            let written = text.get(offset..offset + child.len()).unwrap_or("");
+            match child.kind() {
+                SyntaxKind::Heading if written.contains(&mark) => {
+                    found = Some(offset..offset + child.len());
+                }
+                SyntaxKind::Equation | SyntaxKind::Heading | SyntaxKind::Hash => {
+                    start = Some(offset);
+                }
+                SyntaxKind::FuncCall
+                    if written.starts_with("figure(")
+                        && (written.contains("image(") || written.contains("table(")) => {}
+                SyntaxKind::Space => {}
+                SyntaxKind::Label if written == mark => {
+                    found = start.map(|start| start..offset + child.len());
+                }
+                _ => start = None,
+            }
+            if found.is_some() {
+                break;
+            }
+            offset += child.len();
+        }
+        let element = found?;
+        let written = text.get(element.clone())?;
+        let figure = written.starts_with("#figure(");
+        if !(figure || written.starts_with('$') || written.starts_with('=')) {
+            return None;
+        }
+        // The numbers before it, as for a part that begins there.
+        for line in lead_for_part(source, element.start).lines() {
+            if line.starts_with("#counter(") {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+        let _ = writeln!(out, "#place(hide[{written}])");
+    }
+    Some(out)
+}
+
 /// Whether `name` is something in an equation: a symbol, a function or
 /// an operator Typst knows there, or something `source` defines or
 /// brings in itself.
