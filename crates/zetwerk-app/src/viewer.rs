@@ -2031,6 +2031,12 @@ impl Viewer {
         if matches!(prediction.lines, Lines::More | Lines::Fewer) {
             return Err("the paragraph has a line more or less".to_owned());
         }
+        // Lines broken anew one after the other, first fit, are where
+        // Typst breaks ragged text; justified text it breaks weighing all
+        // of the paragraph, which a part does as Typst does.
+        if prediction.lines == Lines::Rebroken && prediction.justified {
+            return Err("justified lines broken anew".to_owned());
+        }
         self.planned.retain(|(planned, _, _), _| *planned != index);
         self.predicted = Some(Predicted {
             index,

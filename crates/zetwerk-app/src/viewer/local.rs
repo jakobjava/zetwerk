@@ -180,6 +180,14 @@ impl Viewer {
         if self.back_at_whole(&shown) {
             return Ok(());
         }
+        // What typing put in to be seen (a refused equation as it is
+        // written) is on the page typeset whole: once typing is over, it
+        // is not to stay beside a part, nor anywhere.
+        let typing = (self.editor.as_ref())
+            .is_some_and(|editor| editor.mode() == crate::editor::Mode::Insert);
+        if !typing && shown.world.shows_more() {
+            return Err("the pages show what typing put in".to_owned());
+        }
         // The page: where the cursor was last found, or one beside it.
         let near = self.cursor_page.get();
         let page_of = |region: &local::Region| {
@@ -388,7 +396,14 @@ impl Viewer {
             .world
             .written(file)
             .is_ok_and(|written| written.text() == editor.text());
-        if shown.is_whole() || !same || self.stale_files.iter().any(|stale| *stale != file) {
+        // Not where they show what typing put in to be seen (a refused
+        // equation as it is written, the place of the cursor): that is
+        // not to stay once typing is over.
+        if shown.is_whole()
+            || !same
+            || shown.world.shows_more()
+            || self.stale_files.iter().any(|stale| *stale != file)
+        {
             return false;
         }
         let world = Arc::clone(&shown.world);

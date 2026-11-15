@@ -818,3 +818,21 @@ fn what_is_drawn_over_the_page_follows_the_lines_a_part_moves() {
     );
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn references_of_every_kind_show_in_a_part_what_they_show_in_the_whole() {
+    // Stand-ins were tried for one equation, one heading and one figure:
+    // here headings of two levels, two equations, a table, a figure of
+    // something else (which has none, and is typeset whole), several in
+    // one paragraph, and one in an item of a list.
+    let text = "#set page(width: 300pt, height: 500pt)\n#set heading(numbering: \"1.1\")\n\
+                #set math.equation(numbering: \"(1)\")\n\n= Start <s1>\n\n== Sub <s2>\n\nWords.\n\n\
+                $ a = b $ <e1>\n\n$ c = d $ <e2>\n\n\
+                #figure(table(columns: 1, [x]), caption: [T]) <t1>\n\n\
+                #figure(rect(width: 10pt), caption: [R]) <r1>\n\n= Next <s3>\n\n\
+                See @s1, @s2, @e1, @e2 and @t1, with $x$ in it.\n\nThen @r1 and $y$ here.\n\n\
+                - An item with @e2 and $z$.\n\nLast words.\n";
+    for at in ["$x", "$y", "$z"] {
+        assert_eq!(after_keys(text, at, true, "a^2"), None, "{at}");
+    }
+}

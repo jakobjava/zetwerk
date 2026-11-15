@@ -823,7 +823,9 @@ fn walks(seeds: usize, steps: usize) {
     for (index, (name, files)) in documents.into_iter().enumerate() {
         let mut tally = Tally::default();
         // Other keys on each document.
-        for seed in (0..seeds as u64).map(|seed| seed + 1000 * index as u64) {
+        // `ZETWERK_TYPIST_FROM=n`: the walks from the `n`th seed on.
+        let from = number_from_env("ZETWERK_TYPIST_FROM", 0) as u64;
+        for seed in (from..from + seeds as u64).map(|seed| seed + 1000 * index as u64) {
             walk(files, seed, steps, &mut tally);
         }
         report(name, &tally);
