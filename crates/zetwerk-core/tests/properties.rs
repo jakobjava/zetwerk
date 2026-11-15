@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use zetwerk_core::{DiskError, Document, Opened, ROOT, Replace, StateId};
+use zetwerk_core::{Change, Direction, DiskError, Document, Opened, ROOT, Replace, StateId, Step};
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -33,6 +33,8 @@ enum Op {
     Undo,
     Redo,
     Goto(Index),
+    /// Make a state the one redo leads to from the state before it.
+    Prefer(Index),
     Save {
         overwrite: bool,
     },
@@ -64,6 +66,7 @@ fn op() -> impl Strategy<Value = Op> {
         4 => Just(Op::Undo),
         3 => Just(Op::Redo),
         2 => any::<Index>().prop_map(Op::Goto),
+        2 => any::<Index>().prop_map(Op::Prefer),
         2 => any::<bool>().prop_map(|overwrite| Op::Save { overwrite }),
         1 => Just(Op::Reload),
         1 => text().prop_map(Op::ExternalWrite),
@@ -198,6 +201,17 @@ impl Session {
                 let state = index.index(self.model.states.len()) as StateId;
                 self.doc().goto(state).unwrap();
                 assert_eq!(self.doc().state(), state);
+            }
+            Op::Prefer(index) => {
+                let state = index.index(self.model.states.len()) as StateId;
+                let (text, revision) = (self.text(), self.doc().revision());
+                let parent = self.doc().history().parent(state);
+                assert_eq!(self.doc().prefer(state).unwrap(), parent.is_some());
+                if let Some(parent) = parent {
+                    assert_eq!(self.doc().history().redo_target(parent), Some(state));
+                }
+                // Where redo leads is all that changed.
+                assert_eq!((self.text(), self.doc().revision()), (text, revision));
             }
             Op::Save { overwrite } => self.save(overwrite),
             Op::Reload => self.reload(),
@@ -373,6 +387,22 @@ impl Session {
             // it; what others did to it since is `disk_status`'s business.
             assert_eq!(self.model.seen.clone().unwrap_or_default(), text);
         }
+        self.look();
+    }
+
+    /// Every state can be looked at from where the document is, and
+    /// looking changes nothing: not the text, not the history.
+    fn look(&mut self) {
+        let before = (self.text(), self.doc().revision());
+        let history = self.doc().history().clone();
+        for (state, expected) in self.model.states.clone().iter().enumerate() {
+            let seen = self.doc().text_at(state as StateId);
+            assert_eq!(seen.as_ref(), Some(expected), "state {state} looked at");
+        }
+        let beyond = self.model.states.len() as StateId;
+        assert_eq!(self.doc().text_at(beyond), None);
+        assert_eq!((self.text(), self.doc().revision()), before);
+        assert_eq!(self.doc().history(), &history, "looking moved something");
     }
 
     /// Checks made once, when the random steps are over.
@@ -412,5 +442,73 @@ proptest! {
             session.apply(op);
         }
         session.finish();
+    }
+}
+
+/// The parts of `text` outside `ranges`.
+fn cut(text: &str, ranges: &[std::ops::Range<usize>]) -> Vec<String> {
+    let mut outside = Vec::new();
+    let mut from = 0;
+    for range in ranges {
+        outside.push(text[from..range.start].to_owned());
+        from = range.end;
+    }
+    outside.push(text[from..].to_owned());
+    outside
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
+
+    /// A step marks all it changed: the text outside its stretches is the
+    /// same before and after, piece by piece, whichever way the step is
+    /// taken; and the stretches of several steps are those of all their
+    /// changes as one step.
+    #[test]
+    fn a_step_marks_all_it_changed(
+        initial in "[ab é\n]{0,12}",
+        edits in proptest::collection::vec((any::<Index>(), 0..4_usize, text()), 0..8),
+        split in any::<Index>(),
+    ) {
+        let mut now = initial.clone();
+        let mut changes = Vec::new();
+        for (at, len, new) in edits {
+            let boundaries: Vec<usize> =
+                now.char_indices().map(|(i, _)| i).chain([now.len()]).collect();
+            let first = at.index(boundaries.len());
+            let last = (first + len).min(boundaries.len() - 1);
+            let range = boundaries[first]..boundaries[last];
+            changes.push(Change { at: range.start, old: now[range.clone()].to_owned(), new: new.clone() });
+            now.replace_range(range, &new);
+        }
+        let step = |changes, direction| Step { changes, direction, to: ROOT };
+        let made = step(&changes, Direction::Forward).ranges();
+        let undone = step(&changes, Direction::Backward).ranges();
+
+        for (ranges, text) in [(&made, &now), (&undone, &initial)] {
+            let mut end = None;
+            for range in ranges {
+                prop_assert!(range.start <= range.end && range.end <= text.len());
+                prop_assert!(text.is_char_boundary(range.start) && text.is_char_boundary(range.end));
+                // In order, and apart: what touches is one stretch.
+                prop_assert!(end.is_none_or(|end| end < range.start), "{ranges:?}");
+                end = Some(range.end);
+            }
+        }
+        // (A stretch may read the same before and after: what was taken
+        // out and typed again was touched all the same.)
+        prop_assert_eq!(cut(&now, &made), cut(&initial, &undone), "{:?} {:?}", &made, &undone);
+        // Within the part of the text the step says it replaced.
+        let extent = step(&changes, Direction::Forward).extent();
+        if let (Some(first), Some(last), Some(extent)) = (made.first(), made.last(), extent) {
+            prop_assert!(extent.start <= first.start && last.end <= extent.end);
+        }
+
+        // Taken as two steps, one after the other, it marks the same.
+        let (first, second) = changes.split_at(split.index(changes.len() + 1));
+        let earlier = step(first, Direction::Forward).ranges();
+        prop_assert_eq!(&step(second, Direction::Forward).ranges_with(earlier), &made);
+        let later = step(second, Direction::Backward).ranges();
+        prop_assert_eq!(&step(first, Direction::Backward).ranges_with(later), &undone);
     }
 }

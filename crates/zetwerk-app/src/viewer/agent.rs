@@ -364,7 +364,7 @@ impl Viewer {
         self.agent_change(std::slice::from_ref(&range), text, propose)
     }
 
-    fn expect(&self, revision: Option<u64>) -> Result<(), String> {
+    pub(super) fn expect(&self, revision: Option<u64>) -> Result<(), String> {
         match revision {
             Some(expected) if expected != self.revision => Err(format!(
                 "the text is at revision {}, not {expected}: it has changed since you read \
@@ -377,7 +377,7 @@ impl Viewer {
 
     /// Replaces each of `ranges` (in the order of the text, apart from
     /// each other) by `new`, or proposes to.
-    fn agent_change(
+    pub(super) fn agent_change(
         &mut self,
         ranges: &[Range<usize>],
         new: &str,

@@ -10,10 +10,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use typst::syntax::{FileId, Source};
-use zetwerk_core::{Buffer, DiskError, DiskStatus, Document, OpenError, Opened, Replace};
+use zetwerk_core::{
+    Buffer, DiskError, DiskStatus, Document, History, OpenError, Opened, Replace, StateId,
+};
 use zetwerk_vim::{Edit, Effect, Engine, Host, Place, Seek, Shown as ShownLine};
 
-use crate::keys::KeyPress;
+use crate::keys::{Key, KeyPress};
 
 pub use zetwerk_vim::Mode;
 
@@ -45,6 +47,9 @@ pub struct Editor {
     rows: Option<(u64, usize, Vec<Row>)>,
     /// The first row shown in the source pane.
     top: usize,
+    /// What the last key changed by walking the history (see
+    /// [`Editor::stepped`]), and the revision of the text it is true of.
+    stepped: Option<(u64, Vec<Range<usize>>)>,
 }
 
 /// Something that shows the text in rows other than the source pane's:
@@ -108,6 +113,7 @@ impl Editor {
             failure: None,
             rows: None,
             top: 0,
+            stepped: None,
         };
         Ok((editor, opened))
     }
@@ -115,6 +121,7 @@ impl Editor {
     /// Handles a key press. `shown` is what the user sees the text on.
     pub fn key(&mut self, press: KeyPress, shown: &Shown) -> Typed {
         let before = self.document.revision();
+        let history = (self.document.state(), self.document.history().len());
         // Only pages take the place of lines for `j` and `k`: in the
         // source, a line of the text is what they have always gone by.
         self.engine.set_rows_first(matches!(shown, Shown::Pages(_)));
@@ -136,6 +143,7 @@ impl Editor {
         };
         let length = host.document.text().len();
         let effects = self.engine.key(press, &mut host);
+        self.stepped = self.stepped_since(history);
         if self.failure.is_some() {
             // The engine believes in an edit that was not made. The text is
             // what it was; all that can be off is the cursor.
@@ -368,6 +376,83 @@ impl Editor {
         self.engine.set_cursor(offset, self.document.text());
     }
 
+    /// Runs `ask` with the engine and with the text as the engine sees
+    /// it when `shown` is what the user sees the text on, without a key.
+    fn with_host<T>(
+        &mut self,
+        shown: &Shown,
+        ask: impl FnOnce(&mut Engine, &DocumentHost) -> T,
+    ) -> T {
+        let shown_revision = self.document.revision();
+        self.engine.set_rows_first(matches!(shown, Shown::Pages(_)));
+        let rows = match shown {
+            Shown::Pages(pages) => RowsOf::Pages(*pages),
+            Shown::Source { columns } => {
+                self.rows(*columns);
+                match &self.rows {
+                    Some((_, _, rows)) => RowsOf::Source(rows),
+                    None => RowsOf::Pages(None),
+                }
+            }
+        };
+        let host = DocumentHost {
+            document: &mut self.document,
+            failure: &mut self.failure,
+            rows,
+            shown_revision,
+        };
+        ask(&mut self.engine, &host)
+    }
+
+    /// Puts the cursor at byte `offset` as a pointer does: a selection
+    /// ends, typing goes on. See [`Engine::point`]. Returns whether the
+    /// cursor was put there: it is not on the command line.
+    pub fn point(&mut self, offset: usize) -> bool {
+        self.engine.point(offset, self.document.text())
+    }
+
+    /// Selects from byte `anchor` to byte `cursor`, both included, or
+    /// with `lines` the lines of the text they are in, as a pointer
+    /// does. See [`Engine::select`]. Returns whether that was done: it
+    /// is not while typing.
+    pub fn select(&mut self, anchor: usize, cursor: usize, lines: bool, shown: &Shown) -> bool {
+        self.with_host(shown, |engine, host| {
+            engine.select(anchor, cursor, lines, host)
+        })
+    }
+
+    /// The end of the selection that the cursor is not at, if there is a
+    /// selection.
+    #[must_use]
+    pub fn anchor(&self) -> Option<usize> {
+        self.engine.anchor()
+    }
+
+    /// The byte of the text a pointer is on at `cell` of a row of a pane
+    /// `columns` cells wide. `row` counts from the first row the pane
+    /// shows and may be negative, for a row above it. Past the end of a
+    /// row that is the end of its line; where the line goes on in the
+    /// next row, the row's last character, which is in this row still.
+    pub fn offset_near(&mut self, columns: usize, row: isize, cell: usize) -> usize {
+        let row = self.top.saturating_add_signed(row);
+        let rows = self.rows(columns);
+        let row = row.min(rows.len().saturating_sub(1));
+        let Some(range) = rows.get(row).map(|row| row.range.clone()) else {
+            return 0;
+        };
+        let goes_on = rows.get(row + 1).is_some_and(|next| !next.first);
+        let mut cells_before = 0;
+        let mut last = range.start;
+        for (at, c) in self.text()[range.clone()].char_indices() {
+            cells_before += cells_of(c);
+            if cells_before > cell {
+                return range.start + at;
+            }
+            last = range.start + at;
+        }
+        if goes_on { last } else { range.end }
+    }
+
     /// The byte of the text shown at `cell` of row `row` of a pane
     /// `columns` cells wide; past the end of a row, the row's end.
     pub fn offset_at(&mut self, columns: usize, row: usize, cell: usize) -> usize {
@@ -440,6 +525,123 @@ impl Editor {
     #[must_use]
     pub fn unsynced_since(&self) -> Option<Instant> {
         self.document.unsynced_since()
+    }
+
+    /// The undo history of the text: every state it has been in.
+    #[must_use]
+    pub fn history(&self) -> &History {
+        self.document.history()
+    }
+
+    /// The text as it was in state `state` of the history; the text and
+    /// its history stay as they are. See [`Document::text_at`].
+    #[must_use]
+    pub fn text_at(&self, state: StateId) -> Option<String> {
+        self.document.text_at(state)
+    }
+
+    /// The stretches of the text that the last key made different by
+    /// undoing or redoing, in the order of the text: what came back, and
+    /// as empty stretches the places text went from (see
+    /// [`zetwerk_core::Step::ranges`]). Of several steps taken at once,
+    /// all they changed. `None` once another key was pressed or the text
+    /// was changed in any other way.
+    #[must_use]
+    pub fn stepped(&self) -> Option<&[Range<usize>]> {
+        let (revision, ranges) = self.stepped.as_ref()?;
+        (*revision == self.document.revision()).then_some(ranges.as_slice())
+    }
+
+    /// What walking the history changed since it was at state `from`,
+    /// when it had `known` states: `None` if the text is in the same
+    /// state still, or in one that was made since (that is a change, not
+    /// a walk).
+    fn stepped_since(&self, (from, known): (StateId, usize)) -> Option<(u64, Vec<Range<usize>>)> {
+        let history = self.document.history();
+        let to = history.current();
+        if to == from || usize::try_from(to).is_ok_and(|to| to >= known) {
+            return None;
+        }
+        let mut ranges = Vec::new();
+        for step in history.steps(from, to)? {
+            ranges = step.ranges_with(ranges);
+        }
+        Some((self.document.revision(), ranges))
+    }
+
+    /// Goes to state `to` of the history the way the user would get
+    /// there: by undoing as far as the last state the two have in common
+    /// and redoing from there, as many steps as it takes. So the way
+    /// back is `u` and Ctrl-R as after any undo, and nothing is done to
+    /// the history that those keys could not do, but for this: where
+    /// `to` is on a branch that redo has left, redo is made to lead down
+    /// that branch (see [`Document::prefer`]).
+    pub fn travel(&mut self, to: StateId) -> Result<(), String> {
+        let history = self.document.history();
+        let from = (history.current(), history.len());
+        let path = history.path(from.0, to).ok_or("there is no such step")?;
+        if self.engine.mode() != Mode::Normal || !self.engine.is_idle() {
+            return Err("in the middle of something else".to_owned());
+        }
+        // The way leads up to the common state first, then down.
+        let mut at = from.0;
+        let up = path
+            .iter()
+            .take_while(|next| {
+                let is_up = history.parent(at) == Some(**next);
+                at = **next;
+                is_up
+            })
+            .count();
+        let down = &path[up..];
+        self.press_times(up, KeyPress::plain(Key::Char('u')));
+        for state in down {
+            if self.failure.is_some() {
+                break;
+            }
+            if let Err(err) = self.document.prefer(*state) {
+                self.failure = Some(err.to_string());
+            }
+        }
+        if self.failure.is_none() {
+            let redo = KeyPress {
+                ctrl: true,
+                ..KeyPress::plain(Key::Char('r'))
+            };
+            self.press_times(down.len(), redo);
+        }
+        self.stepped = self.stepped_since(from);
+        self.engine
+            .set_cursor(self.engine.cursor(), self.document.text());
+        match self.failure.take() {
+            Some(failure) => Err(failure),
+            None if self.document.state() == to => Ok(()),
+            None => Err("the history does not lead there".to_owned()),
+        }
+    }
+
+    /// Gives the engine `press` with the count `times`, as typed in
+    /// normal mode; nothing if `times` is 0.
+    fn press_times(&mut self, times: usize, press: KeyPress) {
+        if times == 0 {
+            return;
+        }
+        let count = if times > 1 {
+            times.to_string()
+        } else {
+            String::new()
+        };
+        let keys = count.chars().map(|digit| KeyPress::plain(Key::Char(digit)));
+        let shown_revision = self.document.revision();
+        let mut host = DocumentHost {
+            document: &mut self.document,
+            failure: &mut self.failure,
+            rows: RowsOf::Pages(None),
+            shown_revision,
+        };
+        for key in keys.chain([press]) {
+            self.engine.key(key, &mut host);
+        }
     }
 
     /// The rows the text takes in a pane `columns` cells wide.
@@ -579,13 +781,30 @@ impl Host for DocumentHost<'_> {
         crate::typst_text::set_off(&self.document.buffer().0, at, format)
     }
 
-    fn unmake(&self, at: usize) -> Option<Range<usize>> {
+    fn unmake(&self, at: usize) -> Option<(Range<usize>, String)> {
         crate::typst_text::unmake(&self.document.buffer().0, at)
     }
 
-    fn next_field(&self, at: usize) -> Option<usize> {
+    fn put_over(&self, stop: Range<usize>, c: char) -> Option<(Range<usize>, String, usize)> {
+        crate::typst_text::put_over(&self.document.buffer().0, &stop, c)
+    }
+
+    fn letters(&self, range: Range<usize>) -> Option<Vec<Range<usize>>> {
         matches!(self.rows, RowsOf::Pages(_))
-            .then(|| crate::typst_text::next_field(&self.document.buffer().0, at))?
+            .then(|| crate::typst_text::letters(&self.document.buffer().0, &range))
+    }
+
+    fn join(&self, at: usize, spaced: bool) -> Option<(Range<usize>, String)> {
+        // Where nothing follows, nothing is joined: not lines either.
+        let nothing = || (at..at, String::new());
+        matches!(self.rows, RowsOf::Pages(_)).then(|| {
+            crate::typst_text::join(&self.document.buffer().0, at, spaced).unwrap_or_else(nothing)
+        })
+    }
+
+    fn next_field(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
+        matches!(self.rows, RowsOf::Pages(_))
+            .then(|| crate::typst_text::tab_key(&self.document.buffer().0, at))?
     }
 
     fn stop(&self, at: usize, seek: Seek) -> Option<Range<usize>> {
@@ -623,7 +842,7 @@ impl Host for DocumentHost<'_> {
             .then(|| crate::typst_text::open(&self.document.buffer().0, at, below))
     }
 
-    fn line_break(&self, at: usize) -> Option<String> {
+    fn line_break(&self, at: usize) -> Option<(Range<usize>, String)> {
         matches!(self.rows, RowsOf::Pages(_))
             .then(|| crate::typst_text::line_break(&self.document.buffer().0, at))
     }

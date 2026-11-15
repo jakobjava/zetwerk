@@ -1,0 +1,561 @@
+//! The document manager: how the document as a whole looks, in one list.
+//!
+//! `:doc` (or `gD`) lists what there is to decide about a document — its
+//! font, its paper, where the page numbers stand — each with what it is
+//! now. Enter on one puts up what it can be; Enter on one of those makes
+//! it so, and the page behind the list shows it at once. Where anything
+//! can be wanted (a size, a title), it is typed. Escape leads back.
+//!
+//! Nothing of this is kept anywhere but in the document: each decision
+//! is a `#set` rule before the text, as Typst wants it, written and
+//! changed here so that nobody has to look at it.
+
+use typst::World;
+
+use super::assist::Target;
+use super::{Edited, Viewer};
+use crate::typst_text;
+
+/// What may be typed for a setting where the choices are not all there
+/// is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Free {
+    /// Nothing: one of the choices it is.
+    No,
+    /// A length; a bare number is in this unit.
+    Length(&'static str),
+    /// A text, written as a string.
+    Text,
+    /// Words that are set as they are typed.
+    Words,
+    /// A whole number.
+    Count,
+}
+
+/// Something to decide about a document.
+struct Setting {
+    /// What it is listed as.
+    name: &'static str,
+    /// The function the rule is for and the argument it sets.
+    function: &'static str,
+    key: &'static str,
+    /// What holds where no rule says otherwise, as it is listed.
+    usual: &'static str,
+    /// What it can be: as listed, and as written in the rule.
+    choices: &'static [(&'static str, &'static str)],
+    free: Free,
+}
+
+const fn setting(
+    name: &'static str,
+    function: &'static str,
+    key: &'static str,
+    usual: &'static str,
+    choices: &'static [(&'static str, &'static str)],
+    free: Free,
+) -> Setting {
+    Setting {
+        name,
+        function,
+        key,
+        usual,
+        choices,
+        free,
+    }
+}
+
+const ON_OFF: &[(&str, &str)] = &[("on", "true"), ("off", "false")];
+
+/// All there is to decide, in the order it is listed in. The font's
+/// choices are the fonts there are.
+const SETTINGS: &[Setting] = &[
+    setting("font", "text", "font", "Libertinus Serif", &[], Free::Text),
+    setting(
+        "font size",
+        "text",
+        "size",
+        "11pt",
+        &[
+            ("9pt", "9pt"),
+            ("10pt", "10pt"),
+            ("10.5pt", "10.5pt"),
+            ("11pt", "11pt"),
+            ("12pt", "12pt"),
+            ("14pt", "14pt"),
+        ],
+        Free::Length("pt"),
+    ),
+    setting(
+        "language",
+        "text",
+        "lang",
+        "en",
+        &[
+            ("en  English", "\"en\""),
+            ("de  Deutsch", "\"de\""),
+            ("fr  français", "\"fr\""),
+            ("es  español", "\"es\""),
+            ("it  italiano", "\"it\""),
+            ("nl  Nederlands", "\"nl\""),
+            ("pt  português", "\"pt\""),
+            ("pl  polski", "\"pl\""),
+            ("sv  svenska", "\"sv\""),
+            ("da  dansk", "\"da\""),
+        ],
+        Free::Text,
+    ),
+    setting(
+        "hyphenation",
+        "text",
+        "hyphenate",
+        "as needed",
+        &[
+            ("as needed", "auto"),
+            ("always", "true"),
+            ("never", "false"),
+        ],
+        Free::No,
+    ),
+    setting(
+        "paper",
+        "page",
+        "paper",
+        "a4",
+        &[
+            ("a4", "\"a4\""),
+            ("a5", "\"a5\""),
+            ("a3", "\"a3\""),
+            ("us-letter", "\"us-letter\""),
+            ("us-legal", "\"us-legal\""),
+            ("slides 16:9", "\"presentation-16-9\""),
+            ("slides 4:3", "\"presentation-4-3\""),
+        ],
+        Free::Text,
+    ),
+    setting(
+        "orientation",
+        "page",
+        "flipped",
+        "upright",
+        &[("upright", "false"), ("lying", "true")],
+        Free::No,
+    ),
+    setting(
+        "margins",
+        "page",
+        "margin",
+        "2.5cm (of a4)",
+        &[
+            ("1.5cm", "1.5cm"),
+            ("2cm", "2cm"),
+            ("2.5cm", "2.5cm"),
+            ("3cm", "3cm"),
+            ("1in", "1in"),
+            ("as the paper wants", "auto"),
+        ],
+        Free::Length("cm"),
+    ),
+    setting(
+        "columns",
+        "page",
+        "columns",
+        "1",
+        &[("1", "1"), ("2", "2"), ("3", "3")],
+        Free::Count,
+    ),
+    setting(
+        "page numbers",
+        "page",
+        "numbering",
+        "none",
+        &[
+            ("none", "none"),
+            ("1", "\"1\""),
+            ("1 / 12", "\"1 / 1\""),
+            ("– 1 –", "\"– 1 –\""),
+            ("i", "\"i\""),
+            ("I", "\"I\""),
+            ("a", "\"a\""),
+        ],
+        Free::Text,
+    ),
+    setting(
+        "page numbers stand",
+        "page",
+        "number-align",
+        "bottom, middle",
+        &[
+            ("bottom, middle", "center + bottom"),
+            ("bottom, right", "right + bottom"),
+            ("bottom, left", "left + bottom"),
+            ("top, middle", "center + top"),
+            ("top, right", "right + top"),
+            ("top, left", "left + top"),
+        ],
+        Free::No,
+    ),
+    setting(
+        "running head",
+        "page",
+        "header",
+        "none",
+        &[("none", "none")],
+        Free::Words,
+    ),
+    setting("justified lines", "par", "justify", "off", ON_OFF, Free::No),
+    setting(
+        "between lines",
+        "par",
+        "leading",
+        "0.65em",
+        &[
+            ("0.5em  tight", "0.5em"),
+            ("0.65em  usual", "0.65em"),
+            ("0.8em", "0.8em"),
+            ("1em  wide", "1em"),
+            ("1.3em  double", "1.3em"),
+        ],
+        Free::Length("em"),
+    ),
+    setting(
+        "between paragraphs",
+        "par",
+        "spacing",
+        "1.2em",
+        &[
+            ("0.65em  as between lines", "0.65em"),
+            ("1em", "1em"),
+            ("1.2em  usual", "1.2em"),
+            ("1.6em", "1.6em"),
+        ],
+        Free::Length("em"),
+    ),
+    setting(
+        "paragraphs begin indented",
+        "par",
+        "first-line-indent",
+        "0pt",
+        &[
+            ("not at all", "0pt"),
+            ("1em", "1em"),
+            ("1.5em", "1.5em"),
+            ("2em", "2em"),
+        ],
+        Free::Length("em"),
+    ),
+    setting(
+        "headings numbered",
+        "heading",
+        "numbering",
+        "none",
+        &[
+            ("none", "none"),
+            ("1.1", "\"1.1\""),
+            ("1.1.", "\"1.1.\""),
+            ("1.a", "\"1.a\""),
+            ("I.1", "\"I.1\""),
+            ("A.1", "\"A.1\""),
+        ],
+        Free::Text,
+    ),
+    setting(
+        "equations numbered",
+        "math.equation",
+        "numbering",
+        "none",
+        &[
+            ("none", "none"),
+            ("(1)", "\"(1)\""),
+            ("[1]", "\"[1]\""),
+            ("(1.1)", "\"(1.1)\""),
+        ],
+        Free::Text,
+    ),
+    setting(
+        "captions stand",
+        "figure.caption",
+        "position",
+        "below",
+        &[("below", "bottom"), ("above", "top")],
+        Free::No,
+    ),
+    setting(
+        "figures are called",
+        "figure",
+        "supplement",
+        "Figure",
+        &[
+            ("Figure", "[Figure]"),
+            ("Fig.", "[Fig.]"),
+            ("Abbildung", "[Abbildung]"),
+            ("Abb.", "[Abb.]"),
+        ],
+        Free::Words,
+    ),
+    setting(
+        "lists are marked",
+        "list",
+        "marker",
+        "•",
+        &[("•", "[•]"), ("–", "[–]"), ("‣", "[‣]"), ("∗", "[∗]")],
+        Free::Words,
+    ),
+    setting(
+        "numbered lists count",
+        "enum",
+        "numbering",
+        "1.",
+        &[
+            ("1.", "\"1.\""),
+            ("(1)", "\"(1)\""),
+            ("a)", "\"a)\""),
+            ("i.", "\"i.\""),
+            ("A.", "\"A.\""),
+        ],
+        Free::Text,
+    ),
+    setting(
+        "sources are cited as",
+        "bibliography",
+        "style",
+        "ieee",
+        &[
+            ("ieee  [1]", "\"ieee\""),
+            ("apa  (Author, 2024)", "\"apa\""),
+            ("chicago  (Author 2024)", "\"chicago-author-date\""),
+            ("chicago, notes", "\"chicago-notes\""),
+            ("mla", "\"mla\""),
+            ("harvard", "\"harvard-cite-them-right\""),
+            ("nature", "\"nature\""),
+            ("din 1505-2", "\"din-1505-2-numeric\""),
+        ],
+        Free::Text,
+    ),
+    setting(
+        "title (of the file)",
+        "document",
+        "title",
+        "none",
+        &[],
+        Free::Words,
+    ),
+    setting(
+        "author (of the file)",
+        "document",
+        "author",
+        "none",
+        &[],
+        Free::Text,
+    ),
+];
+
+/// A text as Typst writes a string.
+fn quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// What was typed for a setting, as it is written in the rule; `None`
+/// if it is nothing the setting can be.
+fn typed_value(free: Free, typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return None;
+    }
+    match free {
+        Free::No => None,
+        Free::Length(unit) => {
+            let number = typed.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%');
+            let own = &typed[number.len()..];
+            let fine = number.parse::<f64>().is_ok_and(|number| number >= 0.0);
+            let known = matches!(own, "" | "pt" | "mm" | "cm" | "in" | "em" | "%");
+            (fine && known).then(|| format!("{number}{}", if own.is_empty() { unit } else { own }))
+        }
+        Free::Text => Some(quoted(typed)),
+        // Between brackets, with those of its own made harmless.
+        Free::Words => Some(format!(
+            "[{}]",
+            typed
+                .replace('\\', "\\\\")
+                .replace('[', "\\[")
+                .replace(']', "\\]")
+                .replace('#', "\\#")
+        )),
+        Free::Count => typed
+            .parse::<usize>()
+            .ok()
+            .filter(|count| (1..=8).contains(count))
+            .map(|count| count.to_string()),
+    }
+}
+
+/// What a value written in a rule is listed as: the choice it is, or
+/// else itself without its quotes or brackets.
+fn listed(setting: &Setting, written: &str) -> String {
+    let choice = setting.choices.iter().find(|(_, value)| *value == written);
+    match choice {
+        Some((label, _)) => (*label).to_owned(),
+        None => written
+            .trim_matches('"')
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned(),
+    }
+}
+
+impl Viewer {
+    /// The commands of the document manager, without their `doc`: none
+    /// puts it up; a number, with that row chosen; `set`, a row and what
+    /// was typed for it make the row that.
+    pub(super) fn doc_command(&mut self, command: &str) {
+        match command.strip_prefix("set ").map(|set| set.split_once(' ')) {
+            Some(Some((row, typed))) => {
+                if let Ok(row) = row.parse::<usize>() {
+                    self.type_setting(row, typed);
+                }
+            }
+            Some(None) => {}
+            None => self.open_manager(command.parse().unwrap_or(0)),
+        }
+    }
+
+    /// `:doc`: the document manager, with row `chosen` chosen.
+    pub(super) fn open_manager(&mut self, chosen: usize) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let source = editor.source();
+        let items = SETTINGS
+            .iter()
+            .enumerate()
+            .map(|(row, setting)| {
+                let written = typst_text::rule_value(source, setting.function, setting.key);
+                let now = written.map_or_else(
+                    || setting.usual.to_owned(),
+                    |written| listed(setting, &written),
+                );
+                (format!("{}\t{now}", setting.name), Target::Choose(row))
+            })
+            .collect();
+        self.open_picker("document", items, chosen.min(SETTINGS.len() - 1));
+    }
+
+    /// What setting `row` can be, to choose from or to type.
+    pub(super) fn open_setting(&mut self, row: usize) {
+        let (Some(setting), Some(editor)) = (SETTINGS.get(row), &self.editor) else {
+            return;
+        };
+        let written = typst_text::rule_value(editor.source(), setting.function, setting.key);
+        // One of two: the other, at once.
+        if let ([one, other], Free::No) = (setting.choices, setting.free) {
+            let now = written.as_deref().unwrap_or(other.1);
+            let (label, value) = if now == one.1 { other } else { one };
+            return self.apply_setting(row, value, label);
+        }
+        let fonts: Vec<(String, String)> = if setting.key == "font" {
+            let world = self.project.snapshot();
+            world
+                .book()
+                .families()
+                .map(|(family, _)| (family.to_owned(), quoted(family)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let choices = setting
+            .choices
+            .iter()
+            .map(|(label, value)| ((*label).to_owned(), (*value).to_owned()))
+            .chain(fonts);
+        let mut chosen = 0;
+        let mut items: Vec<(String, Target)> = Vec::new();
+        for (label, value) in choices {
+            if written.as_deref() == Some(value.as_str()) {
+                chosen = items.len();
+            }
+            let set = Target::Set {
+                row,
+                value,
+                told: label.clone(),
+            };
+            items.push((label, set));
+        }
+        if items.is_empty() {
+            // Nothing to choose from: it is typed.
+            items.push(("type it, then Enter".to_owned(), Target::Nothing));
+        }
+        let free = (setting.free != Free::No).then(|| format!("doc set {row} "));
+        self.open_picker_for(setting.name, items, chosen, format!("doc {row}"), free);
+    }
+
+    /// Makes setting `row` what was typed for it, if it can be that.
+    pub(super) fn type_setting(&mut self, row: usize, typed: &str) {
+        let Some(setting) = SETTINGS.get(row) else {
+            return;
+        };
+        if let Some(value) = typed_value(setting.free, typed) {
+            self.apply_setting(row, &value, typed.trim());
+        } else {
+            self.open_manager(row);
+            self.alert(format!("{} cannot be {typed}", setting.name));
+        }
+    }
+
+    /// Makes setting `row` be `value` (as written in the rule; `told` is
+    /// what it is called), and puts the list up again: there may be more
+    /// to decide.
+    pub(super) fn apply_setting(&mut self, row: usize, value: &str, told: &str) {
+        let (Some(setting), Some(editor)) = (SETTINGS.get(row), &mut self.editor) else {
+            return;
+        };
+        let (range, with) =
+            typst_text::set_rule(editor.source(), setting.function, setting.key, value);
+        match editor.replace(&[(range, with.as_str())]) {
+            Ok(()) => {
+                self.text_changed(Edited::Command);
+                self.notice(format!("{}: {told}  (u takes it back)", setting.name));
+            }
+            Err(why) => self.alert(format!("not changed: {why}")),
+        }
+        self.open_manager(row);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_is_typed_for_a_setting_is_written_as_typst_wants_it() {
+        assert_eq!(
+            typed_value(Free::Length("pt"), "12").as_deref(),
+            Some("12pt")
+        );
+        assert_eq!(
+            typed_value(Free::Length("cm"), "1in").as_deref(),
+            Some("1in")
+        );
+        assert_eq!(typed_value(Free::Length("cm"), "wide"), None);
+        assert_eq!(
+            typed_value(Free::Text, "Noto Serif").as_deref(),
+            Some("\"Noto Serif\"")
+        );
+        assert_eq!(
+            typed_value(Free::Words, "Draft [1]").as_deref(),
+            Some("[Draft \\[1\\]]")
+        );
+        assert_eq!(typed_value(Free::Count, "2").as_deref(), Some("2"));
+        assert_eq!(typed_value(Free::Count, "many"), None);
+        assert_eq!(typed_value(Free::No, "x"), None);
+    }
+
+    #[test]
+    fn every_setting_can_be_something() {
+        for setting in SETTINGS {
+            assert!(
+                !setting.choices.is_empty() || setting.free != Free::No,
+                "{} can be nothing",
+                setting.name
+            );
+        }
+    }
+}

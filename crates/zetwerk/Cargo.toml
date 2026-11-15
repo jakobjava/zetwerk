@@ -12,6 +12,7 @@ zetwerk-typst.workspace = true
 zetwerk-render.workspace = true
 zetwerk-app.workspace = true
 zetwerk-mcp.workspace = true
+zetwerk-language.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 toml.workspace = true

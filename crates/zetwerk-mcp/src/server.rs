@@ -18,7 +18,9 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 
-use crate::{Change, ChangeKind, Place, SharedEditor};
+use crate::{
+    Change, ChangeKind, Direction, ImageExport, ImageFormat, ImageOf, Place, SharedEditor,
+};
 
 /// Longest side of a rendered page unless the caller asks otherwise. Large
 /// enough to read body text, small enough for a model's image input.
@@ -87,6 +89,30 @@ struct TextArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AddSourceArgs {
+    /// One BibTeX entry or several, as text:
+    /// `@article{key, author = {Family, Given and …}, title = {…},
+    /// journal = {…}, year = {2024}, doi = {…}}`.
+    bibtex: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MoveSectionArgs {
+    /// The line the section's heading is on, counting from 1, as
+    /// `get_outline` gives it.
+    line: usize,
+    /// `up` puts the section before the section of its level that is
+    /// before it under the same heading, `down` behind the one behind
+    /// it; `deeper` and `shallower` change its level by one.
+    direction: Direction,
+    /// The `revision` you got the outline at. The move is refused if the
+    /// text has changed since.
+    expected_revision: Option<u64>,
+    /// `apply` (default) or `propose`; see `edit_source`.
+    mode: Option<EditMode>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct SearchArgs {
     /// The text to look for, literally (no patterns).
     query: String,
@@ -123,6 +149,30 @@ struct ExportPdfArgs {
     /// Where to write the PDF. By default beside the document's main
     /// file, with its name and the ending `.pdf`.
     path: Option<String>,
+    /// Which pages to write, counting from 1: `5`, `3-7`, `1,4-6`, `10-`
+    /// (default: all).
+    pages: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ExportImageArgs {
+    /// `png` or `svg`.
+    format: ImageFormat,
+    /// Which pages to write, counting from 1: `5`, `3-7`, `1,4-6`, `10-`
+    /// (default: all). Every page is a file of its own.
+    pages: Option<String>,
+    /// A line of the source, counting from 1, that is part of a figure
+    /// (`#figure(…)`): only that figure is written, with its caption and
+    /// without the rest of the page. Not together with `pages`.
+    figure_at_line: Option<usize>,
+    /// Where to write, as a name beside the document's main file ending
+    /// in `.png` or `.svg`. By default the main file's name with that
+    /// ending; of a figure, with the figure's label or number behind it.
+    /// Several pages are numbered: `name-1.png`, `name-2.png`, ….
+    path: Option<String>,
+    /// Pixels to the inch of a PNG (default 144 for pages, 300 for a
+    /// figure; 20 to 1200).
+    dpi: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -260,15 +310,105 @@ impl Server {
         self.value(crate::Editor::proposals).await
     }
 
-    /// Write the compiled document as a PDF file. Fails if the document
-    /// does not compile.
+    /// Write the compiled document as a PDF file: all of it, or the
+    /// `pages` named. Fails if the document does not compile. Answers
+    /// with the `path` written, and whether a file that was there was
+    /// `replaced`.
     #[tool(annotations(title = "Export PDF", read_only_hint = false, idempotent_hint = true))]
     async fn export_pdf(
         &self,
         Parameters(args): Parameters<ExportPdfArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.value(move |editor| editor.export_pdf(args.path.as_deref()))
+        self.value(move |editor| editor.export_pdf(args.path.as_deref(), args.pages.as_deref()))
             .await
+    }
+
+    /// Write pages of the compiled document as image files (`png` or
+    /// `svg`), one file a page; or, with `figure_at_line`, one figure of
+    /// it alone. Fails if the document does not compile, and never
+    /// writes over a file the document is made from. Answers with the
+    /// `files` written, each with its `path` and whether a file that
+    /// was there was `replaced`.
+    #[tool(annotations(title = "Export image", read_only_hint = false, idempotent_hint = true))]
+    async fn export_image(
+        &self,
+        Parameters(args): Parameters<ExportImageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let of = match (args.pages, args.figure_at_line) {
+            (Some(_), Some(_)) => {
+                return Ok(failure(
+                    "give either `pages` or `figure_at_line`, not both".to_owned(),
+                ));
+            }
+            (pages, None) => ImageOf::Pages(pages),
+            (None, Some(line)) => ImageOf::FigureAtLine(line),
+        };
+        let image = ImageExport {
+            format: args.format,
+            of,
+            dpi: args.dpi,
+            path: args.path,
+        };
+        self.value(move |editor| editor.export_image(image)).await
+    }
+
+    /// The sources of the document: what its bibliography file (a BibTeX
+    /// file beside it) holds, each with its `key`, its `kind` and its
+    /// fields, and the `file` they are in. A source is cited in the text
+    /// as `@key`.
+    #[tool(annotations(title = "List sources", read_only_hint = true))]
+    async fn list_sources(&self) -> Result<CallToolResult, ErrorData> {
+        self.value(crate::Editor::sources).await
+    }
+
+    /// The figures of the file being edited, in the order they stand
+    /// in: each with its `kind` (`image`, `table` or `other`), what it is
+    /// `numbered` as ("Figure 2", "Table 1": as far as this file alone
+    /// tells; null where it has no number), its `caption` as written,
+    /// its `label` (refer to it as `@label`), the `line` its call begins
+    /// on and, of an image, the `image` file. Tables and images that
+    /// stand in no figure are listed too, with `in_figure` false. Change
+    /// them with `edit_source`.
+    #[tool(annotations(title = "List figures", read_only_hint = true))]
+    async fn list_figures(&self) -> Result<CallToolResult, ErrorData> {
+        self.value(crate::Editor::figures).await
+    }
+
+    /// What can be referred to: the sections, figures, tables and
+    /// equations of the document and the sources of its bibliography.
+    /// Each of `targets` has its `kind`, its `label` (null if it has
+    /// none yet), its `number` as a reference shows it (null if the
+    /// compiled document does not know it), its `title` (the title, the
+    /// caption, the equation as written, or who wrote a source, when
+    /// and what) and the `line` it begins on (with `file`, if that is
+    /// not the file being edited). Refer to a thing as `@label`. One
+    /// without a label needs one first: write `<label>` right behind it
+    /// (at the end of a heading's line, behind the closing bracket of
+    /// `#figure(…)`, behind an equation's last `$`), as `sec:…`,
+    /// `fig:…`, `tab:…`, `eq:…`, and not one that is in use. A section
+    /// or an equation whose `numbered` is false cannot be referred to
+    /// by `@label` until it has a number.
+    #[tool(annotations(title = "List targets", read_only_hint = true))]
+    async fn list_targets(&self) -> Result<CallToolResult, ErrorData> {
+        self.value(crate::Editor::targets).await
+    }
+
+    /// Check the spelling and the grammar of the running text of the
+    /// file being edited (not its equations, code or raw text). All of
+    /// it is checked, on the user's machine, as the window checks it:
+    /// spelling by the Hunspell `dictionary` of the document's language
+    /// and the user's own words, grammar by what `grammar` names (a
+    /// `LanguageTool` server of the user's, or built-in rules for
+    /// English); either is `null` where nothing checks. Answers with
+    /// the `revision` checked and the `issues`: each with its `line`
+    /// and `column` (from 1), the `text` it is about, its `kind`
+    /// (`spelling` or `grammar`), a `message` and `suggestions` to
+    /// write instead (an empty suggestion means: take the text out).
+    /// `notes` say what could not be checked, such as a dictionary that
+    /// is not installed. Fails if the user has checking switched off.
+    #[tool(annotations(title = "Check language", read_only_hint = true))]
+    async fn check_language(&self) -> Result<CallToolResult, ErrorData> {
+        self.value(crate::Editor::check_language).await
     }
 }
 
@@ -281,6 +421,23 @@ impl Server {
     /// `revision`, the lines changed and the compile errors of the result
     /// (`diagnostics`; empty if it compiles) — or, for a proposal, with its
     /// `id`.
+    /// Add sources to the document's bibliography. They are given as
+    /// BibTeX and put behind what the file holds; nothing in it is
+    /// changed or taken out. Unlike the text, the file is written at
+    /// once. Where the document does not list a bibliography yet, it is
+    /// made to. Answers with the `keys` the sources are cited by, which
+    /// are the ones given unless those were taken: cite with `@key` in
+    /// the text (`edit_source`). Refused while the user wants changes
+    /// proposed only.
+    #[tool(annotations(title = "Add source", read_only_hint = false))]
+    async fn add_source(
+        &self,
+        Parameters(args): Parameters<AddSourceArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.value(move |editor| editor.add_source(&args.bibtex))
+            .await
+    }
+
     #[tool(annotations(title = "Edit source", read_only_hint = false))]
     async fn edit_source(
         &self,
@@ -322,6 +479,31 @@ impl Server {
     ) -> Result<CallToolResult, ErrorData> {
         let change = Change {
             what: ChangeKind::ReplaceSelection(args.text),
+            expected_revision: args.expected_revision,
+            propose: args.mode == Some(EditMode::Propose),
+        };
+        self.value(move |editor| editor.change(change)).await
+    }
+
+    /// Rearrange the document by whole sections, without retyping them.
+    /// A section is a heading and all up to the next heading of its
+    /// level or above: its subsections go with it, and so do labels.
+    /// `up` and `down` take it past the section of its level next to it
+    /// under the same heading, and no further: it is refused where there
+    /// is none. `deeper` and `shallower` change the level of the section
+    /// and of all its subsections by one, between 1 and 6. Lines shift
+    /// when a section moves: ask `get_outline` again before the next
+    /// move. Answers like `edit_source`.
+    #[tool(annotations(title = "Move section", read_only_hint = false))]
+    async fn move_section(
+        &self,
+        Parameters(args): Parameters<MoveSectionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let change = Change {
+            what: ChangeKind::MoveSection {
+                line: args.line,
+                direction: args.direction,
+            },
             expected_revision: args.expected_revision,
             propose: args.mode == Some(EditMode::Propose),
         };

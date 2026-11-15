@@ -49,6 +49,13 @@ pub struct Options {
     /// pages are shown as slides.
     pub layout: Option<viewer::Panes>,
     pub slides: bool,
+    /// How many times its usual size everything that is not a page is
+    /// to be, if not once.
+    pub ui_scale: Option<f64>,
+    /// What the user wants in the menu of things to put in.
+    pub inserts: Vec<crate::typst_text::Insert>,
+    /// What the user has to say about spelling and grammar.
+    pub language: zetwerk_language::Settings,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -208,8 +215,12 @@ impl ApplicationHandler<Event> for App {
         };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            // Away from the window is a good moment to make sure.
-            WindowEvent::Focused(false) => session.viewer.sync(),
+            // Away from the window is a good moment to make sure. A
+            // button let go there may never be heard of.
+            WindowEvent::Focused(false) => {
+                session.viewer.sync();
+                session.viewer.pointer_released();
+            }
             WindowEvent::RedrawRequested => session.redraw(),
             other => session.window_event(other),
         }
@@ -239,6 +250,11 @@ impl ApplicationHandler<Event> for App {
             return;
         };
         let now = Instant::now();
+        // A pointer held beyond the text while it selects moves the view
+        // along; nothing else here goes by the clock.
+        if session.viewer.autoscroll(now) {
+            session.window.request_redraw();
+        }
         if session.scheduler.take_due(now) {
             let (revision, world) = session.viewer.snapshot();
             session.compiler.compile(revision, world);
@@ -251,10 +267,14 @@ impl ApplicationHandler<Event> for App {
             session.viewer.sync();
             sync_at = None;
         }
-        let deadline = [session.scheduler.deadline(), sync_at]
-            .into_iter()
-            .flatten()
-            .min();
+        let deadline = [
+            session.scheduler.deadline(),
+            sync_at,
+            session.viewer.autoscroll_at(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         event_loop.set_control_flow(match deadline {
             Some(deadline) => ControlFlow::WaitUntil(deadline),
             None => ControlFlow::Wait,
@@ -349,6 +369,8 @@ impl Session {
         .ok_or("cannot set up the interface")?
         .editing(editor, &opened)
         .configured(options);
+        let mut viewer = viewer;
+        viewer.wake_for_language(wake(proxy));
         let mut session = Self {
             window,
             surface,
@@ -366,6 +388,7 @@ impl Session {
             last_edit: None,
             waiting: Vec::new(),
         };
+        session.viewer.export_in_background(wake(proxy));
         session.watch_dependencies();
         session.scheduler.request(Urgency::Now, Instant::now());
         Ok(session)
@@ -390,7 +413,12 @@ impl Session {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
-                return;
+                // Nothing to do, and nothing to draw, unless a button is
+                // down.
+                if !self.viewer.pointer_moved(self.cursor) {
+                    return;
+                }
+                self.after_keys();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let Some(key) = translate(&event.logical_key) else {
@@ -404,10 +432,20 @@ impl Session {
                 self.after_keys();
             }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
-            } => self.viewer.click(self.cursor),
+            } => {
+                if state == ElementState::Pressed {
+                    let shift = self.modifiers.shift_key();
+                    self.viewer
+                        .pointer_pressed(self.cursor, shift, Instant::now());
+                } else {
+                    self.viewer.pointer_released();
+                }
+                // A press may end typing or take an entry of a list.
+                self.after_keys();
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let line = 60.0 * self.window.scale_factor();
                 let (dx, dy) = match delta {
@@ -415,7 +453,7 @@ impl Session {
                     MouseScrollDelta::PixelDelta(position) => (position.x, position.y),
                 };
                 if self.modifiers.control_key() {
-                    self.viewer.zoom_by(1.1_f64.powf(dy / line), self.cursor);
+                    self.viewer.zoom_at(1.1_f64.powf(dy / line), self.cursor);
                 } else {
                     // Turning the wheel away from the user moves the page
                     // down, which is the view moving up.
@@ -423,7 +461,7 @@ impl Session {
                 }
             }
             WindowEvent::PinchGesture { delta, .. } => {
-                self.viewer.zoom_by(1.0 + delta, self.cursor);
+                self.viewer.zoom_at(1.0 + delta, self.cursor);
             }
             _ => return,
         }
@@ -502,6 +540,7 @@ impl Session {
             // The compile may have read files it had not read before.
             self.watch_dependencies();
         }
+        self.viewer.export_progress();
         for tile in self.rasterizer.poll() {
             let (width, height) = (tile.pixmap.width(), tile.pixmap.height());
             self.gpu

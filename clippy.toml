@@ -1,0 +1,3 @@
+# Names that are written as they are in documentation, without the
+# backticks code gets. ".." keeps the ones clippy knows.
+doc-valid-idents = ["LanguageTool", ".."]

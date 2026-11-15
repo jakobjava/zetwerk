@@ -18,6 +18,7 @@ zetwerk-corpus = { path = "crates/zetwerk-corpus" }
 zetwerk-predict = { path = "crates/zetwerk-predict" }
 zetwerk-app = { path = "crates/zetwerk-app" }
 zetwerk-mcp = { path = "crates/zetwerk-mcp" }
+zetwerk-language = { path = "crates/zetwerk-language", default-features = false }
 
 # The Typst family moves in lockstep and breaks embedder APIs on every minor
 # release, so it is pinned exactly.
@@ -31,8 +32,10 @@ typst-kit = { version = "=0.15.1", default-features = false, features = [
 ] }
 typst-layout = "=0.15.1"
 typst-render = "=0.15.1"
+typst-svg = "=0.15.1"
 typst-pdf = "=0.15.1"
 typst-ide = "=0.15.1"
+typst-syntax = "=0.15.1"
 comemo = "0.5.1"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd", "png-format"] }
 lexopt = "0.3"

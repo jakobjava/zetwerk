@@ -378,6 +378,17 @@ pub fn in_place_markup(source: &str, style: &InPlace, literal: bool) -> String {
     )
 }
 
+/// Markup for the number beside a line of a page that says how far the
+/// line is from the cursor: faint, small, on nothing.
+#[must_use]
+pub fn margin_number_markup(number: usize, size: f64) -> String {
+    format!(
+        "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
+         #set text(font: \"{FONT}\", size: {size}pt, fill: rgb(\"{DIM}\").transparentize(25%))\n\
+         {number}"
+    )
+}
+
 /// Where in markup made by [`in_place_markup`] the piece itself begins.
 #[must_use]
 pub fn in_place_body(markup: &str) -> Option<usize> {

@@ -166,6 +166,12 @@ impl Viewer {
                 let cell = caret.cell;
                 let put_in = change.offset..change.offset + change.inserted;
                 let below = text.get(put_in.clone())?.starts_with('\n');
+                // Blanks at the end of what the page has show as nothing
+                // there: they are shown with what follows them now.
+                let before = text.get(..put_in.start)?;
+                let blanks = before.len() - before.trim_end_matches(' ').len();
+                let lead = if at.is_none() && !below { blanks } else { 0 };
+                let put_in = put_in.start - lead..put_in.end;
                 // The line it is in begins where its paragraph does.
                 let lines = self.page_lines.get_mut();
                 let lines = lines.entry(index).or_insert_with(|| map.lines());
@@ -221,6 +227,12 @@ impl Viewer {
         let zoom = self.view.zoom;
         let style = typed.style();
         let (mut text, mut cursor) = filled(source, at, places.unwrap_or_default());
+        if text.starts_with(' ') {
+            // A blank that a piece begins with would not show: one that
+            // does, as wide.
+            text.replace_range(0..1, "\u{a0}");
+            cursor += usize::from(at > 0);
+        }
         for _ in 0..TRIES {
             let markup = chrome::in_place_markup(&text, &style, false);
             if let Some((image, end)) = self.chrome.render_in_place(&markup, zoom) {

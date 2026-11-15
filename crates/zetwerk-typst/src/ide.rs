@@ -3,6 +3,9 @@
 
 use std::ops::Range;
 
+use comemo::Track;
+use typst::introspection::Introspector;
+use typst::model::BibliographyElem;
 use typst::syntax::{FileId, Side, Source};
 use typst::{World, WorldExt};
 use typst_ide::{CompletionKind, Definition, IdeWorld, Tooltip};
@@ -126,6 +129,21 @@ pub fn definition_of(
         Definition::File(file) => Some((file, 0..0)),
         Definition::Std(_) => None,
     }
+}
+
+/// The keys of the sources that the bibliographies of `document` hold,
+/// each with the title of its source, if it has one: what can be cited
+/// whatever kind of file the sources are kept in.
+#[must_use]
+pub fn bibliography_keys(document: &PagedDocument) -> Vec<(String, Option<String>)> {
+    let introspector: &dyn Introspector = document.introspector().as_ref();
+    BibliographyElem::keys(introspector.track())
+        .into_iter()
+        .map(|(key, title)| {
+            let title = title.map(|title| title.to_string());
+            (key.resolve().as_str().to_owned(), title)
+        })
+        .collect()
 }
 
 #[cfg(test)]

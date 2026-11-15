@@ -676,6 +676,46 @@ impl<B: Buffer> Document<B> {
         Ok(())
     }
 
+    /// The text of any state of the history, without going there: the
+    /// document, its history and its journal are as they were. `None` if
+    /// there is no such state.
+    ///
+    /// This is for looking at what the text was. Looking must never cost
+    /// anything, so it works on a copy of the text and writes nothing.
+    #[must_use]
+    pub fn text_at(&self, state: StateId) -> Option<String> {
+        let steps = self.history.steps(self.history.current(), state)?;
+        let mut text = self.buffer.text().to_owned();
+        for step in steps {
+            change::apply(&mut text, step.changes, step.direction).ok()?;
+        }
+        Some(text)
+    }
+
+    /// Makes `state` the one redo leads to from the state before it, so
+    /// that a branch of the history which redo has left can be walked
+    /// again. The text does not change. Returns `false`, and does
+    /// nothing, if there is no such state or it is the root.
+    ///
+    /// Like every change of the history, this is in the journal before
+    /// it counts: where redo leads survives a crash.
+    pub fn prefer(&mut self, state: StateId) -> Result<bool, DocumentError> {
+        let Some(parent) = self.history.parent(state) else {
+            return Ok(false);
+        };
+        if self.history.redo_target(parent) == Some(state) {
+            return Ok(true);
+        }
+        let record = Record::Prefer {
+            state: parent,
+            child: state,
+        };
+        self.journal
+            .append(&record)
+            .map_err(DocumentError::Journal)?;
+        Ok(self.history.set_redo_target(parent, state))
+    }
+
     /// Writes the text to the file.
     ///
     /// If something else changed the file since zetwerk last read or wrote

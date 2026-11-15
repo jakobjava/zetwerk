@@ -37,8 +37,26 @@ Settings are read from ~/.config/zetwerk/config.toml:
   [view]
   layout = \"split\"        or \"source\", \"page\"
   slides = false          one page at a time, whole
+  ui_scale = 1.0          how large the status line, the lists and the
+                          source are; :ui 1.5, :ui + and :ui - while open
   [power]
   mode = \"auto\"           or \"saver\", \"performance\"
+  [language]
+  spelling = true         mark words no Hunspell dictionary knows, in the
+                          document's language (English, British first,
+                          where it names none); ]s [s z= zg zw, :spell
+  grammar = true          and what a grammar checker finds; :grammar
+  language = \"nl\"         check as Dutch whatever the document says
+  dictionaries = [\"~/d\"]  more directories with .aff and .dic files
+  languagetool = \"http://localhost:8081\"
+                          a LanguageTool server of yours for the grammar
+                          of German, Dutch and English; without one,
+                          English alone is checked, by built-in rules
+  allow_remote = false    only this machine is sent text, unless true
+  [[insert]]              your own things for the # menu, as many
+  name = \"diagram\"        as you like: for a package, a theorem
+  body = \"#diagram(|)\"    (| is where the cursor goes)
+  block = true            it stands by itself, like a figure
   [keys.normal]           your own keys, as Vim's nnoremap
   \"<C-s>\" = \":w<CR>\"
   [keys.insert]           and inoremap (one key each)
@@ -65,6 +83,8 @@ Options for developing zetwerk itself:
       --keys <keys>       Press these keys once the document is shown,
                           in Vim notation, e.g. 'jj<C-d>:perf<CR>'
       --screenshot <path> Then save the window as a PNG and quit
+      --paced             Press the keys one by one, each once the one
+                          before has been typeset, as somebody typing
   zetwerk call <tool> [json-arguments] [-o <path>]
                           Call a tool of the open window, as an agent
                           would; images are written to <path>";
@@ -104,7 +124,26 @@ struct Args {
     power: Option<PowerMode>,
     keys: Vec<KeyPress>,
     screenshot: Option<PathBuf>,
+    /// Whether the keys of the script wait for each other's effect.
+    paced: bool,
     main: Option<PathBuf>,
+}
+
+/// Makes sure there is a file at `path` to open: one that does not
+/// exist yet is begun, empty. Nothing that is there is ever replaced.
+fn begin_if_new(path: &Path) -> Result<(), String> {
+    if path.is_file() {
+        return Ok(());
+    }
+    if path.exists() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|err| format!("cannot begin {}: {err}", path.display()))
 }
 
 /// What a document is opened with: what the command line says, then what
@@ -131,6 +170,9 @@ fn options(
         keys,
         layout: config.view.layout.map(Into::into),
         slides: config.view.slides,
+        ui_scale: config.view.ui_scale,
+        inserts: config.inserts(),
+        language: config.language.settings(),
     })
 }
 
@@ -171,11 +213,10 @@ fn run() -> Result<(), String> {
     if args.output.is_some() || args.page.is_some() || args.scale.is_some() {
         return Err("--output, --page and --scale belong to `zetwerk render`".to_owned());
     }
-    if !input.is_file() {
-        return Err(format!("{} is not a file", input.display()));
-    }
+    begin_if_new(&input)?;
 
     let (script_result, script_done) = mpsc::channel();
+    let paced = args.paced;
     let script = (!args.keys.is_empty() || args.screenshot.is_some())
         .then(|| (args.keys.clone(), args.screenshot.clone()));
     let (config, complaint) = config::load();
@@ -195,7 +236,7 @@ fn run() -> Result<(), String> {
         });
         if let Some((keys, screenshot)) = script {
             std::thread::spawn(move || {
-                let result = run_script(&handle, keys, screenshot.as_deref());
+                let result = run_script(&handle, keys, screenshot.as_deref(), paced);
                 let _ = script_result.send(result);
                 handle.send(Request::Quit);
             });
@@ -241,6 +282,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.keys = keys::parse(&notation)?;
             }
             Long("screenshot") => args.screenshot = Some(parser.value().map_err(fail)?.into()),
+            Long("paced") => args.paced = true,
             Long("main") => args.main = Some(parser.value().map_err(fail)?.into()),
             Value(value) if args.command == Command::Open && args.values.is_empty() => {
                 match value.to_str() {
@@ -263,6 +305,7 @@ fn run_script(
     handle: &Handle,
     keys: Vec<KeyPress>,
     screenshot: Option<&Path>,
+    paced: bool,
 ) -> Result<(), String> {
     let gone = || "the window closed before the script finished".to_owned();
     let timeout = |_| format!("the window did not settle within {SCRIPT_TIMEOUT:?}");
@@ -273,10 +316,26 @@ fn run_script(
         .then_some(())
         .ok_or_else(gone)?;
     when_settled.recv_timeout(SCRIPT_TIMEOUT).map_err(timeout)?;
-    handle
-        .send(Request::Keys(keys))
-        .then_some(())
-        .ok_or_else(gone)?;
+    if paced {
+        // As somebody types: every key sees what the one before led to.
+        for key in keys {
+            handle
+                .send(Request::Keys(vec![key]))
+                .then_some(())
+                .ok_or_else(gone)?;
+            let (settled, when_settled) = mpsc::channel();
+            handle
+                .send(Request::WhenSettled(settled))
+                .then_some(())
+                .ok_or_else(gone)?;
+            when_settled.recv_timeout(SCRIPT_TIMEOUT).map_err(timeout)?;
+        }
+    } else {
+        handle
+            .send(Request::Keys(keys))
+            .then_some(())
+            .ok_or_else(gone)?;
+    }
 
     let Some(path) = screenshot else {
         return Ok(());

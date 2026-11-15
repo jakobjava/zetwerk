@@ -12,11 +12,26 @@
 //! [view]
 //! layout = "split"    # or "source", "page": what the window shows
 //! slides = false      # one page at a time, whole
+//! ui_scale = 1.0      # how large everything that is not a page is
 //!
 //! [power]
 //! mode = "auto"       # or "saver", "performance"
 //!
+//! [language]
+//! spelling = true     # words no dictionary knows are marked on the page
+//! grammar = true      # and what a grammar checker finds
+//! language = "nl"     # check as Dutch, whatever the document says it is
+//! dictionaries = ["~/dictionaries"]  # more places to look for Hunspell's
+//! # A LanguageTool server of your own checks the grammar of German,
+//! # Dutch and English. Only this machine is asked, unless you say so.
+//! languagetool = "http://localhost:8081"
+//! allow_remote = false
+//!
 //! # Your own keys, as in Vim's nnoremap and inoremap.
+//! [[insert]]            # your own things for the `#` menu
+//! name = "diagram"
+//! body = "#diagram(|)" # `|` is where the cursor goes
+//! block = true         # it stands by itself, like a figure
 //! [keys.normal]
 //! ";" = ":"
 //! "<C-s>" = ":w<CR>"
@@ -32,7 +47,7 @@ use zetwerk_app::power::PowerMode;
 use zetwerk_app::viewer::agent::AgentEdits;
 use zetwerk_app::viewer::{Keymap, Panes};
 
-#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -42,16 +57,55 @@ pub struct Config {
     #[serde(default)]
     pub power: Power,
     #[serde(default)]
+    pub language: Checking,
+    #[serde(default)]
     pub keys: Keys,
+    /// The user's own things to put in.
+    #[serde(default)]
+    pub insert: Vec<Insert>,
+}
+
+/// Something the user wants in the menu of things to put into running
+/// text (`#` while typing): for a package's diagrams, a letterhead, a
+/// theorem.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Insert {
+    /// What it is listed as and found by.
+    pub name: String,
+    /// What is put into the text; `|` is where the cursor goes.
+    pub body: String,
+    /// Whether it stands by itself, as a paragraph does.
+    #[serde(default)]
+    pub block: bool,
+}
+
+impl Config {
+    /// The user's own things to put in, as the menu wants them. They
+    /// are kept for as long as the program runs.
+    #[must_use]
+    pub fn inserts(&self) -> Vec<zetwerk_app::typst_text::Insert> {
+        self.insert
+            .iter()
+            .map(|insert| zetwerk_app::typst_text::Insert {
+                name: Box::leak(insert.name.to_lowercase().into_boxed_str()),
+                short: "",
+                body: Box::leak(insert.body.clone().into_boxed_str()),
+                block: insert.block,
+            })
+            .collect()
+    }
 }
 
 /// What the window shows to begin with.
-#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct View {
     pub layout: Option<Layout>,
     #[serde(default)]
     pub slides: bool,
+    /// How many times its usual size the interface is.
+    pub ui_scale: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -93,6 +147,67 @@ impl From<Mode> for PowerMode {
             Mode::Auto => Self::Auto,
             Mode::Saver => Self::Saver,
             Mode::Performance => Self::Performance,
+        }
+    }
+}
+
+/// What is checked of the language of a document, and what with.
+///
+/// Spelling is checked with the Hunspell dictionaries installed on the
+/// machine, in the language the document says it is written in
+/// (`#set text(lang: "de")`; English where it says nothing, British
+/// before American). Grammar is checked by the LanguageTool server
+/// named here, or, without one, English alone by rules built in.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Checking {
+    /// Whether spelling is checked; it is unless this says no.
+    pub spelling: Option<bool>,
+    /// Whether grammar is; it is unless this says no.
+    pub grammar: Option<bool>,
+    /// The language to check in, whatever the document says: `de`,
+    /// `nl`, `en-GB`.
+    pub language: Option<String>,
+    /// Directories to look for dictionaries in before the usual ones.
+    #[serde(default)]
+    pub dictionaries: Vec<PathBuf>,
+    /// The address of a LanguageTool server: `http://localhost:8081`.
+    pub languagetool: Option<String>,
+    /// Whether that server may be another machine than this one: then
+    /// the text of documents is sent there.
+    #[serde(default)]
+    pub allow_remote: bool,
+}
+
+impl Checking {
+    /// The settings as the checker takes them: with the places
+    /// dictionaries are looked for in, and the file the user's own
+    /// words are kept in, `words.txt` beside the settings.
+    #[must_use]
+    pub fn settings(&self) -> zetwerk_language::Settings {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        // `~` is the shell's to resolve, and no shell reads this file.
+        let resolved = |path: &PathBuf| match (path.strip_prefix("~"), &home) {
+            (Ok(rest), Some(home)) => home.join(rest),
+            _ => path.clone(),
+        };
+        let own: Vec<PathBuf> = self.dictionaries.iter().map(resolved).collect();
+        zetwerk_language::Settings {
+            spelling: self.spelling.unwrap_or(true),
+            grammar: self.grammar.unwrap_or(true),
+            language: self
+                .language
+                .clone()
+                .filter(|language| !language.trim().is_empty()),
+            directories: zetwerk_language::directories(&own),
+            words: path().map(|settings| settings.with_file_name("words.txt")),
+            languagetool: self
+                .languagetool
+                .as_ref()
+                .map(|url| zetwerk_language::Server {
+                    url: url.clone(),
+                    remote: self.allow_remote,
+                }),
         }
     }
 }
@@ -216,13 +331,19 @@ mod tests {
         };
         assert_eq!(config, Ok(expected));
         let config = parse(
-            "[view]\nlayout = \"page\"\nslides = true\n[power]\nmode = \"saver\"\n\
+            "[view]\nlayout = \"page\"\nslides = true\nui_scale = 1.5\n[power]\nmode = \"saver\"\n\
              [keys.normal]\n\";\" = \":\"\n[keys.insert]\n\"<C-s>\" = \"<Esc>:w<CR>\"\n",
         )
         .unwrap_or_default();
         assert_eq!(
             (config.view.layout, config.view.slides),
             (Some(Layout::Page), true)
+        );
+        assert!(
+            config
+                .view
+                .ui_scale
+                .is_some_and(|ui| (ui - 1.5).abs() < 1e-9)
         );
         assert_eq!(config.power.mode, Some(Mode::Saver));
         assert_eq!(config.keys.keymap().1, None);
@@ -239,5 +360,47 @@ mod tests {
         let wrong = parse("[ai]\nedit_mode = \"yolo\"\n");
         assert!(wrong.is_err_and(|why| why.starts_with("line 2")));
         assert!(parse("[ia]\n").is_err());
+    }
+
+    #[test]
+    fn language_is_checked_unless_the_settings_say_no() {
+        let settings = Config::default().language.settings();
+        assert!(settings.spelling && settings.grammar);
+        assert_eq!((settings.language, settings.languagetool), (None, None));
+        // Where packages put dictionaries is always looked in.
+        let system = std::path::Path::new("/usr/share/hunspell");
+        assert!(
+            settings
+                .directories
+                .iter()
+                .any(|directory| directory == system)
+        );
+
+        let config = parse(
+            "[language]\nspelling = false\ngrammar = false\nlanguage = \"nl\"\n\
+             dictionaries = [\"/opt/dictionaries\"]\n\
+             languagetool = \"http://localhost:8081\"\n",
+        )
+        .unwrap_or_default();
+        let settings = config.language.settings();
+        assert!(!settings.spelling && !settings.grammar);
+        assert_eq!(settings.language.as_deref(), Some("nl"));
+        // The user's own directories come first.
+        let own = std::path::Path::new("/opt/dictionaries");
+        assert_eq!(
+            settings.directories.first().map(PathBuf::as_path),
+            Some(own)
+        );
+        // A server is this machine's unless the settings say otherwise.
+        let server = settings.languagetool.unwrap_or_default();
+        assert_eq!(
+            (server.url.as_str(), server.remote),
+            ("http://localhost:8081", false)
+        );
+        let remote =
+            parse("[language]\nlanguagetool = \"https://lt.example.org\"\nallow_remote = true\n");
+        let remote = remote.unwrap_or_default().language.settings().languagetool;
+        assert!(remote.is_some_and(|server| server.remote));
+        assert!(parse("[language]\nspeling = true\n").is_err());
     }
 }

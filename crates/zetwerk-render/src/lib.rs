@@ -7,6 +7,7 @@
 //! changed line does not cost a full page.
 
 mod cull;
+pub mod export;
 mod rasterizer;
 mod tiles;
 

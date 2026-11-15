@@ -1,0 +1,23 @@
+# Een klein Nederlands woordenboek voor de tests van zetwerk, met wat
+# het echte ook gebruikt: vlaggen van twee letters, KEEPCASE, en
+# getallen die volgens regels worden samengesteld.
+SET UTF-8
+TRY ernitsaoldgkupmchbvjwfzyxëéèöüïERNITSAOLDGKUPMCHBVJWFZYX'
+WORDCHARS '’
+FLAG long
+KEEPCASE Kc
+FORBIDDENWORD Fw
+COMPOUNDMIN 1
+ONLYINCOMPOUND Oc
+
+COMPOUNDRULE 2
+COMPOUNDRULE (N1)(n2)
+COMPOUNDRULE (N1)(N1)(n2)
+
+SFX Zn Y 3
+SFX Zn s zen is
+SFX Zn 0 en [^i]s
+SFX Zn 0 en [^s]
+
+SFX Ss Y 1
+SFX Ss 0 's [aou]

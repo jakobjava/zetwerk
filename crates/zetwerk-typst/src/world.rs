@@ -328,9 +328,26 @@ impl Project {
         if put.is_empty() || !in_order || !in_text {
             return world;
         }
+        // What is put in close together goes in at once: marks that
+        // come in pairs (the quotes around a word) are never one without
+        // the other, which Typst would read all that follows anew for.
         let mut shown = written.clone();
-        for (at, with) in put.iter().rev() {
-            shown.edit(*at..*at, with);
+        let mut last = put.len();
+        while last > 0 {
+            let mut first = last - 1;
+            while first > 0 && put[first].0 - put[first - 1].0 <= TOGETHER {
+                first -= 1;
+            }
+            let bytes = put[first].0..put[last - 1].0;
+            let mut with = String::new();
+            let mut from = bytes.start;
+            for (at, more) in &put[first..last] {
+                with.push_str(&text[from..*at]);
+                with.push_str(more);
+                from = *at;
+            }
+            shown.edit(bytes, &with);
+            last = first;
         }
         world.sources.insert(file, shown);
         world.shown = Some(Shown {
@@ -341,6 +358,10 @@ impl Project {
         world
     }
 }
+
+/// How many bytes apart two things put into a text to show it may be
+/// to be put in as one change.
+const TOGETHER: usize = 256;
 
 /// How a file is shown otherwise than it is written.
 struct Shown {
@@ -422,6 +443,28 @@ impl ProjectWorld {
     /// project that is not open for editing can be opened.
     #[must_use]
     pub fn is_editable(&self, id: FileId) -> bool {
+        self.is_owned_or_of_project(id)
+    }
+
+    /// This view of the project with `source` as the text of its file,
+    /// whatever that text was: for typesetting a part of a document by
+    /// itself (see [`crate::local`]).
+    #[must_use]
+    pub fn with_text(&self, source: Source) -> Self {
+        let mut sources = self.sources.clone();
+        sources.insert(source.id(), source);
+        Self {
+            env: Arc::clone(&self.env),
+            root: self.root.clone(),
+            main: self.main,
+            sources,
+            external: Arc::clone(&self.external),
+            time: Time::system(),
+            shown: None,
+        }
+    }
+
+    fn is_owned_or_of_project(&self, id: FileId) -> bool {
         self.sources.contains_key(&id) || matches!(id.root(), VirtualRoot::Project)
     }
 

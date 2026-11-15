@@ -7,9 +7,14 @@ use serde_json::{Value, json};
 use zetwerk_app::app::{Handle, Request, Screenshot, Task};
 use zetwerk_app::editor::Mode as EditMode;
 use zetwerk_app::keys;
+use zetwerk_app::sections::Way;
 use zetwerk_app::viewer::agent::{AgentEdits, Outcome};
+use zetwerk_app::viewer::export::{Exported, Format, Pages, Wanted, What};
 use zetwerk_app::viewer::{Mode, Panes, Viewer};
-use zetwerk_mcp::{Change, ChangeKind, Editor, EditorState, Place, Selection};
+use zetwerk_mcp::{
+    Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, Place,
+    Selection,
+};
 
 /// How long the window may take to answer something it can answer at once.
 const PROMPT: Duration = Duration::from_secs(5);
@@ -72,6 +77,23 @@ impl Bridge {
             PATIENT,
         )
     }
+}
+
+impl Bridge {
+    /// Writes the export `wanted` of the text as it is, once that is
+    /// compiled. The window only hands over its pages; the files are
+    /// made and written here, on the thread of whoever asked.
+    fn export(&self, wanted: Wanted) -> Result<Exported, String> {
+        let job = self.compiled(move |viewer| viewer.plan_export(&wanted))??;
+        job.run().map_err(|why| format!("not exported: {why}"))
+    }
+}
+
+/// The pages `text` names, as an agent wrote them.
+fn named_pages(text: &str) -> Result<Pages, String> {
+    Pages::parse(text.trim()).ok_or_else(|| {
+        format!("{text:?} names no pages; write them as `5`, `3-7`, `1,4-6` or `10-`")
+    })
 }
 
 impl Editor for Bridge {
@@ -161,6 +183,15 @@ impl Editor for Bridge {
             ChangeKind::Insert(text) => viewer.agent_insert(&text, expected, propose),
             ChangeKind::ReplaceSelection(text) => {
                 viewer.agent_replace_selection(&text, expected, propose)
+            }
+            ChangeKind::MoveSection { line, direction } => {
+                let way = match direction {
+                    Direction::Up => Way::Up,
+                    Direction::Down => Way::Down,
+                    Direction::Deeper => Way::Deeper,
+                    Direction::Shallower => Way::Shallower,
+                };
+                viewer.agent_move_section(line, way, expected, propose)
             }
         })??;
         match outcome {
@@ -284,31 +315,154 @@ impl Editor for Bridge {
         Ok(json!({ "withdrawn": id, "waiting": left }))
     }
 
-    fn export_pdf(&self, path: Option<&str>) -> Result<Value, String> {
-        let export = self.compiled(|viewer| viewer.for_export())??;
-        let beside = export.main.as_deref();
-        let path = match (path, beside) {
-            // A name is a name beside the document.
-            (Some(path), Some(main)) => main
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join(path),
-            (Some(path), None) => path.into(),
-            (None, Some(main)) => main.with_extension("pdf"),
-            (None, None) => return Err("the document is not a file; say where to write".into()),
+    fn export_pdf(&self, path: Option<&str>, pages: Option<&str>) -> Result<Value, String> {
+        let outcome = self.export(Wanted {
+            format: Format::Pdf,
+            what: What::Pages(pages.map(named_pages).transpose()?),
+            dpi: None,
+            file: path.map(str::to_owned),
+        })?;
+        let [file] = outcome.files.as_slice() else {
+            return Err("the PDF did not come out as one file".to_owned());
         };
-        if path.extension().is_none_or(|extension| extension != "pdf") {
-            return Err(format!("{} does not end in .pdf", path.display()));
-        }
-        let bytes = zetwerk_typst::export_pdf(&export.document, &*export.world)
-            .map_err(|errors| format!("not exported: {}", errors.join("; ")))?;
-        std::fs::write(&path, &bytes)
-            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
         Ok(json!({
-            "path": path.display().to_string(),
-            "bytes": bytes.len(),
-            "pages": export.document.pages().len(),
+            "path": file.path.display().to_string(),
+            "bytes": file.bytes,
+            "replaced": file.replaced,
+            "pages": outcome.pages,
+            "of": outcome.of,
         }))
+    }
+
+    fn export_image(&self, image: ImageExport) -> Result<Value, String> {
+        let outcome = self.export(Wanted {
+            format: match image.format {
+                ImageFormat::Png => Format::Png,
+                ImageFormat::Svg => Format::Svg,
+            },
+            what: match image.of {
+                ImageOf::Pages(pages) => {
+                    What::Pages(pages.as_deref().map(named_pages).transpose()?)
+                }
+                ImageOf::FigureAtLine(line) => What::FigureAtLine(line),
+            },
+            dpi: image.dpi.map(f64::from),
+            file: image.path,
+        })?;
+        let files: Vec<Value> = outcome
+            .files
+            .iter()
+            .map(|file| {
+                json!({
+                    "path": file.path.display().to_string(),
+                    "bytes": file.bytes,
+                    "replaced": file.replaced,
+                })
+            })
+            .collect();
+        Ok(json!({ "files": files, "pages": outcome.pages, "of": outcome.of }))
+    }
+
+    fn sources(&self) -> Result<Value, String> {
+        let sources = self.now(|viewer| viewer.sources())??;
+        let entries: Vec<Value> = sources
+            .entries
+            .iter()
+            .map(|entry| {
+                let fields: serde_json::Map<String, Value> = entry
+                    .fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), json!(value)))
+                    .collect();
+                json!({ "key": entry.key, "kind": entry.kind, "fields": fields })
+            })
+            .collect();
+        Ok(json!({
+            "file": sources.path.display().to_string(),
+            "listed_by_the_document": sources.listed,
+            "sources": entries,
+        }))
+    }
+
+    fn figures(&self) -> Result<Value, String> {
+        let figures = self.now(|viewer| viewer.figures())??;
+        let listed: Vec<Value> = figures
+            .iter()
+            .map(|figure| {
+                let numbered = figure.number.as_ref().map(|_| figure.name());
+                json!({
+                    "kind": figure.kind.name(),
+                    "in_figure": figure.framed,
+                    "numbered": numbered,
+                    "caption": figure.caption,
+                    "label": figure.label,
+                    "line": figure.line,
+                    "image": figure.file.as_ref().map(|(_, file)| file),
+                })
+            })
+            .collect();
+        Ok(json!({ "figures": listed }))
+    }
+
+    fn targets(&self) -> Result<Value, String> {
+        let (targets, revision) =
+            self.compiled(|viewer| (viewer.referables(), viewer.state().revision))?;
+        let targets: Vec<Value> = targets?
+            .into_iter()
+            .map(|target| {
+                let mut listed = json!({
+                    "kind": target.kind,
+                    "label": target.label,
+                    "number": target.number,
+                    "numbered": target.numbered,
+                    "title": target.called,
+                    "line": target.line,
+                });
+                // Only what is in another file says which.
+                if let (Some(file), Some(fields)) = (target.file, listed.as_object_mut()) {
+                    fields.insert("file".to_owned(), json!(file));
+                }
+                listed
+            })
+            .collect();
+        Ok(json!({ "revision": revision, "targets": targets }))
+    }
+
+    fn check_language(&self) -> Result<Value, String> {
+        // The window hands out the check; the waiting is done here.
+        let check = self.now(Viewer::language_check)??;
+        let report = check()?;
+        let issues: Vec<Value> = report
+            .issues
+            .iter()
+            .map(|issue| {
+                json!({
+                    "line": issue.line,
+                    "column": issue.column,
+                    "text": issue.text,
+                    "kind": if issue.grammar { "grammar" } else { "spelling" },
+                    "message": issue.message,
+                    "suggestions": issue.suggestions,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "revision": report.revision,
+            "dictionary": report.dictionary,
+            "grammar": report.grammar,
+            "issues": issues,
+            "notes": report.notes,
+        }))
+    }
+
+    fn add_source(&self, bibtex: &str) -> Result<Value, String> {
+        let bibtex = bibtex.to_owned();
+        let (keys, revision) = self.now(move |viewer| {
+            viewer
+                .agent_add_sources(&bibtex)
+                .map(|keys| (keys, viewer.state().revision))
+        })??;
+        Ok(json!({ "keys": keys, "revision": revision }))
     }
 
     fn save(&self) -> Result<Value, String> {
@@ -413,6 +567,9 @@ mod tests {
             keys: zetwerk_app::viewer::Keymap::default(),
             layout: None,
             slides: false,
+            ui_scale: None,
+            inserts: Vec::new(),
+            language: zetwerk_language::Settings::default(),
         }
     }
 
@@ -433,6 +590,78 @@ mod tests {
             handle,
             thread: Some(thread),
         }
+    }
+
+    /// Like [`session`], with the spelling of the document checked by
+    /// the small dictionaries kept for tests.
+    fn checking_session(text: &str) -> Session {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "zetwerk-headless-language-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("main.typ"), text).unwrap();
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/../zetwerk-language/fixtures");
+        let options = Options {
+            language: zetwerk_language::Settings {
+                spelling: true,
+                directories: vec![PathBuf::from(fixtures)],
+                ..zetwerk_language::Settings::default()
+            },
+            ..options(&directory, AgentEdits::Live)
+        };
+        let (handle, thread) = headless::spawn(&options).unwrap_or_else(|err| panic!("{err:?}"));
+        Session {
+            directory,
+            bridge: Bridge::new(handle.clone()),
+            handle,
+            thread: Some(thread),
+        }
+    }
+
+    #[test]
+    fn an_agent_is_told_what_is_misspelt_in_each_of_the_three_languages() {
+        for (language, text, wrong, meant) in [
+            (
+                "en",
+                "A good word.\n\nHe said helo to $x$.",
+                "helo",
+                "hello",
+            ),
+            (
+                "de",
+                "Das Haus.\n\nDie Strasse ist kurz.",
+                "Strasse",
+                "Straße",
+            ),
+            ("nl", "Het huis.\n\nDe fiest is goed.", "fiest", "fiets"),
+        ] {
+            let text = format!("#set text(lang: \"{language}\")\n{text}\n");
+            let session = checking_session(&text);
+            let found = session.bridge.check_language().unwrap();
+            let issues = found["issues"].as_array().unwrap();
+            assert_eq!(issues.len(), 1, "{found}");
+            let issue = &issues[0];
+            assert_eq!(
+                (&issue["line"], &issue["text"]),
+                (&json!(4), &json!(wrong)),
+                "{found}"
+            );
+            assert_eq!(issue["kind"], json!("spelling"));
+            let suggestions = issue["suggestions"].as_array().unwrap();
+            assert!(suggestions.contains(&json!(meant)), "{found}");
+            assert_eq!(found["revision"], json!(0));
+            assert!(
+                found["dictionary"].as_str().unwrap().starts_with(language),
+                "{found}"
+            );
+        }
+        // Where the user has it switched off, an agent is told so.
+        let off = session("A wrnog word.\n", AgentEdits::Live);
+        let refused = off.bridge.check_language().unwrap_err();
+        assert!(refused.contains("switched off"), "{refused}");
     }
 
     impl Drop for Session {
@@ -533,12 +762,16 @@ mod tests {
         let written = std::fs::read_to_string(&file).unwrap();
         assert!(written.contains("The slow red fox."));
         assert!(!bridge.state().unwrap().modified);
-        let exported = bridge.export_pdf(None).unwrap();
+        let exported = bridge.export_pdf(None, None).unwrap();
         let pdf = std::fs::read(session.directory.join("main.pdf")).unwrap();
         assert!(pdf.starts_with(b"%PDF"));
         assert_eq!(exported["pages"], 2);
-        assert!(bridge.export_pdf(Some("notes.txt")).is_err());
-        bridge.export_pdf(Some("copy.pdf")).unwrap();
+        assert_eq!(
+            (&exported["of"], &exported["replaced"]),
+            (&json!(2), &json!(false))
+        );
+        assert!(bridge.export_pdf(Some("notes.txt"), None).is_err());
+        bridge.export_pdf(Some("copy.pdf"), None).unwrap();
         assert!(session.directory.join("copy.pdf").is_file());
     }
 
@@ -561,6 +794,101 @@ mod tests {
         );
         bridge.withdraw_proposal(id).unwrap();
         assert_eq!(bridge.proposals().unwrap()["proposals"], json!([]));
+    }
+
+    /// Three small pages, the second of which is a figure.
+    const FIGURES: &str = "#set page(width: 200pt, height: 120pt, margin: 10pt)\n\
+                           First page.\n\
+                           #pagebreak()\n\
+                           #figure(\n  rect(width: 80pt, height: 40pt),\n  caption: [A box],\n) <box>\n\
+                           #pagebreak()\n\
+                           Third page.\n";
+
+    fn size_of(png: &Path) -> (u32, u32) {
+        let pixmap = tiny_skia::Pixmap::decode_png(&std::fs::read(png).unwrap()).unwrap();
+        (pixmap.width(), pixmap.height())
+    }
+
+    #[test]
+    fn pages_and_figures_are_exported_without_a_window() {
+        let session = session(FIGURES, AgentEdits::Live);
+        let (bridge, directory) = (&session.bridge, &session.directory);
+        let image = |format, of, dpi, path: Option<&str>| {
+            bridge.export_image(ImageExport {
+                format,
+                of,
+                dpi,
+                path: path.map(str::to_owned),
+            })
+        };
+        let pages = |pages: &str| ImageOf::Pages(Some(pages.to_owned()));
+
+        // Some pages as a PDF.
+        let part = bridge.export_pdf(Some("part.pdf"), Some("2-3")).unwrap();
+        assert_eq!((&part["pages"], &part["of"]), (&json!(2), &json!(3)));
+        assert!(directory.join("part.pdf").is_file());
+        let missing = bridge.export_pdf(None, Some("4")).unwrap_err();
+        assert!(missing.contains("page 4 does not exist"), "{missing}");
+        assert!(bridge.export_pdf(None, Some("two")).is_err());
+        assert!(!directory.join("main.pdf").exists());
+
+        // Pages as images, each a file of its own.
+        let images = image(ImageFormat::Png, pages("1,3"), Some(72), None).unwrap();
+        let written: Vec<&str> = images["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["path"].as_str().unwrap())
+            .collect();
+        let expected = [directory.join("main-1.png"), directory.join("main-3.png")];
+        assert_eq!(
+            written,
+            expected.each_ref().map(|path| path.to_str().unwrap())
+        );
+        assert_eq!((&images["pages"], &images["of"]), (&json!(2), &json!(3)));
+        assert_eq!(size_of(&expected[1]), (200, 120));
+        let again = image(ImageFormat::Png, pages("3"), None, None).unwrap();
+        assert_eq!(again["files"][0]["replaced"], true);
+        assert_eq!(size_of(&expected[1]), (400, 240));
+        let all = image(
+            ImageFormat::Svg,
+            ImageOf::Pages(None),
+            None,
+            Some("all.svg"),
+        )
+        .unwrap();
+        assert_eq!(all["files"].as_array().unwrap().len(), 3);
+        assert!(directory.join("all-2.svg").is_file());
+
+        // The figure a line is part of, alone.
+        let figure = image(ImageFormat::Png, ImageOf::FigureAtLine(6), Some(72), None).unwrap();
+        assert_eq!(
+            figure["files"][0]["path"],
+            directory.join("main-box.png").to_str().unwrap()
+        );
+        let (width, height) = size_of(&directory.join("main-box.png"));
+        assert!(
+            (88..110).contains(&width) && (55..80).contains(&height),
+            "{width}×{height}"
+        );
+        let nowhere = image(ImageFormat::Svg, ImageOf::FigureAtLine(2), None, None).unwrap_err();
+        assert_eq!(nowhere, "line 2 is in no figure");
+
+        // What cannot be: a resolution of an SVG, a name of another kind.
+        assert!(image(ImageFormat::Svg, pages("1"), Some(300), None).is_err());
+        assert!(image(ImageFormat::Png, pages("1"), None, Some("page.jpg")).is_err());
+        assert!(image(ImageFormat::Png, pages("0"), None, None).is_err());
+
+        // An export is of the text as it is, changed a moment ago or not.
+        bridge
+            .change(replace("#pagebreak()\nThird page.\n", "", None))
+            .unwrap();
+        let fewer = bridge.export_pdf(None, None).unwrap();
+        assert_eq!((&fewer["pages"], &fewer["of"]), (&json!(2), &json!(2)));
+        // And with nobody to keep waiting, keys export on the spot.
+        bridge.send_keys(":png 2 keys.png<CR>").unwrap();
+        bridge.state().unwrap();
+        assert_eq!(size_of(&directory.join("keys.png")), (400, 240));
     }
 
     #[test]
@@ -640,5 +968,37 @@ mod tests {
         handle.send(Request::Quit);
         let _ = thread.join();
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_figures_of_a_document_are_listed() {
+        let text = "= Results\n\
+                    #figure(\n  image(\"plot.svg\"),\n  caption: [A plot],\n) <fig:plot>\n\n\
+                    #table(columns: 1, [a])\n";
+        let session = session(text, AgentEdits::Live);
+        let listed = session.bridge.figures().unwrap();
+        assert_eq!(
+            listed,
+            json!({ "figures": [
+                {
+                    "kind": "image",
+                    "in_figure": true,
+                    "numbered": "Figure 1",
+                    "caption": "A plot",
+                    "label": "fig:plot",
+                    "line": 2,
+                    "image": "plot.svg",
+                },
+                {
+                    "kind": "table",
+                    "in_figure": false,
+                    "numbered": null,
+                    "caption": null,
+                    "label": null,
+                    "line": 7,
+                    "image": null,
+                },
+            ] })
+        );
     }
 }

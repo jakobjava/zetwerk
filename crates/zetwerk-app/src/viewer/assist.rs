@@ -23,17 +23,17 @@ const TOOLTIP_COLUMNS: usize = 84;
 /// The list of what could be typed at the cursor.
 pub(super) struct Completion {
     pub(super) candidates: Vec<Entry>,
-    chosen: usize,
+    pub(super) chosen: usize,
 }
 
 /// One of the things that could be typed.
 pub(super) struct Entry {
     pub(super) candidate: Candidate,
     /// The byte from which on it replaces what was typed.
-    from: usize,
+    pub(super) from: usize,
     /// What it is, if it is one of the things of the insert menu and not
     /// a name Typst knows.
-    insert: Option<Insert>,
+    pub(super) insert: Option<Insert>,
 }
 
 /// A list of places to go, narrowed by typing.
@@ -45,6 +45,12 @@ pub(super) struct Picker {
     /// The items the query leaves, best first.
     shown: Vec<usize>,
     chosen: usize,
+    /// The command Escape runs, where this list came of another: it
+    /// leads back there.
+    back: Option<String>,
+    /// Where what is typed may be taken as it is (it is none of the
+    /// items): the command it is handed to, which it is put behind.
+    free: Option<String>,
 }
 
 /// Where an entry of a list leads.
@@ -54,6 +60,21 @@ pub(super) enum Target {
     Offset(usize),
     /// A file of the project.
     File(std::path::PathBuf),
+    /// A setting of the document manager: what it can be is put up.
+    Choose(usize),
+    /// What a setting of the document manager is to be: as it is
+    /// written, and as it is called.
+    Set {
+        row: usize,
+        value: String,
+        told: String,
+    },
+    /// A command to run.
+    Command(String),
+    /// The beginning of a command, for the user to finish.
+    Ask(String),
+    /// Nowhere: the entry only tells something.
+    Nothing,
     /// Text to put in at the cursor, in place of the last `typed`
     /// characters before it; the cursor goes `within` bytes into it.
     Put {
@@ -122,7 +143,7 @@ fn files_below(folder: &std::path::Path, endings: &[&str]) -> Vec<String> {
 /// How well `query` is found in `text`, all its characters in their
 /// order: more for characters that follow each other and that begin
 /// words. `None` if it is not found.
-fn score(text: &str, query: &str) -> Option<i32> {
+pub(super) fn score(text: &str, query: &str) -> Option<i32> {
     let mut wanted = query.chars().flat_map(char::to_lowercase).peekable();
     let (mut score, mut run, mut before) = (0, 0, None::<char>);
     for c in text.chars() {
@@ -144,7 +165,7 @@ fn score(text: &str, query: &str) -> Option<i32> {
 }
 
 /// A line of `text` cut to `columns` characters.
-fn cut(text: &str, columns: usize) -> String {
+pub(super) fn cut(text: &str, columns: usize) -> String {
     let mut shown: String = text.chars().take(columns).collect();
     if shown.len() < text.len() {
         shown.push('…');
@@ -155,14 +176,21 @@ fn cut(text: &str, columns: usize) -> String {
 /// The things of the insert menu that go with `typed`, each with how
 /// well: behind a hash in running text, by their names in an equation.
 /// `begun` is the byte the typed word begins at.
-fn menu_entries(in_math: bool, hash: bool, typed: &str, begun: usize) -> Vec<(i32, Entry)> {
-    let (inserts, from) = match (in_math, hash) {
-        (false, true) => (TEXT_INSERTS, begun.saturating_sub(1)),
-        (true, false) => (MATH_INSERTS, begun),
+/// `own` are the user's own, for running text: they come first.
+fn menu_entries(
+    in_math: bool,
+    hash: bool,
+    typed: &str,
+    begun: usize,
+    own: &[Insert],
+) -> Vec<(i32, Entry)> {
+    let (inserts, own, from) = match (in_math, hash) {
+        (false, true) => (TEXT_INSERTS, own, begun.saturating_sub(1)),
+        (true, false) => (MATH_INSERTS, &[][..], begun),
         _ => return Vec::new(),
     };
     let mut entries = Vec::new();
-    for insert in inserts {
+    for insert in own.iter().chain(inserts) {
         // What begins as typed (in any of its words) before what Typst
         // knows by that beginning; what only has the letters in it,
         // behind that.
@@ -208,6 +236,7 @@ impl Viewer {
         self.tooltip = None;
         if self.picker.is_some() {
             self.picker_key(press);
+            self.history_looked();
             return true;
         }
         let typing = self
@@ -238,6 +267,9 @@ impl Viewer {
         });
         let take = take || (press.key == Key::Enter && chosen_insert);
         let asked = matches!((press.key, press.ctrl), (Key::Char('n' | ' '), true));
+        if self.refer_key(press) {
+            return true;
+        }
         let Some(completion) = &mut self.completion else {
             if asked {
                 self.complete(true);
@@ -278,6 +310,12 @@ impl Viewer {
         if editor.mode() != editor::Mode::Insert {
             return;
         }
+        if self.refer_complete() {
+            return;
+        }
+        let Some(editor) = &self.editor else {
+            return;
+        };
         let (text, cursor) = (editor.text(), editor.cursor());
         // The word being typed, and what stands before it.
         let begun = text[..cursor]
@@ -299,12 +337,12 @@ impl Viewer {
             return;
         }
 
-        let mut entries = menu_entries(in_math, hash, typed, begun);
+        let mut entries = menu_entries(in_math, hash, typed, begun, &self.inserts);
 
         // And what Typst itself knows could stand here.
         self.project.set_source(source.clone());
         let world = self.project.snapshot();
-        let document = self.document.as_deref();
+        let document = self.whole.as_deref();
         let asked = explicit || naming;
         if let Some((from, mut candidates)) =
             zetwerk_typst::complete(&world, document, &source, cursor, asked)
@@ -398,13 +436,16 @@ impl Viewer {
 
     /// `K`: what Typst says the thing under the cursor is.
     pub(super) fn describe(&mut self) {
+        if self.refer_describe() {
+            return;
+        }
         let Some(editor) = &self.editor else {
             return;
         };
         let (source, cursor) = (editor.source().clone(), editor.cursor());
         self.project.set_source(source.clone());
         let world = self.project.snapshot();
-        let document = self.document.as_deref();
+        let document = self.whole.as_deref();
         match zetwerk_typst::describe_at(&world, document, &source, cursor) {
             Some(text) => self.tooltip = Some(text),
             None => self.notice("Typst has nothing to say about this"),
@@ -413,13 +454,16 @@ impl Viewer {
 
     /// `gd`: to where the name under the cursor is defined.
     pub(super) fn goto_definition(&mut self) {
+        if self.refer_goto() {
+            return;
+        }
         let Some(editor) = &mut self.editor else {
             return;
         };
         let (source, cursor) = (editor.source().clone(), editor.cursor());
         self.project.set_source(source.clone());
         let world = self.project.snapshot();
-        let document = self.document.as_deref();
+        let document = self.whole.as_deref();
         match zetwerk_typst::definition_of(&world, document, &source, cursor) {
             Some((file, range)) if file == editor.file() => {
                 editor.jump(range.start);
@@ -529,6 +573,15 @@ impl Viewer {
         files
     }
 
+    /// The image files in and below the folder of the file being
+    /// edited, as a call of `image` in that file names them.
+    pub(super) fn images_beside(&self) -> Vec<String> {
+        let images = FILE_CALLS
+            .iter()
+            .find(|(call, _)| call.starts_with("image"));
+        images.map_or_else(Vec::new, |(_, endings)| self.files_beside(endings))
+    }
+
     /// Where the thing of the insert menu at `entry` needs a file (a
     /// figure its image), puts up the files there are: the one chosen
     /// goes into the text with it, whole, and nothing before that.
@@ -593,7 +646,27 @@ impl Viewer {
             items,
             query: String::new(),
             chosen,
+            back: None,
+            free: None,
         });
+    }
+
+    /// Puts up a list that came of another: Escape runs `back`, which
+    /// leads there again. With `free`, what is typed may be none of the
+    /// items: it is handed to that command, put behind it.
+    pub(super) fn open_picker_for(
+        &mut self,
+        title: &'static str,
+        items: Vec<(String, Target)>,
+        chosen: usize,
+        back: String,
+        free: Option<String>,
+    ) {
+        self.open_picker(title, items, chosen);
+        if let Some(picker) = &mut self.picker {
+            picker.back = Some(back);
+            picker.free = free;
+        }
     }
 
     fn picker_key(&mut self, press: KeyPress) {
@@ -602,17 +675,47 @@ impl Viewer {
         };
         let count = picker.shown.len().max(1);
         match (press.key, press.ctrl) {
-            (Key::Escape, _) | (Key::Char('c' | '['), true) => self.picker = None,
+            (Key::Escape, _) | (Key::Char('c' | '['), true) => {
+                let back = picker.back.take();
+                self.picker = None;
+                if let Some(back) = back {
+                    self.execute(&back);
+                }
+            }
             (Key::Enter, _) => {
                 let chosen = picker.shown.get(picker.chosen);
                 let target = chosen.map(|item| picker.items[*item].1.clone());
+                // What was typed, where it is none of what is listed.
+                let typed = picker
+                    .free
+                    .as_ref()
+                    .filter(|_| !picker.query.is_empty())
+                    .filter(|_| matches!(target, None | Some(Target::Nothing)))
+                    .map(|command| format!("{command}{}", picker.query));
+                if typed.is_none() && target.is_none() {
+                    // Nothing is chosen: the list stays, for another try.
+                    return;
+                }
                 self.picker = None;
+                if let Some(typed) = typed {
+                    return self.execute(&typed);
+                }
                 match (target, &mut self.editor) {
+                    (Some(Target::Choose(row)), _) => self.open_setting(row),
+                    (Some(Target::Set { row, value, told }), _) => {
+                        self.apply_setting(row, &value, &told);
+                    }
                     (Some(Target::Offset(at)), Some(editor)) => {
                         editor.jump(at);
                         self.follow_cursor();
                     }
                     (Some(Target::File(path)), _) => self.open_path(&path, false),
+                    (Some(Target::Command(command)), _) => self.execute(&command),
+                    (Some(Target::Ask(command)), _) => {
+                        for c in format!(":{command}").chars() {
+                            self.editor_key(KeyPress::plain(Key::Char(c)));
+                        }
+                    }
                     (
                         Some(Target::Put {
                             text,
@@ -650,6 +753,7 @@ impl Viewer {
         let (width, height) = (f64::from(self.window.0), f64::from(self.window.1));
         let margin = super::PANEL_MARGIN * self.scale;
         let bottom = height - f64::from(self.status_height()) - margin;
+        self.pointer.forget_lists();
         // Under the cursor's line; above it where there is no room.
         // Under the cursor's line; or, where there is no room, above
         // what is being typed, not over it.
@@ -673,7 +777,8 @@ impl Viewer {
                 .take(LIST_ROWS)
                 .map(|entry| {
                     let candidate = &entry.candidate;
-                    (cut(&candidate.label, 40), candidate.kind.to_owned())
+                    let plain = || (cut(&candidate.label, 40), candidate.kind.to_owned());
+                    self.refer_row(candidate).unwrap_or_else(plain)
                 })
                 .collect();
             let detail = completion
@@ -684,6 +789,8 @@ impl Viewer {
             let markup =
                 chrome::list_markup(None, &rows, completion.chosen - first, detail.as_deref());
             self.panel(scene, has, &markup, near);
+            let below = usize::from(detail.is_some());
+            self.pointer.listed(false, first, rows.len(), 0, below);
         }
         if let Some(text) = &self.tooltip {
             let mut lines: Vec<String> = text
@@ -707,7 +814,12 @@ impl Viewer {
                 .iter()
                 .skip(first)
                 .take(LIST_ROWS)
-                .map(|item| (cut(&picker.items[*item].0, 70), String::new()))
+                .map(|item| {
+                    // What it is, and (behind a tab) what it is now.
+                    let label = &picker.items[*item].0;
+                    let (name, now) = label.split_once('\t').unwrap_or((label, ""));
+                    (cut(name, 70), cut(now, 40))
+                })
                 .collect();
             let title = format!("{}: {}\u{2588}", picker.title, picker.query);
             let chosen = picker.chosen.saturating_sub(first);
@@ -716,6 +828,27 @@ impl Viewer {
             self.panel(scene, has, &markup, |(panel_width, _)| {
                 ((width - panel_width) / 2.0, (height / 4.0).max(margin))
             });
+            self.pointer.listed(true, first, rows.len(), 1, 0);
+        }
+    }
+
+    /// Takes entry `index` of a list on screen, as the keys that go to
+    /// it and take it do, for the pointer: of the list of places to go
+    /// if `places`, else of the list of what could be typed.
+    pub(super) fn take_listed(&mut self, places: bool, index: usize) {
+        if places {
+            let Some(picker) = &mut self.picker else {
+                return;
+            };
+            if index < picker.shown.len() {
+                picker.chosen = index;
+                self.picker_key(KeyPress::plain(Key::Enter));
+            }
+        } else if let Some(completion) = &mut self.completion
+            && index < completion.candidates.len()
+        {
+            completion.chosen = index;
+            self.take_completion();
         }
     }
 
@@ -738,6 +871,12 @@ impl Picker {
         ranked.sort_by_key(|(score, index)| (std::cmp::Reverse(*score), *index));
         self.shown = ranked.into_iter().map(|(_, index)| index).collect();
         self.chosen = 0;
+    }
+
+    /// Where the chosen entry leads, if one is chosen.
+    pub(super) fn chosen(&self) -> Option<&Target> {
+        let item = *self.shown.get(self.chosen)?;
+        self.items.get(item).map(|(_, target)| target)
     }
 }
 

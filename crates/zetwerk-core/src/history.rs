@@ -6,6 +6,8 @@
 //! and leaves the old one in the tree, so nothing that was ever typed is
 //! out of reach.
 
+use std::ops::Range;
+
 use crate::change::{Change, Direction};
 
 /// Identifies a state in the history. The root, the text as first loaded,
@@ -39,12 +41,12 @@ impl Step<'_> {
     /// A step that changed nothing still has a place, and gives the empty
     /// range there. `None` for a step without changes.
     #[must_use]
-    pub fn extent(&self) -> Option<std::ops::Range<usize>> {
+    pub fn extent(&self) -> Option<Range<usize>> {
         let ordered: Vec<&Change> = match self.direction {
             Direction::Forward => self.changes.iter().collect(),
             Direction::Backward => self.changes.iter().rev().collect(),
         };
-        let mut extent: Option<std::ops::Range<usize>> = None;
+        let mut extent: Option<Range<usize>> = None;
         for change in ordered {
             let (from, to) = match self.direction {
                 Direction::Forward => (change.old.len(), change.new.len()),
@@ -61,6 +63,88 @@ impl Step<'_> {
         }
         extent
     }
+
+    /// The stretches of the text, as it is after the step, that the step
+    /// made different: what to show someone who asks what it did. They
+    /// are in the order of the text and apart from each other.
+    ///
+    /// A stretch holds text the step put there. Where the step only took
+    /// text away, the stretch is empty and stands at the place the text
+    /// was taken from. What a change replaced by the same (the letters a
+    /// replacement has in common with what it replaced, at its start and
+    /// at its end) is not part of a stretch; changes that touch each
+    /// other are one stretch.
+    #[must_use]
+    pub fn ranges(&self) -> Vec<Range<usize>> {
+        self.ranges_with(Vec::new())
+    }
+
+    /// Like [`Step::ranges`], for the last of several steps taken one
+    /// after the other: `earlier` are the stretches the steps before it
+    /// made different, in the text as it was before this step (in order
+    /// and apart, as `ranges` gives them). They are moved along with the
+    /// text and joined with what this step changed.
+    #[must_use]
+    pub fn ranges_with(&self, earlier: Vec<Range<usize>>) -> Vec<Range<usize>> {
+        let ordered: Vec<&Change> = match self.direction {
+            Direction::Forward => self.changes.iter().collect(),
+            Direction::Backward => self.changes.iter().rev().collect(),
+        };
+        let mut ranges = earlier;
+        for change in ordered {
+            let (gone, come) = match self.direction {
+                Direction::Forward => (change.old.as_str(), change.new.as_str()),
+                Direction::Backward => (change.new.as_str(), change.old.as_str()),
+            };
+            let (same_start, same_end) = in_common(gone, come);
+            let start = change.at + same_start;
+            let (gone, come) = (
+                gone.len() - same_start - same_end,
+                come.len() - same_start - same_end,
+            );
+            if gone == 0 && come == 0 {
+                continue;
+            }
+            // What was replaced, in the text before the change, grown by
+            // every stretch that reaches it: they become one.
+            let mut joined = start..start + gone;
+            let mut after = Vec::new();
+            let mut moved = Vec::with_capacity(ranges.len() + 1);
+            for range in ranges {
+                if range.end < joined.start {
+                    moved.push(range);
+                } else if range.start > start + gone {
+                    after.push(range.start + come - gone..range.end + come - gone);
+                } else {
+                    joined = joined.start.min(range.start)..joined.end.max(range.end);
+                }
+            }
+            moved.push(joined.start..joined.end + come - gone);
+            moved.append(&mut after);
+            ranges = moved;
+        }
+        ranges
+    }
+}
+
+/// How many bytes `a` and `b` have in common at their start, and how many
+/// of the rest at their end, counting whole characters only.
+fn in_common(a: &str, b: &str) -> (usize, usize) {
+    let mut start = a.bytes().zip(b.bytes()).take_while(|(a, b)| a == b).count();
+    while !(a.is_char_boundary(start) && b.is_char_boundary(start)) {
+        start -= 1;
+    }
+    let (a, b) = (&a[start..], &b[start..]);
+    let mut end = a
+        .bytes()
+        .rev()
+        .zip(b.bytes().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !(a.is_char_boundary(a.len() - end) && b.is_char_boundary(b.len() - end)) {
+        end -= 1;
+    }
+    (start, end)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +343,58 @@ impl History {
         path.extend(down[..down.len() - shared].iter().rev());
         Some(path)
     }
+
+    /// The steps that lead from `from` to `to`, in the order they are to
+    /// be taken: those of [`History::path`], each with its changes and
+    /// the way they go. `None` if either state does not exist.
+    ///
+    /// This only reads: it is how to tell what the text of another state
+    /// is, or what going there would change, without going there.
+    #[must_use]
+    pub fn steps(&self, from: StateId, to: StateId) -> Option<Vec<Step<'_>>> {
+        let mut at = from;
+        self.path(from, to)?
+            .into_iter()
+            .map(|next| {
+                let step = if self.parent(at) == Some(next) {
+                    Step {
+                        changes: self.changes(at)?,
+                        direction: Direction::Backward,
+                        to: next,
+                    }
+                } else {
+                    Step {
+                        changes: self.changes(next)?,
+                        direction: Direction::Forward,
+                        to: next,
+                    }
+                };
+                at = next;
+                Some(step)
+            })
+            .collect()
+    }
+
+    /// The line of history the text is on, oldest first: the states from
+    /// the root to the current one, which undo walks back through, and
+    /// from there on those that redo leads to. Every other state is on a
+    /// branch: text that was undone and then changed differently.
+    #[must_use]
+    pub fn line(&self) -> Vec<StateId> {
+        let mut line = vec![self.current];
+        let mut at = self.current;
+        while let Some(parent) = self.parent(at) {
+            line.push(parent);
+            at = parent;
+        }
+        line.reverse();
+        at = self.current;
+        while let Some(next) = self.redo_target(at) {
+            line.push(next);
+            at = next;
+        }
+        line
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +430,73 @@ mod tests {
             to: 0,
         };
         assert_eq!(step.extent(), Some(3..3));
+    }
+
+    #[test]
+    fn a_step_knows_the_stretches_it_made_different() {
+        let change = |at, old: &str, new: &str| Change {
+            at,
+            old: old.to_owned(),
+            new: new.to_owned(),
+        };
+        let step = |changes, direction| Step {
+            changes,
+            direction,
+            to: 0,
+        };
+        // "one two three four" -> "one 2 three four" -> "one 2 three"
+        let changes = [change(4, "two", "2"), change(11, " four", "")];
+        let forward = step(&changes, Direction::Forward);
+        // What was put in, and the place something was taken from.
+        assert_eq!(forward.ranges(), vec![4..5, 11..11]);
+        let backward = step(&changes, Direction::Backward);
+        assert_eq!(backward.ranges(), vec![4..7, 13..18]);
+        assert_eq!(step(&[], Direction::Forward).ranges(), vec![]);
+
+        // Typing on and deleting what was typed are one stretch; so are
+        // changes that only touch.
+        let changes = [
+            change(3, "", "abc"),
+            change(5, "c", ""),
+            change(5, "", "d"),
+            change(2, "x", ""),
+        ];
+        assert_eq!(step(&changes, Direction::Forward).ranges(), vec![2..5]);
+        assert_eq!(step(&changes, Direction::Backward).ranges(), vec![2..3]);
+
+        // What a replacement has in common with what it replaced did not
+        // change, and a replacement by the same changed nothing.
+        let changes = [change(0, "the grüne cat", "the große cat")];
+        assert_eq!(step(&changes, Direction::Forward).ranges(), vec![6..9]);
+        assert_eq!(step(&changes, Direction::Backward).ranges(), vec![6..9]);
+        let changes = [change(2, "same", "same")];
+        assert_eq!(step(&changes, Direction::Forward).ranges(), vec![]);
+        // `é` and `è` share their first byte: characters are not cut.
+        let changes = [change(0, "é", "è")];
+        assert_eq!(step(&changes, Direction::Forward).ranges(), vec![0..2]);
+    }
+
+    #[test]
+    fn stretches_of_earlier_steps_move_along_with_the_text() {
+        let change = |at, old: &str, new: &str| Change {
+            at,
+            old: old.to_owned(),
+            new: new.to_owned(),
+        };
+        // "abcdefgh": first "g" goes, then "XY" comes in before "c".
+        let first = [change(6, "g", "")];
+        let second = [change(2, "", "XY")];
+        let step = |changes| Step {
+            changes,
+            direction: Direction::Forward,
+            to: 0,
+        };
+        let ranges = step(&first).ranges();
+        assert_eq!(ranges, vec![6..6]);
+        assert_eq!(step(&second).ranges_with(ranges), vec![2..4, 8..8]);
+        // A later step that reaches an earlier stretch joins it.
+        let third = [change(4, "cdef", "")];
+        assert_eq!(step(&third).ranges_with(vec![2..4, 8..8]), vec![2..4]);
     }
 
     fn change(text: &str) -> Vec<Change> {
@@ -381,5 +584,32 @@ mod tests {
         assert_eq!(history.path(ROOT, c), Some(vec![a, b, c]));
         assert_eq!(history.path(c, c), Some(vec![]));
         assert_eq!(history.path(c, 99), None);
+
+        // The same ways as steps: undone on the way up, made on the way
+        // down, and nothing moved by asking.
+        let steps = history.steps(c, e).unwrap_or_default();
+        let ways: Vec<(Direction, StateId)> =
+            steps.iter().map(|step| (step.direction, step.to)).collect();
+        assert_eq!(
+            ways,
+            vec![
+                (Direction::Backward, b),
+                (Direction::Backward, a),
+                (Direction::Forward, d),
+                (Direction::Forward, e),
+            ]
+        );
+        assert_eq!(steps[0].changes, history.changes(c).unwrap_or_default());
+        assert_eq!(steps[2].changes, history.changes(d).unwrap_or_default());
+        assert_eq!(history.steps(c, c), Some(vec![]));
+        assert_eq!(history.steps(99, c), None);
+        assert_eq!(history.current(), e);
+
+        // The text is on the line through `d`; `b` and `c` are a branch.
+        assert_eq!(history.line(), vec![ROOT, a, d, e]);
+        assert!(history.step_to(d) && history.step_to(a));
+        assert_eq!(history.line(), vec![ROOT, a, d, e], "redo leads back");
+        assert!(history.set_redo_target(a, b));
+        assert_eq!(history.line(), vec![ROOT, a, b, c]);
     }
 }

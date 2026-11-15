@@ -1,0 +1,22 @@
+# A small English dictionary for zetwerk's tests. Written for them; it
+# is no dictionary to write by.
+SET UTF-8
+TRY esianrtolcdugmphbyfvkwzESIANRTOLCDUGMPHBYFVKWZ'
+
+PFX U Y 1
+PFX U 0 un .
+
+SFX S Y 2
+SFX S 0 s [^sx]
+SFX S 0 es [sx]
+
+SFX D Y 2
+SFX D 0 ed [^e]
+SFX D 0 d e
+
+SFX G Y 2
+SFX G 0 ing [^e]
+SFX G e ing e
+
+SFX M Y 1
+SFX M 0 's .

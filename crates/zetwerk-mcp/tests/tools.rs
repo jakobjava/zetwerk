@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 use zetwerk_mcp::{
-    Change, ChangeKind, Editor, EditorState, Output, Place, Selection, Tools, call, serve,
+    Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, Output,
+    Place, Selection, Tools, call, serve,
 };
 
 /// An editor that records the keys it was sent and the changes it was
@@ -118,12 +119,50 @@ impl Editor for FakeEditor {
         Err(format!("there is no proposal {id}"))
     }
 
-    fn export_pdf(&self, path: Option<&str>) -> Result<Value, String> {
-        Ok(json!({ "path": path.unwrap_or("thesis.pdf") }))
+    fn export_pdf(&self, path: Option<&str>, pages: Option<&str>) -> Result<Value, String> {
+        Ok(json!({ "path": path.unwrap_or("thesis.pdf"), "pages": pages }))
+    }
+
+    fn export_image(&self, image: ImageExport) -> Result<Value, String> {
+        let format = match image.format {
+            ImageFormat::Png => "png",
+            ImageFormat::Svg => "svg",
+        };
+        let of = match image.of {
+            ImageOf::Pages(pages) => json!({ "pages": pages }),
+            ImageOf::FigureAtLine(line) => json!({ "figure_at_line": line }),
+        };
+        Ok(json!({ "format": format, "of": of, "dpi": image.dpi, "path": image.path }))
     }
 
     fn save(&self) -> Result<Value, String> {
         Ok(json!({ "saved": true }))
+    }
+
+    fn sources(&self) -> Result<Value, String> {
+        Ok(json!({ "file": "refs.bib", "sources": [{ "key": "knuth1984" }] }))
+    }
+
+    fn add_source(&self, bibtex: &str) -> Result<Value, String> {
+        Ok(json!({ "keys": [bibtex.len()] }))
+    }
+
+    fn figures(&self) -> Result<Value, String> {
+        Ok(json!({ "figures": [{ "kind": "image", "label": "fig:plot", "line": 4 }] }))
+    }
+
+    fn targets(&self) -> Result<Value, String> {
+        Ok(json!({
+            "revision": 3,
+            "targets": [
+                { "kind": "section", "label": "intro", "number": "1", "title": "Introduction", "line": 2 },
+                { "kind": "figure", "label": null, "number": null, "title": "A plot", "line": 9 },
+            ],
+        }))
+    }
+
+    fn check_language(&self) -> Result<Value, String> {
+        Ok(json!({ "dictionary": "en_GB", "issues": [{ "line": 1, "text": "teh" }] }))
     }
 }
 
@@ -301,9 +340,75 @@ fn reading_tools_pass_on_what_was_asked() {
         Ok(json!({ "proposals": [] }))
     );
     assert_eq!(
-        answer(&socket, "export_pdf", &json!({ "path": "out.pdf" })),
-        Ok(json!({ "path": "out.pdf" }))
+        answer(&socket, "list_sources", &json!({})).map(|sources| sources["file"].clone()),
+        Ok(json!("refs.bib"))
     );
+    assert_eq!(
+        answer(&socket, "add_source", &json!({ "bibtex": "@book{a,}" })),
+        Ok(json!({ "keys": [9] }))
+    );
+    let targets =
+        answer(&socket, "list_targets", &json!({})).map(|listed| listed["targets"].clone());
+    assert_eq!(
+        targets.as_ref().map(|targets| &targets[0]["label"]),
+        Ok(&json!("intro"))
+    );
+    assert_eq!(
+        targets.as_ref().map(|targets| &targets[1]["label"]),
+        Ok(&Value::Null),
+        "what has no label yet is listed too"
+    );
+    assert_eq!(
+        answer(&socket, "list_figures", &json!({})).map(|listed| listed["figures"][0].clone()),
+        Ok(json!({ "kind": "image", "label": "fig:plot", "line": 4 }))
+    );
+    assert_eq!(
+        answer(&socket, "check_language", &json!({}))
+            .map(|found| found["issues"][0]["text"].clone()),
+        Ok(json!("teh"))
+    );
+    assert_eq!(
+        answer(&socket, "check_language", &json!({}))
+            .map(|found| found["issues"][0]["text"].clone()),
+        Ok(json!("teh"))
+    );
+    assert_eq!(
+        answer(&socket, "export_pdf", &json!({ "path": "out.pdf" })),
+        Ok(json!({ "path": "out.pdf", "pages": null }))
+    );
+    assert_eq!(
+        answer(&socket, "export_pdf", &json!({ "pages": "3-7" })),
+        Ok(json!({ "path": "thesis.pdf", "pages": "3-7" }))
+    );
+}
+
+#[test]
+fn images_are_of_pages_or_of_one_figure() {
+    let (_scratch_socket, socket) = socket("images");
+    let _server = serve(&socket, Arc::new(FakeEditor::default()), PLAIN)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    assert_eq!(
+        answer(&socket, "export_image", &json!({ "format": "png" })),
+        Ok(json!({ "format": "png", "of": { "pages": null }, "dpi": null, "path": null }))
+    );
+    let pages = json!({ "format": "svg", "pages": "2,5-", "path": "talk.svg" });
+    assert_eq!(
+        answer(&socket, "export_image", &pages),
+        Ok(json!({ "format": "svg", "of": { "pages": "2,5-" }, "dpi": null, "path": "talk.svg" }))
+    );
+    let figure = json!({ "format": "png", "figure_at_line": 12, "dpi": 600 });
+    assert_eq!(
+        answer(&socket, "export_image", &figure),
+        Ok(json!({ "format": "png", "of": { "figure_at_line": 12 }, "dpi": 600, "path": null }))
+    );
+    // What is asked for has to be one thing, and an image.
+    for odd in [
+        json!({}),
+        json!({ "format": "pdf" }),
+        json!({ "format": "png", "pages": "1", "figure_at_line": 3 }),
+    ] {
+        assert!(answer(&socket, "export_image", &odd).is_err(), "{odd}");
+    }
 }
 
 #[test]
@@ -326,11 +431,19 @@ fn editing_tools_say_what_to_change_and_how() {
     assert!(answer(&socket, "insert_at_cursor", &json!({ "text": "x" })).is_ok());
     let selection = json!({ "text": "y", "mode": "apply" });
     assert!(answer(&socket, "replace_selection", &selection).is_ok());
+    let section = json!({ "line": 12, "direction": "up", "expected_revision": 7 });
+    assert!(answer(&socket, "move_section", &section).is_ok());
+    let deeper = json!({ "line": 3, "direction": "deeper", "mode": "propose" });
+    assert_eq!(
+        answer(&socket, "move_section", &deeper),
+        Ok(json!({ "applied": false, "revision": 8 }))
+    );
     let replace = |old: &str, new: &str, all: bool| ChangeKind::Replace {
         old: old.to_owned(),
         new: new.to_owned(),
         all,
     };
+    let moving = |line: usize, direction: Direction| ChangeKind::MoveSection { line, direction };
     let change = |what: ChangeKind, expected_revision: Option<u64>, propose: bool| Change {
         what,
         expected_revision,
@@ -343,6 +456,8 @@ fn editing_tools_say_what_to_change_and_how() {
             change(replace("a", "b", true), None, true),
             change(ChangeKind::Insert("x".to_owned()), None, false),
             change(ChangeKind::ReplaceSelection("y".to_owned()), None, false),
+            change(moving(12, Direction::Up), Some(7), false),
+            change(moving(3, Direction::Deeper), None, true),
         ])
     );
 
@@ -356,6 +471,10 @@ fn editing_tools_say_what_to_change_and_how() {
     assert!(answer(&socket, "edit_source", &json!({ "old_str": "fox" })).is_err());
     let odd = json!({ "old_str": "a", "new_str": "b", "mode": "force" });
     assert!(answer(&socket, "edit_source", &odd).is_err());
+    // A section goes by the line of its heading, one of four ways.
+    let nowhere = json!({ "line": 3, "direction": "sideways" });
+    assert!(answer(&socket, "move_section", &nowhere).is_err());
+    assert!(answer(&socket, "move_section", &json!({ "direction": "up" })).is_err());
     assert_eq!(
         answer(&socket, "withdraw_proposal", &json!({ "id": 4 })),
         Err("there is no proposal 4".to_owned())

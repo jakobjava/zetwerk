@@ -1,0 +1,28 @@
+[package]
+name = "zetwerk-language"
+description = "Spelling and grammar of the running text of a Typst document"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["harper"]
+# English grammar without a server. It is a large crate: without the
+# feature grammar is checked by a LanguageTool server alone.
+harper = ["dep:harper-core"]
+
+[dependencies]
+typst-syntax.workspace = true
+serde_json.workspace = true
+# Reads Hunspell dictionaries; the only pure-Rust reader that knows the
+# compounds German is made of.
+spellbook = "=0.4.2"
+# The versions Typst's package downloader links: nothing new is built.
+ureq = { version = "=2.12.1", default-features = false, features = ["native-tls"] }
+native-tls = "=0.2.18"
+harper-core = { version = "=3.0.0", default-features = false, optional = true }
+
+[lints]
+workspace = true

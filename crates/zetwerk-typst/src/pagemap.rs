@@ -312,9 +312,15 @@ impl PageMap {
             // Text the document makes itself (a number, a reference) is
             // no place for the cursor, but part of its line: without it
             // the line would fall into pieces.
-            // So is what only shows that something is missing (see
-            // `Project::snapshot_showing`): it stands for no bytes.
-            let place = glyph.origin.place().filter(|(_, range)| !range.is_empty());
+            // So is what was put in to show the text (see
+            // `Project::snapshot_showing`): it stands for no bytes. Only
+            // the box in a part of an equation that is yet to be typed
+            // is a place for the cursor all the same: the place to type
+            // that part at.
+            let place = glyph
+                .origin
+                .place()
+                .filter(|(_, range)| !range.is_empty() || glyph.origin.is_empty_place());
             let entry = place.map(|(file, range)| LineGlyph {
                 left,
                 right,
@@ -669,8 +675,20 @@ impl PageLines {
     /// the bytes shown there; `None` if none begins there.
     #[must_use]
     pub fn stop_at(&self, file: FileId, offset: usize) -> Option<Range<usize>> {
-        let at = |stop: &&Stop| stop.file == file && stop.start == offset;
-        self.stops.iter().find(at).map(|stop| stop.start..stop.end)
+        let stop = self.stops.get(self.index_at(file, offset)?)?;
+        Some(stop.start..stop.end)
+    }
+
+    /// Which of the places for a cursor begins at byte `offset` of
+    /// `file`. Of two that do, the one that shows no bytes: an empty
+    /// part of an equation stands at the byte of what follows it, and
+    /// the cursor at that byte is in the empty part.
+    fn index_at(&self, file: FileId, offset: usize) -> Option<usize> {
+        let at = |(_, stop): &(usize, &Stop)| stop.file == file && stop.start == offset;
+        let found = self.stops.iter().enumerate().filter(at);
+        found
+            .min_by_key(|(_, stop)| stop.end)
+            .map(|(index, _)| index)
     }
 
     /// The first place for a cursor of `file` that begins at byte
@@ -682,11 +700,11 @@ impl PageLines {
         let found = if forward {
             of_file
                 .filter(|stop| stop.start >= offset)
-                .min_by_key(|stop| stop.start)
+                .min_by_key(|stop| (stop.start, stop.end))
         } else {
             of_file
                 .filter(|stop| stop.start <= offset)
-                .max_by_key(|stop| stop.start)
+                .max_by_key(|stop| (stop.start, std::cmp::Reverse(stop.end)))
         };
         found.map(|stop| stop.start..stop.end)
     }
@@ -695,12 +713,10 @@ impl PageLines {
     /// of `file` (`forward`), or before it, in its line and of its file.
     #[must_use]
     pub fn stop_beside(&self, file: FileId, offset: usize, forward: bool) -> Option<Range<usize>> {
-        let at = self
-            .stops
-            .iter()
-            .position(|stop| stop.file == file && stop.start == offset)?;
+        let at = self.index_at(file, offset)?;
         let line = self.stops[at].line;
-        let in_line = |stop: &&Stop| stop.line == line && stop.file == file;
+        // Not what begins at the same byte: that is this place again.
+        let in_line = |stop: &&Stop| stop.line == line && stop.file == file && stop.start != offset;
         let beside = if forward {
             self.stops[at + 1..].iter().find(in_line)
         } else {
@@ -742,6 +758,12 @@ impl PageLines {
             .iter()
             .min_by(|a, b| order(a.left, b.left))
             .map(|glyph| (glyph.file, glyph.offset))
+    }
+
+    /// From where to where down the page line `line` reaches.
+    #[must_use]
+    pub fn band(&self, line: usize) -> Option<(f64, f64)> {
+        self.lines.get(line).map(|line| (line.top, line.bottom))
     }
 
     /// From where to where across the page line `line` reaches.
@@ -838,6 +860,13 @@ impl Origin {
         {
             *range = world.written_at(*file, range.start)..world.written_at(*file, range.end);
         }
+    }
+
+    /// Whether this glyph is the box in a part of an equation that is
+    /// yet to be typed: it was put in to show the equation, at the byte
+    /// that part is typed at.
+    fn is_empty_place(&self) -> bool {
+        matches!(self, Self::Math { range, .. } if range.is_empty())
     }
 
     /// The bytes of `file` this glyph stands for, if it stands for any.
@@ -1171,7 +1200,7 @@ impl Builder<'_> {
     }
 }
 
-fn transform_rect(rect: Rect, transform: Transform) -> Rect {
+pub(crate) fn transform_rect(rect: Rect, transform: Transform) -> Rect {
     let corners = [
         rect.min,
         Point::new(rect.max.x, rect.min.y),

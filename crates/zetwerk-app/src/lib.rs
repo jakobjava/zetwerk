@@ -1,10 +1,14 @@
 pub mod app;
+pub mod bib;
 pub mod chrome;
 pub mod editor;
+pub mod figure_text;
 pub mod gpu;
 pub mod headless;
 pub use zetwerk_vim::keys;
 pub mod power;
+pub mod ref_text;
+pub mod sections;
 pub mod typst_text;
 pub mod view;
 pub mod viewer;

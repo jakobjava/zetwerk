@@ -3,15 +3,18 @@
 
 mod compile;
 mod diagnostics;
+mod figure;
 mod ide;
+pub mod local;
 mod locate;
 mod pagemap;
 mod service;
 mod world;
 
-pub use compile::{Compiled, compile, export_pdf, forget_unused};
+pub use compile::{Compiled, compile, export_pdf, export_pdf_pages, forget_unused};
 pub use diagnostics::{describe, place};
-pub use ide::{Candidate, complete, definition_of, describe_at};
+pub use figure::{FigureArea, figure_area};
+pub use ide::{Candidate, bibliography_keys, complete, definition_of, describe_at};
 pub use locate::{PagePosition, locate};
 pub use pagemap::{Atomic, Caret, MappedGlyph, Origin, PageLines, PageMap, TextRun};
 pub use service::{CompileOutput, Compiler, Scheduler, Urgency};

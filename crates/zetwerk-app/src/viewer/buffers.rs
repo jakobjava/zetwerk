@@ -316,7 +316,11 @@ impl Viewer {
                 self.save_all();
             }
             ("file", "") => self.open_file_under_cursor(),
-            ("pdf", name) => self.write_pdf(name),
+            ("pdf" | "png" | "svg", argument) => self.export_command(name, argument),
+            // `:figure` alone is for the figure's card (see `figures`).
+            ("figure", argument) if !argument.is_empty() => {
+                self.export_command(name, argument);
+            }
             _ => return false,
         }
         true
@@ -363,33 +367,6 @@ impl Viewer {
             self.open_path(&path, false);
         } else {
             self.notice(format!("{name} is not a Typst file"));
-        }
-    }
-
-    /// `:pdf`: writes the document as a PDF, beside its main file under
-    /// that file's name, or as `name`.
-    fn write_pdf(&mut self, name: &str) {
-        let export = match self.for_export() {
-            Ok(export) => export,
-            Err(why) => return self.alert(format!("not exported: {why}")),
-        };
-        let path = match (name, &export.main) {
-            ("", Some(main)) => main.with_extension("pdf"),
-            ("", None) => return self.alert("the document is not a file: :pdf <name>"),
-            (name, _) => self.project.root_dir().join(name),
-        };
-        if path.extension().is_none_or(|ending| ending != "pdf") {
-            return self.alert(format!("{} does not end in .pdf", path.display()));
-        }
-        let written = zetwerk_typst::export_pdf(&export.document, &*export.world)
-            .map_err(|errors| errors.join("; "))
-            .and_then(|bytes| std::fs::write(&path, bytes).map_err(|err| err.to_string()));
-        match written {
-            Ok(()) => {
-                let pages = export.document.pages().len();
-                self.notice(format!("{} written, {pages} page(s)", self.name_of(&path)));
-            }
-            Err(why) => self.alert(format!("not exported: {why}")),
         }
     }
 

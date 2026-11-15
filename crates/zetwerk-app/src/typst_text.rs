@@ -6,10 +6,15 @@
 //! All of it goes by the syntax tree, not by characters: a `$` in a
 //! string is no equation, and bold in math is `bold(x)`, not `*x*`.
 
+use std::fmt::Write;
 use std::ops::Range;
 
 use typst::syntax::{LinkedNode, Side, Source, SyntaxKind};
 use zetwerk_vim::Format;
+
+mod shown;
+
+pub use shown::{join, letters, put_over, raw_blank};
 
 /// The innermost node at byte `at` of `source` and its ancestors, from
 /// the inside out.
@@ -360,24 +365,50 @@ pub fn open(source: &Source, at: usize, below: bool) -> (usize, String, usize) {
     }
 }
 
-/// What Enter typed at byte `at` of `source` puts into the text where
-/// only pages are shown: the end of a paragraph, of an item of a list,
-/// or, in an equation or in code, of a line.
+/// The line byte `at` of `text` is in, if all there is on it is the mark
+/// of an item of a list or of a heading: the bytes of the line, and those
+/// of the mark with the blanks behind it.
+fn bare_mark(text: &str, at: usize) -> Option<(Range<usize>, Range<usize>)> {
+    let start = text.get(..at)?.rfind('\n').map_or(0, |found| found + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |found| at + found);
+    let line = &text[start..end];
+    let mark = line.trim();
+    let is_mark =
+        matches!(mark, "-" | "+" | "/") || (!mark.is_empty() && mark.bytes().all(|b| b == b'='));
+    let from = start + (line.len() - line.trim_start().len());
+    (is_mark && at >= from + mark.len()).then_some((start..end, from..end))
+}
+
+/// What Enter typed at byte `at` of `source` does where only pages are
+/// shown: the bytes it replaces and what with. It ends a paragraph or an
+/// item of a list, or, in an equation or in code, a line; in an item
+/// with nothing in it, it ends the list.
 #[must_use]
-pub fn line_break(source: &Source, at: usize) -> String {
-    let chain = ancestors(source, at.saturating_sub(1));
-    let in_code = chain.iter().any(|node| {
-        matches!(
-            node.kind(),
-            SyntaxKind::Equation | SyntaxKind::Raw | SyntaxKind::CodeBlock | SyntaxKind::Args
-        )
-    });
-    if in_code {
-        return "\n".to_owned();
+pub fn line_break(source: &Source, at: usize) -> (Range<usize>, String) {
+    let text = source.text();
+    let put = |with: &str| (at..at, with.to_owned());
+    if ground(source, at) != Ground::Markup {
+        return put("\n");
+    }
+    // Out of what holds no paragraphs: the bytes up to there stay what
+    // they are, and the cursor goes behind them.
+    if let Some(to) = leave(source, at).filter(|to| *to > at)
+        && let Some(between) = text.get(at..to)
+    {
+        return (at..to, between.to_owned());
+    }
+    if let Some((line, _)) = bare_mark(text, at) {
+        // The mark goes; what follows is a paragraph of its own.
+        let after_item = line.start > 0 && !text[..line.start - 1].ends_with('\n');
+        return if after_item {
+            (line.start - 1..line.end, "\n\n".to_owned())
+        } else {
+            (line, String::new())
+        };
     }
     match list_item(source, at.saturating_sub(1)) {
-        Some((indent, marker)) => format!("\n{indent}{marker} "),
-        None => "\n\n".to_owned(),
+        Some((indent, marker)) => put(&format!("\n{indent}{marker} ")),
+        None => put("\n\n"),
     }
 }
 
@@ -675,6 +706,12 @@ fn fields(node: &LinkedNode, text: &str, at: usize, math: bool, found: &mut Vec<
 /// a table), and behind it where there is none left.
 #[must_use]
 pub fn next_field(source: &Source, at: usize) -> Option<usize> {
+    // Out of the name of a label.
+    let text = source.text();
+    let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | ':' | '.');
+    if text.get(at..)?.starts_with('>') && text[..at].trim_end_matches(name).ends_with('<') {
+        return Some(at + 1);
+    }
     let (chain, _) = containing(source, at);
     let stands = |node: &LinkedNode| {
         node.parent_kind() == Some(SyntaxKind::Markup)
@@ -703,6 +740,395 @@ pub fn next_field(source: &Source, at: usize) -> Option<usize> {
     fields(whole, source.text(), at, false, &mut found);
     let next = found.into_iter().filter(|place| *place > at).min();
     Some(next.unwrap_or(whole.range().end))
+}
+
+/// The value a `#set` rule of `source` for `function` gives `key`, as it
+/// is written: `rule_value(source, "text", "font")`. Only rules that
+/// stand by themselves, not in a block or a call: those hold for all of
+/// the file.
+#[must_use]
+pub fn rule_value(source: &Source, function: &str, key: &str) -> Option<String> {
+    let (_, value) = rule_place(source, function, key)?;
+    source.text().get(value?).map(str::to_owned)
+}
+
+/// Where `source` sets `key` of `function` by a rule: the brackets of
+/// the first rule for `function`, and in them the value of `key`, if it
+/// has one.
+fn rule_place(
+    source: &Source,
+    function: &str,
+    key: &str,
+) -> Option<(Range<usize>, Option<Range<usize>>)> {
+    let text = source.text();
+    let root = LinkedNode::new(source.root());
+    let rules = root
+        .children()
+        .filter(|node| node.kind() == SyntaxKind::SetRule);
+    for rule in rules {
+        let names = rule.children().any(|part| {
+            matches!(part.kind(), SyntaxKind::Ident | SyntaxKind::FieldAccess)
+                && text.get(part.range()) == Some(function)
+        });
+        let Some(args) = rule
+            .children()
+            .find(|part| part.kind() == SyntaxKind::Args)
+            .filter(|_| names)
+        else {
+            continue;
+        };
+        let value = args
+            .children()
+            .filter(|arg| arg.kind() == SyntaxKind::Named)
+            .find(|named| {
+                let name = named.children().next();
+                name.is_some_and(|name| text.get(name.range()) == Some(key))
+            })
+            .and_then(|named| named.children().next_back().map(|value| value.range()));
+        return Some((args.range(), value));
+    }
+    None
+}
+
+/// The change to `source` that makes `key` of `function` be `value` from
+/// here on: in the `#set` rule there is for `function`, or in a new one
+/// before everything else. The bytes to replace, and what with.
+#[must_use]
+pub fn set_rule(source: &Source, function: &str, key: &str, value: &str) -> (Range<usize>, String) {
+    let text = source.text();
+    match rule_place(source, function, key) {
+        Some((_, Some(old))) => (old, value.to_owned()),
+        Some((args, None)) => {
+            let inside = text
+                .get(args.start + 1..args.end.saturating_sub(1))
+                .unwrap_or("");
+            let written = inside.trim_end();
+            let at = args.start + 1 + written.len();
+            let between = match written {
+                "" => "",
+                written if written.ends_with(',') => " ",
+                _ => ", ",
+            };
+            (at..at, format!("{between}{key}: {value}"))
+        }
+        None => (0..0, format!("#set {function}({key}: {value})\n")),
+    }
+}
+
+/// A table as it is written: a call of `table` (or `grid`) whose cells
+/// are all written between square brackets.
+pub struct Table {
+    /// The bytes of the number of its columns, where that is written as
+    /// a number.
+    count: Option<Range<usize>>,
+    /// How many columns it has.
+    pub columns: usize,
+    /// The bytes of its cells, brackets and all, row after row.
+    pub cells: Vec<Range<usize>>,
+    /// The bytes of the call.
+    pub whole: Range<usize>,
+    /// How many of its cells are those of its header (`table.header`):
+    /// they come first, and are whole rows. None where it has no header.
+    pub header: usize,
+    /// The bytes of the header, where it has one: the call its cells
+    /// are written in.
+    pub head: Option<Range<usize>>,
+}
+
+impl Table {
+    /// Which cell byte `at` is in (or at an end of).
+    #[must_use]
+    pub fn cell_at(&self, at: usize) -> Option<usize> {
+        self.cells
+            .iter()
+            .position(|cell| cell.start < at && at < cell.end)
+    }
+
+    /// The cells of the row cell `index` is in.
+    fn row_of(&self, index: usize) -> Range<usize> {
+        let first = index - index % self.columns;
+        first..(first + self.columns).min(self.cells.len())
+    }
+
+    /// The byte behind cell `index` and all that is written around it
+    /// alone: behind the header, where the cell is the last of that.
+    fn behind(&self, index: usize) -> Option<usize> {
+        let cell = self.cells.get(index)?;
+        match &self.head {
+            Some(head) if index + 1 == self.header => Some(head.end),
+            _ => Some(cell.end),
+        }
+    }
+}
+
+/// The cells of the header `call` of a table (`named`: `table` or
+/// `grid`), if it is one and all it holds are cells written between
+/// square brackets.
+fn header_cells(call: &LinkedNode, text: &str, named: &str) -> Option<Vec<Range<usize>>> {
+    let name = call.children().next()?;
+    let is_header = text
+        .get(name.range())
+        .and_then(|name| name.strip_prefix(named))
+        .is_some_and(|rest| rest == ".header");
+    let args = call
+        .children()
+        .find(|part| part.kind() == SyntaxKind::Args)
+        .filter(|_| is_header)?;
+    let mut cells = Vec::new();
+    let mut closed = false;
+    for arg in args.children() {
+        match arg.kind() {
+            // Between the round brackets, not behind them.
+            SyntaxKind::ContentBlock if !closed => cells.push(arg.range()),
+            SyntaxKind::RightParen => closed = true,
+            SyntaxKind::LeftParen | SyntaxKind::Comma | SyntaxKind::Space => {}
+            _ => return None,
+        }
+    }
+    (closed && !cells.is_empty()).then_some(cells)
+}
+
+/// The table byte `at` of `source` is in, the innermost.
+#[must_use]
+pub fn table_at(source: &Source, at: usize) -> Option<Table> {
+    let text = source.text();
+    let (chain, _) = containing(source, at);
+    chain.iter().rev().find_map(|call| {
+        if call.kind() != SyntaxKind::FuncCall {
+            return None;
+        }
+        let name = call.children().next()?;
+        let named = text.get(name.range())?;
+        if !matches!(named, "table" | "grid") {
+            return None;
+        }
+        let args = call
+            .children()
+            .find(|part| part.kind() == SyntaxKind::Args)?;
+        let mut table = Table {
+            count: None,
+            columns: 1,
+            cells: Vec::new(),
+            whole: call.range(),
+            header: 0,
+            head: None,
+        };
+        for arg in args.children() {
+            match arg.kind() {
+                SyntaxKind::ContentBlock => table.cells.push(arg.range()),
+                // A header of cells, before all others: the first rows.
+                SyntaxKind::FuncCall if table.cells.is_empty() => {
+                    table.cells = header_cells(&arg, text, named)?;
+                    table.header = table.cells.len();
+                    table.head = Some(arg.range());
+                }
+                SyntaxKind::Named => {
+                    let key = arg.children().next()?;
+                    let value = arg.children().next_back()?;
+                    if text.get(key.range()) != Some("columns") {
+                        continue;
+                    }
+                    match value.kind() {
+                        SyntaxKind::Int => {
+                            table.columns = text.get(value.range())?.parse().ok()?;
+                            table.count = Some(value.range());
+                        }
+                        SyntaxKind::Array => {
+                            let item = |part: &LinkedNode| {
+                                !matches!(
+                                    part.kind(),
+                                    SyntaxKind::LeftParen
+                                        | SyntaxKind::RightParen
+                                        | SyntaxKind::Comma
+                                        | SyntaxKind::Space
+                                )
+                            };
+                            table.columns = value.children().filter(item).count();
+                        }
+                        _ => return None,
+                    }
+                }
+                SyntaxKind::LeftParen
+                | SyntaxKind::RightParen
+                | SyntaxKind::Comma
+                | SyntaxKind::Space => {}
+                // A line, a footer, a cell that is a call: not for
+                // changing blindly.
+                _ => return None,
+            }
+        }
+        let whole_rows = table.columns >= 1 && table.header.is_multiple_of(table.columns);
+        (whole_rows && !table.cells.is_empty()).then_some(table)
+    })
+}
+
+/// The blanks the line byte `at` of `text` is on begins with.
+fn indent_of(text: &str, at: usize) -> &str {
+    let line = text[..at].rfind('\n').map_or(0, |found| found + 1);
+    let rest = &text[line..at];
+    &rest[..rest.len() - rest.trim_start_matches([' ', '\t']).len()]
+}
+
+/// A row of empty cells behind the last of `table`: where it goes, what
+/// it is, and how far into that its first cell is.
+#[must_use]
+pub fn table_new_row(source: &Source, table: &Table) -> Option<(usize, String, usize)> {
+    let text = source.text();
+    let last = table.cells.last()?;
+    let first = table.cells.get(table.row_of(table.cells.len() - 1).start)?;
+    // A last row with cells missing is filled up first.
+    let missing = (table.columns - table.cells.len() % table.columns) % table.columns;
+    let fill = ", []".repeat(missing);
+    let row = vec!["[]"; table.columns].join(", ");
+    // Behind a header that is all there is, not in it.
+    let (place, begins) = match &table.head {
+        Some(head) if table.cells.len() == table.header => (head.end, head.start),
+        _ => (last.end, first.start),
+    };
+    let lead = format!("{fill},\n{}", indent_of(text, begins));
+    Some((place, format!("{lead}{row}"), lead.len() + 1))
+}
+
+/// The changes to `source` that give `table` one more column, behind
+/// the others; from the last to the first, so that each leaves the
+/// bytes of those that follow where they are.
+#[must_use]
+pub fn table_new_column(source: &Source, table: &Table) -> Vec<(Range<usize>, String)> {
+    let text = source.text();
+    let mut edits = Vec::new();
+    for (index, cell) in table.cells.iter().enumerate().rev() {
+        let ends_row = (index + 1) % table.columns == 0 || index + 1 == table.cells.len();
+        if ends_row {
+            edits.push((cell.end..cell.end, ", []".to_owned()));
+        }
+    }
+    match &table.count {
+        Some(count) => edits.push((count.clone(), (table.columns + 1).to_string())),
+        None => {
+            // `columns: (auto, 1fr)`: one more of the last kind.
+            if let Some(((), Some(value))) = rule_free_columns(source, table) {
+                let inside = text.get(value.start + 1..value.end - 1).unwrap_or("");
+                let last = inside.rsplit(',').next().unwrap_or("auto").trim();
+                let last = if last.is_empty() { "auto" } else { last };
+                edits.push((value.end - 1..value.end - 1, format!(", {last}")));
+            }
+        }
+    }
+    edits
+}
+
+/// Where `table` says what its columns are, if it does so with a list.
+fn rule_free_columns(source: &Source, table: &Table) -> Option<((), Option<Range<usize>>)> {
+    let text = source.text();
+    let call = LinkedNode::new(source.root()).leaf_at(table.whole.start, Side::After)?;
+    let call = call.parent()?;
+    let args = call
+        .children()
+        .find(|part| part.kind() == SyntaxKind::Args)?;
+    let value = args
+        .children()
+        .filter(|arg| arg.kind() == SyntaxKind::Named)
+        .find(|named| {
+            let name = named.children().next();
+            name.is_some_and(|name| text.get(name.range()) == Some("columns"))
+        })
+        .and_then(|named| named.children().next_back())
+        .filter(|value| value.kind() == SyntaxKind::Array)
+        .map(|value| value.range());
+    Some(((), value))
+}
+
+/// The bytes that go with cell `index` of `table` when it is taken out:
+/// the cell and what stands between it and the next (or, of the last,
+/// the one before).
+fn cell_with_mark(table: &Table, index: usize) -> Option<Range<usize>> {
+    let cell = table.cells.get(index)?;
+    // The last of a row goes with what is before it: the row's end
+    // stays where it is.
+    let ends_row = (index + 1).is_multiple_of(table.columns) && table.columns > 1;
+    match (table.cells.get(index + 1), index.checked_sub(1)) {
+        (Some(next), _) if !ends_row => Some(cell.start..next.start),
+        (_, Some(before)) => Some(table.behind(before)?..cell.end),
+        (Some(next), None) => Some(cell.start..next.start),
+        (None, None) => None,
+    }
+}
+
+/// The changes that take the row cell `index` is in out of `table`, from
+/// the last to the first. None if it is the only row.
+#[must_use]
+pub fn table_without_row(table: &Table, index: usize) -> Vec<(Range<usize>, String)> {
+    if table.cells.len() <= table.columns {
+        return Vec::new();
+    }
+    row_bytes(table, index)
+        .map(|range| (range, String::new()))
+        .into_iter()
+        .collect()
+}
+
+/// The bytes that go with the row cell `index` of `table` is in when it
+/// is taken out: its cells and what stands between them and the next
+/// row (or, of the last row, the one before). A header goes whole with
+/// its only row.
+fn row_bytes(table: &Table, index: usize) -> Option<Range<usize>> {
+    let row = table.row_of(index);
+    let cells = &table.cells;
+    let first = cells.get(row.start)?.start;
+    let before = row.start.checked_sub(1);
+    if row.end == table.header {
+        // The last row of the header: what follows is not in it.
+        return match (&table.head, before) {
+            (Some(head), None) => Some(head.start..cells.get(row.end)?.start),
+            (_, Some(before)) => Some(cells.get(before)?.end..cells.get(row.end - 1)?.end),
+            (None, None) => None,
+        };
+    }
+    match (cells.get(row.end), before) {
+        (Some(next), _) => Some(first..next.start),
+        (None, Some(before)) => Some(table.behind(before)?..cells.last()?.end),
+        (None, None) => None,
+    }
+}
+
+/// The changes that take the column cell `index` is in out of `table`,
+/// from the last to the first. None if it is the only column, or the
+/// number of columns is not written as a number.
+#[must_use]
+pub fn table_without_column(table: &Table, index: usize) -> Vec<(Range<usize>, String)> {
+    let (Some(count), true) = (&table.count, table.columns > 1) else {
+        return Vec::new();
+    };
+    let column = index % table.columns;
+    let mut edits: Vec<(Range<usize>, String)> = (0..table.cells.len())
+        .rev()
+        .filter(|cell| cell % table.columns == column)
+        .filter_map(|cell| Some((cell_with_mark(table, cell)?, String::new())))
+        .collect();
+    edits.push((count.clone(), (table.columns - 1).to_string()));
+    edits
+}
+
+/// Whether byte `at` of `source` is a place in running text with nothing
+/// written in it: a line with nothing on it (but the mark of an item or
+/// a heading), or between brackets with nothing between them.
+#[must_use]
+pub fn is_empty_spot(source: &Source, at: usize) -> bool {
+    let text = source.text();
+    let (Some(before), Some(behind)) = (text.get(..at), text.get(at..)) else {
+        return false;
+    };
+    if ground(source, at) != Ground::Markup {
+        return false;
+    }
+    let line = before.rfind('\n').map_or(0, |found| found + 1);
+    let begun = before[line..].trim_start_matches(['=', '-', '+', '/', ' ']);
+    let opens = begun.is_empty() || before.ends_with('[');
+    let rest = behind.trim_start_matches(' ');
+    let closes = rest.is_empty() || rest.starts_with(['\n', ']']);
+    // A mark needs its blank before anything can follow it.
+    let marked = before[line..].trim_start().len() > begun.len();
+    opens && closes && (!marked || before.ends_with(' ') || before.ends_with('['))
 }
 
 /// The equation byte `at` of `source` is in, the outermost: its bytes.
@@ -747,7 +1173,7 @@ fn scripts_in(node: &LinkedNode, text: &str, end: usize, found: &mut Vec<Range<u
             && let Some(behind) = inside.trim_start().strip_prefix(')')
         {
             found.push(range.start..end - behind.len());
-        } else if rest.is_empty() || rest.starts_with([',', ';', ')', '$', ']']) {
+        } else if rest.is_empty() || rest.starts_with([',', ';', ')', '$', ']', '^', '_']) {
             found.push(range.start..if rest.is_empty() { from } else { range.end });
         }
     }
@@ -761,7 +1187,39 @@ fn scripts_in(node: &LinkedNode, text: &str, end: usize, found: &mut Vec<Range<u
 /// lowers nothing, with its brackets; a call all of whose arguments are
 /// empty.
 #[must_use]
-pub fn unmake(source: &Source, at: usize) -> Option<Range<usize>> {
+pub fn unmake(source: &Source, at: usize) -> Option<(Range<usize>, String)> {
+    let text = source.text();
+    let gone = |range: Range<usize>| Some((range, String::new()));
+    // The last row of a table, if nothing is in it: the cursor goes to
+    // the end of the cell before it.
+    if let Some(table) = table_at(source, at)
+        && let Some(index) = table.cell_at(at)
+    {
+        let row = table.row_of(index);
+        let blank = |cell: &Range<usize>| {
+            text.get(cell.start + 1..cell.end - 1)
+                .is_some_and(|inside| inside.trim().is_empty())
+        };
+        let last_row = row.end == table.cells.len() && row.start > 0;
+        if last_row && table.cells[row.clone()].iter().all(blank) {
+            let before = table.cells.get(row.start - 1)?;
+            let last = table.cells.last()?;
+            return Some((before.end - 1..last.end, "]".to_owned()));
+        }
+    }
+    if ground(source, at) == Ground::Markup
+        && let Some((line, mark)) = bare_mark(text, at)
+    {
+        // The mark of an item or a heading with nothing behind it; of an
+        // item that follows another, the line too.
+        let after_item = line.start > 0 && !text[..line.start - 1].ends_with('\n');
+        let from = if after_item {
+            line.start - 1
+        } else {
+            mark.start
+        };
+        return gone(from..at);
+    }
     let equation = equation_at(source, at.saturating_sub(1))?;
     if at <= equation.start || at >= equation.end {
         return None;
@@ -769,11 +1227,10 @@ pub fn unmake(source: &Source, at: usize) -> Option<Range<usize>> {
     let script = empty_scripts(source, &equation)
         .into_iter()
         .find(|script| script.start < at && at <= script.end);
-    if script.is_some() {
-        return script;
+    if let Some(script) = script {
+        return gone(script);
     }
     let (chain, _) = containing(source, at);
-    let text = source.text();
     chain.iter().rev().find_map(|node| {
         let args = node
             .children()
@@ -783,12 +1240,72 @@ pub fn unmake(source: &Source, at: usize) -> Option<Range<usize>> {
         let empty = inside
             .chars()
             .all(|c| c.is_whitespace() || matches!(c, ',' | ';'));
-        (empty && args.range().start < at && at < args.range().end).then(|| node.range())
+        (empty && args.range().start < at && at < args.range().end)
+            .then(|| (node.range(), String::new()))
     })
 }
 
+/// What Tab does at byte `at` of `source`: leads to the next place to
+/// fill in (see [`next_field`]), and behind the last cell of a table
+/// makes a row for more. The bytes to replace, what with, and how far
+/// into that the cursor goes.
+#[must_use]
+pub fn tab_key(source: &Source, at: usize) -> Option<(Range<usize>, String, usize)> {
+    if let Some(table) = table_at(source, at)
+        && table
+            .cell_at(at)
+            .is_some_and(|cell| cell + 1 == table.cells.len())
+    {
+        let (place, row, within) = table_new_row(source, &table)?;
+        return Some((place..place, row, within));
+    }
+    next_field(source, at).map(|next| (next..next, String::new(), 0))
+}
+
+/// What is written between square brackets and is over with Enter: one
+/// line of something, not paragraphs.
+const ONE_LINE: &[&str] = &[
+    "footnote",
+    "link",
+    "strong",
+    "emph",
+    "underline",
+    "strike",
+    "highlight",
+    "super",
+    "sub",
+    "smallcaps",
+];
+
+/// Where Enter leads from byte `at` of `source` where it is in something
+/// that holds no paragraphs: out of a cell of a table (to what follows
+/// the table), out of a caption or a footnote.
+fn leave(source: &Source, at: usize) -> Option<usize> {
+    let text = source.text();
+    if let Some(table) = table_at(source, at)
+        && table.cell_at(at).is_some()
+    {
+        return Some(next_field(source, table.whole.end).unwrap_or(table.whole.end));
+    }
+    let (chain, _) = containing(source, at);
+    let block = chain
+        .iter()
+        .rfind(|node| node.kind() == SyntaxKind::ContentBlock)?;
+    let parent = block.parent()?;
+    let call = parent.parent()?;
+    let one_line = match parent.kind() {
+        SyntaxKind::Named => true,
+        SyntaxKind::Args => {
+            let name = call.children().next()?;
+            ONE_LINE.contains(&text.get(name.range())?)
+        }
+        _ => false,
+    };
+    one_line.then(|| next_field(source, at).unwrap_or(block.range().end))
+}
+
 /// What stands for a part of an equation that is yet to be typed.
-pub const EMPTY: &str = "square.stroked";
+pub const EMPTY: &str = "\u{25a1}";
 
 /// The places of the equation at bytes `equation` of `source` that are
 /// still empty (an argument, what is raised or lowered, what is divided
@@ -796,6 +1313,300 @@ pub const EMPTY: &str = "square.stroked";
 /// not show what it lacks. In order, by byte of `source`.
 #[must_use]
 pub fn empty_places(source: &Source, equation: &Range<usize>) -> Vec<usize> {
+    lacking(source, equation, false)
+}
+
+/// How many words and characters of running text `source` has: what is
+/// read, not what is written to make it look as it does. Equations and
+/// code are not counted.
+#[must_use]
+pub fn count(source: &Source) -> (usize, usize) {
+    fn gather(node: &LinkedNode, text: &str, read: &mut String) {
+        match node.kind() {
+            SyntaxKind::Text => read.push_str(text.get(node.range()).unwrap_or("")),
+            SyntaxKind::Space
+            | SyntaxKind::Parbreak
+            | SyntaxKind::Linebreak
+            | SyntaxKind::Equation
+            | SyntaxKind::Raw => read.push(' '),
+            _ => {
+                for child in node.children() {
+                    gather(&child, text, read);
+                }
+            }
+        }
+    }
+    let mut read = String::new();
+    gather(&LinkedNode::new(source.root()), source.text(), &mut read);
+    let words = read.split_whitespace().count();
+    let characters = read.chars().filter(|c| !c.is_whitespace()).count();
+    (words, characters)
+}
+
+/// The file `source` names as its bibliography, if it names one: the
+/// first, where it names several.
+#[must_use]
+pub fn bibliography_file(source: &Source) -> Option<String> {
+    fn find(node: &LinkedNode, text: &str) -> Option<String> {
+        if node.kind() == SyntaxKind::FuncCall {
+            let name = node.children().next()?;
+            if text.get(name.range()) == Some("bibliography") {
+                let args = node
+                    .children()
+                    .find(|part| part.kind() == SyntaxKind::Args)?;
+                // The file, or the first of a list of files.
+                let first = args.children().find_map(|arg| match arg.kind() {
+                    SyntaxKind::Str => Some(arg.range()),
+                    SyntaxKind::Array => arg
+                        .children()
+                        .find(|item| item.kind() == SyntaxKind::Str)
+                        .map(|item| item.range()),
+                    _ => None,
+                })?;
+                return text
+                    .get(first.start + 1..first.end - 1)
+                    .map(|named| named.replace("\\\"", "\"").replace("\\\\", "\\"));
+            }
+        }
+        node.children().find_map(|child| find(&child, text))
+    }
+    find(&LinkedNode::new(source.root()), source.text())
+}
+
+/// What a part of `source` that begins at byte `at` needs before it to
+/// be typeset by itself as it is in the whole: the numbers the headings,
+/// equations and figures before it have counted up to, and a rule for
+/// references to what is not in the part (they show what they refer to
+/// by its name, for want of the thing).
+#[must_use]
+pub fn lead_for_part(source: &Source, at: usize) -> String {
+    let text = source.text();
+    let mut levels: Vec<usize> = Vec::new();
+    let (mut equations, mut images, mut tables) = (0, 0, 0);
+    let mut offset = 0;
+    for child in source.root().children() {
+        if offset >= at {
+            break;
+        }
+        let written = text.get(offset..offset + child.len()).unwrap_or("");
+        match child.kind() {
+            SyntaxKind::Heading => {
+                let level = written
+                    .bytes()
+                    .take_while(|byte| *byte == b'=')
+                    .count()
+                    .max(1);
+                levels.truncate(level);
+                levels.resize(level, 0);
+                levels[level - 1] += 1;
+            }
+            SyntaxKind::Equation if written.starts_with("$ ") || written.starts_with("$\n") => {
+                equations += 1;
+            }
+            SyntaxKind::FuncCall if written.starts_with("figure(") => {
+                if written.contains("table(") {
+                    tables += 1;
+                } else if written.contains("image(") {
+                    images += 1;
+                }
+            }
+            _ => {}
+        }
+        offset += child.len();
+    }
+    // On a page as long as it takes: a part is not to break across
+    // pages only because it stands lower here than where it belongs.
+    let mut lead = String::from(
+        "#set page(height: auto)\n\
+         #show ref: it => context { if query(it.target).len() > 0 { it } \
+         else { text(str(it.target)) } }\n",
+    );
+    let notes = text
+        .get(..at)
+        .map_or(0, |before| before.matches("#footnote").count());
+    if notes > 0 {
+        let _ = writeln!(lead, "#counter(footnote).update({notes})");
+    }
+    if !levels.is_empty() {
+        let counted: Vec<String> = levels.iter().map(usize::to_string).collect();
+        let _ = writeln!(lead, "#counter(heading).update(({},))", counted.join(", "));
+    }
+    for (what, count) in [
+        ("math.equation", equations),
+        ("figure.where(kind: image)", images),
+        ("figure.where(kind: table)", tables),
+    ] {
+        if count > 0 {
+            let _ = writeln!(lead, "#counter({what}).update({count})");
+        }
+    }
+    lead
+}
+
+/// The equations of `source`, the outermost: their bytes.
+#[must_use]
+pub fn equations(source: &Source) -> Vec<Range<usize>> {
+    fn gather(node: &LinkedNode, found: &mut Vec<Range<usize>>) {
+        if node.kind() == SyntaxKind::Equation {
+            found.push(node.range());
+            return;
+        }
+        for child in node.children() {
+            gather(&child, found);
+        }
+    }
+    let mut found = Vec::new();
+    gather(&LinkedNode::new(source.root()), &mut found);
+    found
+}
+
+/// The places of an equation that is not being typed which lack what
+/// they cannot be without: what was begun there and left. Fewer than
+/// [`empty_places`] finds: only those Typst would refuse the equation
+/// for, so that no equation that is one is shown otherwise.
+#[must_use]
+pub fn left_empty(source: &Source, equation: &Range<usize>) -> Vec<usize> {
+    lacking(source, equation, true)
+}
+
+/// The places of all equations of `source` but the one at bytes `but`
+/// that lack what they cannot be without (see [`left_empty`]), in the
+/// order of the text. One walk through the text, for every key: nothing
+/// in it looks anything up.
+#[must_use]
+pub fn left_empty_everywhere(source: &Source, but: Option<&Range<usize>>) -> Vec<usize> {
+    use typst::syntax::SyntaxNode;
+    /// What the walk carries along.
+    struct Walk<'a> {
+        text: &'a str,
+        but: Option<&'a Range<usize>>,
+        places: Vec<usize>,
+    }
+    /// The places of the equation `node` (at byte `start`) holds.
+    fn gaps(
+        walk: &mut Walk,
+        node: &SyntaxNode,
+        start: usize,
+        within: (SyntaxKind, bool),
+        end: usize,
+    ) {
+        let (parent, needs_all) = within;
+        let lacks = match node.kind() {
+            SyntaxKind::Hat | SyntaxKind::Underscore | SyntaxKind::Slash => true,
+            SyntaxKind::Comma | SyntaxKind::Semicolon => {
+                parent == SyntaxKind::MathArgs && needs_all
+            }
+            SyntaxKind::LeftParen => match parent {
+                SyntaxKind::MathArgs => needs_all,
+                SyntaxKind::Math => true,
+                _ => false,
+            },
+            _ => false,
+        };
+        if lacks {
+            let rest = walk.text[start + node.len()..end].trim_start();
+            if rest.is_empty() || rest.starts_with([',', ';', ')', '$', ']', '^', '_']) {
+                walk.places.push(end - rest.len());
+            }
+        }
+        // The arguments of a call are told what the call is.
+        let needs_all = match node.kind() {
+            SyntaxKind::MathCall => node
+                .children()
+                .next()
+                .and_then(|name| walk.text.get(start..start + name.len()))
+                .is_some_and(|name| NEEDS_ALL.contains(&name)),
+            SyntaxKind::MathArgs => needs_all,
+            _ => false,
+        };
+        let mut at = start;
+        for child in node.children() {
+            gaps(walk, child, at, (node.kind(), needs_all), end);
+            at += child.len();
+        }
+    }
+    /// Through all of `node` (at byte `start`), down to its equations.
+    fn through(walk: &mut Walk, node: &SyntaxNode, start: usize) {
+        if node.kind() == SyntaxKind::Equation {
+            let bytes = start..start + node.len();
+            let empty = walk
+                .text
+                .get(bytes.start + 1..bytes.end.saturating_sub(1))
+                .is_none_or(|body| body.trim().is_empty());
+            if walk.but != Some(&bytes) && !empty {
+                gaps(walk, node, start, (SyntaxKind::Markup, false), bytes.end);
+            }
+            return;
+        }
+        let mut at = start;
+        for child in node.children() {
+            if child.children().len() > 0 {
+                through(walk, child, at);
+            }
+            at += child.len();
+        }
+    }
+    let mut walk = Walk {
+        text: source.text(),
+        but,
+        places: Vec::new(),
+    };
+    through(&mut walk, source.root(), 0);
+    walk.places.sort_unstable();
+    walk.places.dedup();
+    walk.places
+}
+
+/// Whether byte `at` of `source` is in what a call of `function` holds:
+/// in a footnote, say.
+#[must_use]
+pub fn is_in_call(source: &Source, at: usize, function: &str) -> bool {
+    let text = source.text();
+    containing(source, at).0.iter().any(|node| {
+        node.kind() == SyntaxKind::FuncCall
+            && node
+                .children()
+                .next()
+                .is_some_and(|name| text.get(name.range()) == Some(function))
+    })
+}
+
+/// The functions of equations that are nothing without each of their
+/// arguments.
+const NEEDS_ALL: &[&str] = &[
+    "frac",
+    "sqrt",
+    "root",
+    "binom",
+    "bold",
+    "italic",
+    "upright",
+    "bb",
+    "cal",
+    "frak",
+    "mono",
+    "sans",
+    "serif",
+    "hat",
+    "tilde",
+    "overline",
+    "underline",
+    "dot",
+    "ddot",
+    "arrow",
+    "norm",
+    "abs",
+    "floor",
+    "ceil",
+    "round",
+    "underbrace",
+    "overbrace",
+    "cancel",
+    "op",
+    "accent",
+];
+
+fn lacking(source: &Source, equation: &Range<usize>, sure: bool) -> Vec<usize> {
     let text = source.text();
     let mut places = Vec::new();
     let Some(node) = LinkedNode::new(source.root()).leaf_at(equation.start, Side::After) else {
@@ -810,7 +1621,7 @@ pub fn empty_places(source: &Source, equation: &Range<usize>) -> Vec<usize> {
     // Where nothing stands behind byte `at`: the place for something.
     let ends = |at: usize| {
         let rest = text[at..equation.end].trim_start();
-        let nothing = rest.is_empty() || rest.starts_with([',', ';', ')', '$', ']']);
+        let nothing = rest.is_empty() || rest.starts_with([',', ';', ')', '$', ']', '^', '_']);
         nothing.then(|| equation.end - rest.len())
     };
     let inside = equation.start + 1..equation.end.saturating_sub(1);
@@ -818,35 +1629,57 @@ pub fn empty_places(source: &Source, equation: &Range<usize>) -> Vec<usize> {
         .get(inside.clone())
         .is_some_and(|body| body.trim().is_empty())
     {
-        places.push(inside.start + usize::from(inside.len() > 1));
+        if !sure {
+            places.push(inside.start + usize::from(inside.len() > 1));
+        }
         return places;
     }
-    empty_in(node, &ends, &mut places);
+    empty_in(node, &ends, sure.then_some(text), &mut places);
     places.sort_unstable();
     places.dedup();
     places
 }
 
-fn empty_in(node: &LinkedNode, ends: &dyn Fn(usize) -> Option<usize>, places: &mut Vec<usize>) {
+/// With `sure` (the text), only what Typst would refuse: of calls, only
+/// those that need all their arguments.
+fn empty_in(
+    node: &LinkedNode,
+    ends: &dyn Fn(usize) -> Option<usize>,
+    sure: Option<&str>,
+    places: &mut Vec<usize>,
+) {
     let end = node.range().end;
+    // Whether the call these are the brackets of may lack an argument.
+    let argument = || {
+        let Some(text) = sure else {
+            return true;
+        };
+        let name = node
+            .parent()
+            .and_then(LinkedNode::parent)
+            .and_then(|call| call.children().next())
+            .and_then(|name| text.get(name.range()));
+        name.is_some_and(|name| NEEDS_ALL.contains(&name))
+    };
     let lacks = match node.kind() {
         SyntaxKind::Hat | SyntaxKind::Underscore | SyntaxKind::Slash => true,
         SyntaxKind::Comma | SyntaxKind::Semicolon => {
-            node.parent_kind() == Some(SyntaxKind::MathArgs)
+            node.parent_kind() == Some(SyntaxKind::MathArgs) && argument()
         }
         // Brackets with nothing in them: of a call, or of what is
         // raised, lowered or divided by.
-        SyntaxKind::LeftParen => matches!(
-            node.parent_kind(),
-            Some(SyntaxKind::MathArgs | SyntaxKind::Math)
-        ),
+        SyntaxKind::LeftParen => match node.parent_kind() {
+            Some(SyntaxKind::MathArgs) => argument(),
+            Some(SyntaxKind::Math) => true,
+            _ => false,
+        },
         _ => false,
     };
     if lacks {
         places.extend(ends(end));
     }
     for child in node.children() {
-        empty_in(&child, ends, places);
+        empty_in(&child, ends, sure, places);
     }
 }
 
@@ -1331,6 +2164,12 @@ mod tests {
             Some("#footnote[see $x$| there]")
         );
         assert_eq!(tab("plain| text"), None);
+        // Out of a label.
+        assert_eq!(
+            tab("= Title <sec:one|>").as_deref(),
+            Some("= Title <sec:one>|")
+        );
+        assert_eq!(tab("#figure([a]) <|>").as_deref(), Some("#figure([a]) <>|"));
         // Into what begins at the cursor.
         assert_eq!(tab("a |$frac(, )$").as_deref(), Some("a $|frac(, )$"));
         assert_eq!(
@@ -1352,6 +2191,121 @@ mod tests {
         show(&LinkedNode::new(source(&text).root()), 0);
     }
 
+    /// `text` after `edits`, each of which refers to the text the ones
+    /// before it left.
+    fn edited(text: &str, edits: Vec<(Range<usize>, String)>) -> String {
+        let mut text = text.to_owned();
+        for (range, with) in edits {
+            text.replace_range(range, &with);
+        }
+        text
+    }
+
+    #[test]
+    fn rules_are_set_where_they_are_or_before_everything() {
+        let set = |text: &str, function: &str, key: &str, value: &str| {
+            edited(text, vec![set_rule(&source(text), function, key, value)])
+        };
+        assert_eq!(
+            set("Text.\n", "text", "size", "12pt"),
+            "#set text(size: 12pt)\nText.\n"
+        );
+        assert_eq!(
+            set("#set text(size: 12pt)\nText.\n", "text", "size", "10pt"),
+            "#set text(size: 10pt)\nText.\n"
+        );
+        assert_eq!(
+            set(
+                "#set text(size: 12pt)\nText.\n",
+                "text",
+                "font",
+                "\"Libertinus Serif\""
+            ),
+            "#set text(size: 12pt, font: \"Libertinus Serif\")\nText.\n"
+        );
+        assert_eq!(
+            set("#set page()\n", "page", "paper", "\"a5\""),
+            "#set page(paper: \"a5\")\n"
+        );
+        assert_eq!(
+            set("#set par(justify: true)\n", "page", "columns", "2"),
+            "#set page(columns: 2)\n#set par(justify: true)\n"
+        );
+        let text = "#set par(justify: true)\n";
+        assert_eq!(
+            rule_value(&source(text), "par", "justify").as_deref(),
+            Some("true")
+        );
+        assert_eq!(rule_value(&source(text), "par", "leading"), None);
+    }
+
+    #[test]
+    fn tables_get_and_lose_rows_and_columns() {
+        let text = "#table(\n  columns: 2,\n  [a], [b],\n  [c], [d],\n)";
+        let source = source(text);
+        let at = text.find("[d").unwrap_or(0) + 1;
+        let Some(table) = table_at(&source, at) else {
+            panic!("no table");
+        };
+        assert_eq!(
+            (table.columns, table.cells.len(), table.cell_at(at)),
+            (2, 4, Some(3))
+        );
+        let Some((place, row, within)) = table_new_row(&source, &table) else {
+            panic!("no row");
+        };
+        let mut longer = edited(text, vec![(place..place, row)]);
+        longer.insert(place + within, '|');
+        assert_eq!(
+            longer,
+            "#table(\n  columns: 2,\n  [a], [b],\n  [c], [d],\n  [|], [],\n)"
+        );
+        assert_eq!(
+            edited(text, table_new_column(&source, &table)),
+            "#table(\n  columns: 3,\n  [a], [b], [],\n  [c], [d], [],\n)"
+        );
+        assert_eq!(
+            edited(text, table_without_row(&table, 3)),
+            "#table(\n  columns: 2,\n  [a], [b],\n)"
+        );
+        assert_eq!(
+            edited(text, table_without_row(&table, 0)),
+            "#table(\n  columns: 2,\n  [c], [d],\n)"
+        );
+        assert_eq!(
+            edited(text, table_without_column(&table, 0)),
+            "#table(\n  columns: 1,\n  [b],\n  [d],\n)"
+        );
+        assert_eq!(
+            edited(text, table_without_column(&table, 3)),
+            "#table(\n  columns: 1,\n  [a],\n  [c],\n)"
+        );
+        // Not one with cells that are calls.
+        let odd = "#table(columns: 2, table.cell(colspan: 2)[a], [c], [d])";
+        assert!(table_at(&super::tests::source(odd), odd.len() - 3).is_none());
+    }
+
+    #[test]
+    fn places_with_nothing_in_them_are_known() {
+        let empty = |text: &str| {
+            let at = text.find('|').unwrap_or(0);
+            is_empty_spot(&source(&text.replacen('|', "", 1)), at)
+        };
+        assert!(empty("One.\n\n|"));
+        assert!(empty("One.\n\n|\n\nTwo."));
+        assert!(empty("|"));
+        assert!(empty("- one\n- |"));
+        assert!(empty("= |"));
+        assert!(empty("#table([a], [|])"));
+        assert!(empty("#figure(image(\"a.png\"), caption: [|])"));
+        assert!(!empty("One.|"));
+        assert!(!empty("One.\n\n|Two."));
+        assert!(!empty("=|"));
+        assert!(!empty("$|$"));
+        assert!(!empty("#image(\"|\")"));
+        assert!(!empty("#f(|)"));
+    }
+
     #[test]
     fn what_is_left_of_what_was_deleted_goes_too() {
         let scripts = |text: &str| {
@@ -1363,7 +2317,7 @@ mod tests {
                 .map(|range| text[range].to_owned())
                 .collect::<Vec<String>>()
         };
-        assert_eq!(scripts("$ y_i = _ _() $"), ["_()"]);
+        assert_eq!(scripts("$ y_i = _ _() $"), ["_", "_()"]);
         assert_eq!(scripts("$ y_i = _  $"), ["_"]);
         assert_eq!(scripts("$x_$"), ["_"]);
         assert_eq!(scripts("$x_( ) + a/$"), ["_( )", "/"]);
@@ -1371,7 +2325,8 @@ mod tests {
         // Backspace in a place with nothing in it takes the place.
         let back = |text: &str| {
             after(text, |source, at| {
-                Some((unmake(source, at)?, String::new(), 0))
+                let (range, left) = unmake(source, at)?;
+                Some((range, left, 0))
             })
         };
         assert_eq!(back("$x_(|)$").as_deref(), Some("$x|$"));
@@ -1392,6 +2347,70 @@ mod tests {
             shown.insert(place, '?');
         }
         shown
+    }
+
+    #[test]
+    fn the_file_of_the_sources_is_found() {
+        let named = |text: &str| bibliography_file(&source(text));
+        assert_eq!(
+            named("Text.\n\n#bibliography(\"refs.bib\")\n").as_deref(),
+            Some("refs.bib")
+        );
+        assert_eq!(
+            named("#bibliography((\"a.bib\", \"b.yml\"), style: \"apa\")").as_deref(),
+            Some("a.bib")
+        );
+        assert_eq!(named("Text about a bibliography.\n"), None);
+    }
+
+    #[test]
+    fn words_are_counted_as_they_are_read() {
+        let text = "#set text(size: 11pt)\n= A title\n\nSome *strong* words, $x^2$ and \
+                    #footnote[a note].\n";
+        assert_eq!(count(&source(text)).0, 8);
+    }
+
+    #[test]
+    fn what_was_left_unfinished_is_found_and_nothing_else() {
+        let left = |text: &str| {
+            let source = source(text);
+            let mut shown = text.to_owned();
+            let mut places: Vec<usize> = equations(&source)
+                .iter()
+                .flat_map(|equation| left_empty(&source, equation))
+                .collect();
+            places.sort_unstable();
+            for place in places.into_iter().rev() {
+                shown.insert(place, '?');
+            }
+            shown
+        };
+        assert_eq!(
+            left("a $x^$ b $frac(a, )$ c $y_$"),
+            "a $x^?$ b $frac(a, ?)$ c $y_?$"
+        );
+        // What is an equation as it is stays as it is.
+        assert_eq!(
+            left("$vec(1, 2, )$ $f()$ $$ $mat(1, ; 2, )$"),
+            "$vec(1, 2, )$ $f()$ $$ $mat(1, ; 2, )$"
+        );
+        assert_eq!(left("$sqrt()$"), "$sqrt(?)$");
+        // All at once, as it is done for every key: the same places.
+        for text in [
+            "a $x^$ b $frac(a, )$ c $y_$",
+            "$vec(1, 2, )$ $f()$ $$ $mat(1, ; 2, )$ and #f[$a/$] - $x^()$",
+        ] {
+            let source = source(text);
+            let mut one_by_one: Vec<usize> = equations(&source)
+                .iter()
+                .flat_map(|equation| left_empty(&source, equation))
+                .collect();
+            one_by_one.sort_unstable();
+            assert_eq!(left_empty_everywhere(&source, None), one_by_one, "{text}");
+        }
+        let text = "a $x^$ b $y_$";
+        let first = 2..6;
+        assert_eq!(left_empty_everywhere(&source(text), Some(&first)), [12]);
     }
 
     #[test]
@@ -1527,9 +2546,64 @@ mod tests {
         // Enter: a paragraph, an item, or in an equation a line.
         let after =
             |needle: &str| line_break(&source, text.find(needle).unwrap_or(0) + needle.len());
-        assert_eq!(after("First line"), "\n\n");
-        assert_eq!(after("- one"), "\n- ");
-        assert_eq!(after("$ a"), "\n");
+        assert_eq!(after("First line").1, "\n\n");
+        assert_eq!(after("- one").1, "\n- ");
+        assert_eq!(after("$ a").1, "\n");
+        // Enter in an item with nothing in it ends the list; Backspace
+        // there takes the item.
+        let enter = |text: &str| {
+            super::tests::after(text, |source, at| {
+                let (range, with) = line_break(source, at);
+                let within = with.len();
+                Some((range, with, within))
+            })
+        };
+        assert_eq!(
+            enter("- one\n- |\n\nNext").as_deref(),
+            Some("- one\n\n|\n\nNext")
+        );
+        assert_eq!(
+            enter("#figure([a], caption: [b])|").as_deref(),
+            Some("#figure([a], caption: [b])\n\n|")
+        );
+        let back = |text: &str| {
+            super::tests::after(text, |source, at| {
+                let (range, left) = unmake(source, at)?;
+                Some((range, left, 0))
+            })
+        };
+        // Enter leaves what holds one line; Tab behind the last cell of
+        // a table makes a row, Backspace in an empty last row takes it.
+        let table = "#figure(\n  table(\n    columns: 2,\n    [a], [b|],\n  ),\n  caption: [],\n)";
+        assert_eq!(
+            enter(table).as_deref(),
+            Some("#figure(\n  table(\n    columns: 2,\n    [a], [b],\n  ),\n  caption: [|],\n)")
+        );
+        assert_eq!(
+            enter("#figure([x], caption: [The |]) more").as_deref(),
+            Some("#figure([x], caption: [The ])| more")
+        );
+        assert_eq!(
+            enter("a#footnote[note|] b").as_deref(),
+            Some("a#footnote[note]| b")
+        );
+        assert_eq!(
+            enter("#quote(block: true)[one|]").as_deref(),
+            Some("#quote(block: true)[one\n\n|]")
+        );
+        let tabbed = |text: &str| super::tests::after(text, tab_key);
+        assert_eq!(
+            tabbed("#table(\n  columns: 2,\n  [a], [b|],\n)").as_deref(),
+            Some("#table(\n  columns: 2,\n  [a], [b],\n  [|], [],\n)")
+        );
+        assert_eq!(
+            back("#table(\n  columns: 2,\n  [a], [b],\n  [|], [],\n)").as_deref(),
+            Some("#table(\n  columns: 2,\n  [a], [b|],\n)")
+        );
+        assert_eq!(back("#table(\n  columns: 2,\n  [|], [],\n)"), None);
+        assert_eq!(back("- one\n- |").as_deref(), Some("- one|"));
+        assert_eq!(back("Text.\n\n== |").as_deref(), Some("Text.\n\n|"));
+        assert_eq!(back("Text.\n\n- a|"), None);
     }
 
     #[test]

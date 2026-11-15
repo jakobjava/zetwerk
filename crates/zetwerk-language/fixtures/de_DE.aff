@@ -1,0 +1,24 @@
+# Ein kleines deutsches Wörterbuch für die Tests von zetwerk. Dafür
+# geschrieben; zum Schreiben taugt es nicht.
+SET UTF-8
+CHECKSHARPS
+KEEPCASE w
+TRY esianrtolcdugmphbyfvkwzäöüßESIANRTOLCDUGMPHBYFVKWZÄÖÜ
+
+COMPOUNDBEGIN b
+COMPOUNDEND e
+ONLYINCOMPOUND o
+COMPOUNDMIN 3
+
+REP 2
+REP ss ß
+REP ß ss
+
+SFX N Y 1
+SFX N 0 n e
+
+SFX S Y 1
+SFX S 0 s [^s]
+
+SFX E Y 1
+SFX E 0 e [^e]
