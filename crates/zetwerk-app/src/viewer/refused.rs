@@ -658,6 +658,8 @@ impl Viewer {
         }
         if self.refusal().is_some() {
             self.refused.up = true;
+        } else if let Some(why) = self.why_waiting() {
+            self.notice(why);
         } else if self.compiled_revision != Some(self.revision) {
             self.notice("the text is being typeset");
         } else {

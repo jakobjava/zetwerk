@@ -17,5 +17,5 @@ pub use figure::{FigureArea, figure_area};
 pub use ide::{Candidate, bibliography_keys, complete, definition_of, describe_at};
 pub use locate::{PagePosition, locate, locate_near};
 pub use pagemap::{Atomic, Caret, MappedGlyph, Origin, PageLines, PageMap, TextRun};
-pub use service::{CompileOutput, Compiler, Scheduler, Urgency};
+pub use service::{Bounds, CompileOutput, Compiler, Scheduler, Urgency};
 pub use world::{Environment, FontSet, OpenError, Project, ProjectWorld, find_main};

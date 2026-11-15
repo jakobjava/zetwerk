@@ -55,6 +55,7 @@ use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
@@ -338,14 +339,20 @@ impl Job {
     /// typesets the status line and the lists, and the window would
     /// wait for the export after all.
     pub fn run(&self) -> Result<Exported, String> {
+        self.run_unless(&AtomicBool::new(false))
+    }
+
+    /// [`Job::run`], stopped before the next file is written once `stop`
+    /// is set: what was written stays.
+    pub fn run_unless(&self, stop: &AtomicBool) -> Result<Exported, String> {
         let mut files = Vec::new();
         let threads = rayon::ThreadPoolBuilder::new()
             .num_threads(EXPORT_THREADS)
             .thread_name(|index| format!("zetwerk-export-{index}"))
             .build();
         let done = match threads {
-            Ok(threads) => threads.install(|| self.write(&mut files)),
-            Err(_) => self.write(&mut files),
+            Ok(threads) => threads.install(|| self.write(&mut files, stop)),
+            Err(_) => self.write(&mut files, stop),
         };
         let written = files.len();
         done.map_err(|why| match written {
@@ -370,12 +377,20 @@ impl Job {
         })
     }
 
-    fn write(&self, written: &mut Vec<Written>) -> Result<(), String> {
+    fn write(&self, written: &mut Vec<Written>, stop: &AtomicBool) -> Result<(), String> {
+        let stopped = || {
+            if stop.load(Ordering::Acquire) {
+                Err("stopped".to_owned())
+            } else {
+                Ok(())
+            }
+        };
         match &self.work {
             Work::Pdf { pages, path } => {
                 let bytes =
                     zetwerk_typst::export_pdf_pages(&self.document, &*self.world, pages.as_deref())
                         .map_err(|errors| errors.join("; "))?;
+                stopped()?;
                 written.push(write(path, &bytes)?);
             }
             Work::Images {
@@ -394,6 +409,7 @@ impl Job {
                         None => zetwerk_render::export::svg(page, *area).map(String::into_bytes),
                     }
                     .map_err(|why| format!("page {}: {why}", index + 1))?;
+                    stopped()?;
                     written.push(write(path, &bytes)?);
                 }
             }
@@ -425,6 +441,8 @@ struct Worker {
     jobs: Option<Sender<Job>>,
     done: Receiver<Result<Exported, String>>,
     thread: Option<JoinHandle<()>>,
+    /// Set to stop the export under way before its next file.
+    stop: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -433,14 +451,17 @@ impl Worker {
     fn spawn(wake: Box<dyn Fn() + Send>) -> std::io::Result<Self> {
         let (jobs, waiting) = mpsc::channel::<Job>();
         let (finished, done) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
             .name("zetwerk-export".into())
             .spawn(move || {
                 for job in waiting {
                     // Whatever goes wrong with one export, the thread is
                     // there for the next.
-                    let outcome = catch_unwind(AssertUnwindSafe(|| job.run()))
+                    let outcome = catch_unwind(AssertUnwindSafe(|| job.run_unless(&stopping)))
                         .unwrap_or_else(|_| Err("the export crashed".to_owned()));
+                    stopping.store(false, Ordering::Release);
                     if finished.send(outcome).is_err() {
                         break;
                     }
@@ -451,6 +472,7 @@ impl Worker {
             jobs: Some(jobs),
             done,
             thread: Some(thread),
+            stop,
         })
     }
 }
@@ -458,9 +480,11 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         // Closing the channel ends the thread's loop after the export in
-        // progress; wait for it, so that leaving does not cut short a
-        // file the user asked for.
+        // progress; wait for the file it is making, so that leaving does
+        // not cut it short, but not for the files after it: a hundred
+        // pages as images would keep the window for minutes.
         self.jobs = None;
+        self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -548,6 +572,20 @@ impl Viewer {
             self.exports.worker = None;
             self.alert("not exported: the thread that writes exports is gone; ask again");
         }
+    }
+
+    /// Ctrl-C: the export being written stops before its next file, and
+    /// says so. Returns whether one was being written.
+    pub(super) fn stop_export(&mut self) -> bool {
+        let Some(name) = &self.exports.running else {
+            return false;
+        };
+        let told = format!("stopping {name} after the file being written …");
+        if let Some(worker) = &self.exports.worker {
+            worker.stop.store(true, Ordering::Release);
+        }
+        self.notice(told);
+        true
     }
 
     /// Says what became of an export.
