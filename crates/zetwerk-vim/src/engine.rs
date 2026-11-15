@@ -579,6 +579,9 @@ pub struct Engine {
     searches: u64,
     /// What the last key yanked, deleted or put.
     took: Option<Took>,
+    /// Whether the last key selected a text object, whose ends are where
+    /// they are: not moved to rest on what the host shows.
+    selected_object: bool,
     /// Whether `j` and `k` go by the rows the host shows instead of by
     /// lines of the text, as `gj` and `gk` always do where it shows any.
     rows_first: bool,
@@ -677,6 +680,7 @@ impl Engine {
             last_search: None,
             searches: 0,
             took: None,
+            selected_object: false,
             rows_first: false,
             pairs: false,
             line_select: false,
@@ -913,6 +917,7 @@ impl Engine {
         self.rest_before_key(press, host);
         let before = self.cursor;
         self.took = None;
+        self.selected_object = false;
         let mut effects = self.key_as_typed(press, host);
         if once {
             // The cursor stays where it was, but behind the end of a
@@ -959,6 +964,13 @@ impl Engine {
         }
         self.extent = None;
         if !self.rows_first || !matches!(self.mode, Mode::Normal | Mode::Visual) {
+            return;
+        }
+        // A text object selected ends where it ends: moved on to what is
+        // shown next (behind the dollar sign that closes an equation, the
+        // next paragraph) the selection would take more than it.
+        if self.selected_object {
+            self.extent = None;
             return;
         }
         // Whole lines deleted, and the cursor left on an empty one: a
@@ -2533,6 +2545,7 @@ impl Engine {
         if visual {
             self.wanted_column = None;
             if found.end > found.start {
+                self.selected_object = true;
                 self.anchor = found.start;
                 self.cursor = text.prev(found.end);
                 if found.linewise {
@@ -3466,7 +3479,13 @@ impl Engine {
             let shown = host
                 .stop(self.cursor, Seek::Before)
                 .filter(|stop| stop.start <= self.cursor && self.cursor < stop.end);
+            // Or into the place to fill in that a page shows there.
+            let empty = (self.rows_first && after)
+                .then(|| host.stop(self.cursor, Seek::At))
+                .flatten()
+                .filter(|stop| stop.start == self.cursor && stop.is_empty());
             let at = match shown {
+                _ if empty.is_some() => self.cursor,
                 Some(stop) if self.rows_first => {
                     if after {
                         stop.end
@@ -4452,8 +4471,12 @@ impl Engine {
             );
             let from = text.prev(self.cursor);
             if pair && from >= self.stop_at_insert_start(host.text(), from) {
+                // Both in one: a host may keep one of a pair taken alone
+                // (the dollar sign that closes an equation).
                 let to = text.next(self.cursor);
-                self.edit(host, self.cursor..to, "");
+                self.edit(host, from..to, "");
+                self.cursor = from;
+                return true;
             }
         }
         if self.replacing {

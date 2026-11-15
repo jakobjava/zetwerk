@@ -17,6 +17,8 @@
 //! pages are made from being given marks around the equation that make
 //! Typst show it as it is written (see `Project::snapshot_showing`).
 
+use std::ops::Range;
+
 use super::{Edited, Viewer};
 use crate::typst_text;
 
@@ -48,27 +50,43 @@ impl Viewer {
     /// text at byte `at`, saying `why`. Returns whether that is news:
     /// whether it was not shown so already.
     ///
-    /// It is the equation the cursor is in, if it is in one: what Typst
-    /// complains of may be far from what is wrong (an equation that is
-    /// not closed makes text of the equations behind it, and equations
-    /// of the text between them). Else the one at `at`.
+    /// It is the one at `at` if that is an equation by itself (with its
+    /// dollar signs where they belong). Else the equation the cursor is
+    /// in, if it is in one: what Typst complains of may be far from what
+    /// is wrong (an equation that is not closed makes text of the
+    /// equations behind it, and equations of the text between them).
+    /// Else the one at `at`.
     ///
     /// This is tried once for each state of the text. Tried again, one
-    /// refusal could lead to the next and back, without end.
+    /// refusal could lead to the next and back, without end; but where
+    /// Typst refuses another equation besides the one shown so, both are
+    /// (an equation left refused, and the one being typed into).
     pub(super) fn show_as_written(&mut self, at: usize, why: &str) -> bool {
-        if self.written_tried == Some(self.revision) {
-            return false;
-        }
         let Some(editor) = &self.editor else {
             return false;
         };
         let (source, cursor) = (editor.source(), editor.cursor());
         let own = typst_text::equation_at(source, cursor).filter(|own| own.start < cursor);
-        let Some(equation) = own.or_else(|| typst_text::equation_at(source, at)) else {
+        let there = typst_text::equation_at(source, at);
+        let whole = there
+            .clone()
+            .filter(|there| typst_text::is_whole_equation(source, there));
+        let Some(equation) = whole.or(own).or(there) else {
             return false;
         };
-        if self.written.as_ref().map(|written| written.start) == Some(equation.start) {
+        if self.written.as_ref().map(|written| written.start) == Some(equation.start)
+            || self.written_too.contains(&equation.start)
+        {
             return false;
+        }
+        if self.written_tried == Some(self.revision) {
+            match self.written.take() {
+                Some(refused) if refused.why.is_some() => self.written_too.push(refused.start),
+                other => {
+                    self.written = other;
+                    return false;
+                }
+            }
         }
         self.written_tried = Some(self.revision);
         self.written = Some(Written {
@@ -91,6 +109,7 @@ impl Viewer {
         {
             self.written = None;
         }
+        self.written_too.clear();
     }
 
     /// `gx`: shows the equation the cursor is in as it is written, or
@@ -120,6 +139,17 @@ impl Viewer {
     /// equation that is to be shown as written is: marks around it, and
     /// nothing in it.
     pub(super) fn put_as_written(&mut self, put: &mut Vec<(usize, &'static str)>) {
+        // Those refused besides, while they are there.
+        if let Some(editor) = &self.editor {
+            let source = editor.source();
+            self.written_too.retain(|start| {
+                let Some(equation) = typst_text::equation_as_seen(source, *start) else {
+                    return false;
+                };
+                mark(put, source.text(), &equation, true);
+                true
+            });
+        }
         let (Some(written), Some(editor)) = (&self.written, &self.editor) else {
             return;
         };
@@ -134,24 +164,31 @@ impl Viewer {
             self.written = None;
             return;
         };
-        let Some(text) = source.text().get(equation.clone()) else {
-            return;
-        };
-        // A mark of the kind that is put around it, in it: not this way.
-        if text.contains('`') {
-            return;
-        }
-        let alone = (text.starts_with("$ ") || text.starts_with("$\n"))
-            && (text.ends_with(" $") || text.ends_with("\n$"));
-        let (before, behind) = match (written.why.is_some(), alone) {
-            (true, false) => REFUSED,
-            (true, true) => REFUSED_ALONE,
-            (false, false) => ASKED,
-            (false, true) => ASKED_ALONE,
-        };
-        put.retain(|(at, _)| *at <= equation.start || *at >= equation.end);
-        put.push((equation.start, before));
-        put.push((equation.end, behind));
-        put.sort_by_key(|(at, _)| *at);
+        mark(put, source.text(), &equation, written.why.is_some());
     }
+}
+
+/// Changes `put` so that the equation at bytes `equation` of `text` is
+/// shown as written, as `refused` or as asked for: marks around it, and
+/// nothing in it.
+fn mark(put: &mut Vec<(usize, &'static str)>, text: &str, equation: &Range<usize>, refused: bool) {
+    let Some(text) = text.get(equation.clone()) else {
+        return;
+    };
+    // A mark of the kind that is put around it, in it: not this way.
+    if text.contains('`') {
+        return;
+    }
+    let alone = (text.starts_with("$ ") || text.starts_with("$\n"))
+        && (text.ends_with(" $") || text.ends_with("\n$"));
+    let (before, behind) = match (refused, alone) {
+        (true, false) => REFUSED,
+        (true, true) => REFUSED_ALONE,
+        (false, false) => ASKED,
+        (false, true) => ASKED_ALONE,
+    };
+    put.retain(|(at, _)| *at <= equation.start || *at >= equation.end);
+    put.push((equation.start, before));
+    put.push((equation.end, behind));
+    put.sort_by_key(|(at, _)| *at);
 }

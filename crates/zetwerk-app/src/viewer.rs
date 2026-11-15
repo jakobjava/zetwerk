@@ -733,6 +733,10 @@ pub struct Viewer {
     /// The revision of the text at which an equation was last shown as
     /// written because Typst refused it: once for each.
     written_tried: Option<u64>,
+    /// Where the other equations begin that Typst refused and that are
+    /// shown as written too: with two refused at once, showing one so
+    /// leaves the document refused for the other.
+    written_too: Vec<usize>,
     /// Whether the lines of the pages say how far they are from the
     /// cursor (see `aids`), and what they say, for as long as the cursor
     /// and the pages are the same.
@@ -925,6 +929,7 @@ impl Viewer {
             chrome: Chrome::new(env)?,
             written: None,
             written_tried: None,
+            written_too: Vec::new(),
             numbers: true,
             numbered: None,
             jump: jump::Jump::default(),
@@ -1179,16 +1184,22 @@ impl Viewer {
         };
         let places = empty_places(source, &equation);
         put.extend(places.into_iter().map(|place| (place, EMPTY)));
-        // The word that ends at the cursor.
+        // The word the cursor is typing: up to it, and what letters
+        // stand right behind it (it was typed before them).
         let text = source.text();
         let typing = editor.mode() == editor::Mode::Insert;
         let before = text.get(..cursor).unwrap_or("");
         let named = before
-            .trim_end_matches(|c: char| c.is_alphabetic() || c == '.')
+            .trim_end_matches(|c: char| c.is_alphanumeric() || c == '.')
             .len();
-        let word = cursor - before[named..].trim_start_matches('.').len()..cursor;
+        let behind = text[cursor..].len()
+            - text[cursor..]
+                .trim_start_matches(char::is_alphanumeric)
+                .len();
+        let begun = before[named..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+        let word = cursor - begun.len()..cursor + behind;
         let begins = text[..word.start].chars().next_back();
-        let goes_on = text[cursor..].chars().next();
+        let goes_on = text[word.end..].chars().next();
         let alone = !begins.is_some_and(|c| c.is_alphanumeric() || matches!(c, '#' | '"' | '.'))
             && !goes_on.is_some_and(char::is_alphanumeric);
         let in_math = crate::typst_text::ground(source, word.start + 1) == Ground::Math
@@ -1599,14 +1610,16 @@ impl Viewer {
         }
         self.refer_problems();
         // An equation Typst refuses is shown as it is written, and the
-        // pages are made again with it so.
+        // pages are made again with it so: also where the pages were
+        // carried over to this text without Typst (the text came back to
+        // what they show, or a part was typeset alone), which refused it.
         let file = self.editor.as_ref().map(crate::editor::Editor::file);
         let refused = self
             .diagnostics
             .iter()
             .find(|(of, _, is_error, _)| *is_error && Some(*of) == file)
             .map(|(_, range, _, message)| (range.start, message.clone()));
-        if self.document_revision != Some(self.revision)
+        if output.revision == self.revision
             && let Some((at, why)) = refused
             && self.show_as_written(at, &why)
         {
@@ -3166,6 +3179,7 @@ mod tests {
     use crate::keys;
 
     mod cursor;
+    mod equations;
     mod errors;
     mod files;
     mod frames;

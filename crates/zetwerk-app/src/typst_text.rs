@@ -628,6 +628,10 @@ fn goes_on(text: &str, at: usize) -> bool {
 /// `#` asks what to put in, `@` refers, and `=`, `-` and `+` before a
 /// paragraph make it a heading or an item of a list.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one case after the other of what is typed where"
+)]
 pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, String, usize)> {
     let text = source.text();
     let plain = |with: String| {
@@ -638,10 +642,51 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
     let last = before.chars().next_back();
     let leaf = LinkedNode::new(source.root()).leaf_at(at, Side::Before);
     let behind = leaf.as_ref().filter(|leaf| leaf.range().end == at);
+    let ends_text = || {
+        LinkedNode::new(source.root())
+            .leaf_at(at, Side::After)
+            .is_some_and(|leaf| leaf.kind() == SyntaxKind::Str && leaf.range().end == at + 1)
+    };
     match ground(source, at) {
+        // Between an equation and its label, what is typed goes behind
+        // the label, a blank too: before it, it would take the label from
+        // the equation, and what refers to the equation would refer to it.
+        Ground::Markup
+            if c != '\n'
+                && let Some(end) = label_behind(source, at) =>
+        {
+            let (range, with, within) =
+                typed(source, end, c).unwrap_or((end..end, c.to_string(), c.len_utf8()));
+            let label = text.get(at..range.start)?;
+            let within = label.len() + within;
+            return Some((at..range.end, format!("{label}{with}"), within));
+        }
         Ground::Markup => {}
+        // Over the quotation mark that ends text in an equation.
+        Ground::Str if c == '"' && ends_text() && is_in_equation(source, at) => return None,
         Ground::Str if matches!(c, '"' | '\\') => return plain(format!("\\{c}")),
         Ground::Str | Ground::Name | Ground::Raw => return plain(c.to_string()),
+        // A dollar sign typed in an equation ends it: the cursor goes
+        // behind the one that closes it, as over one right behind it.
+        Ground::Math if c == '$' => {
+            let equation = equation_at(source, at)?;
+            let rest = text.get(at..equation.end)?;
+            let over = rest.len() > 1 && rest.ends_with('$');
+            return (over && is_whole_equation(source, &equation))
+                .then(|| (at..equation.end, rest.to_owned(), rest.len()));
+        }
+        // Two slashes, or one and a star, begin a comment, which would
+        // take in the rest of the line and the dollar sign on it.
+        Ground::Math
+            if matches!(c, '/' | '*') && before.ends_with('/') && !before.ends_with("\\/") =>
+        {
+            return plain(format!("\\{c}"));
+        }
+        // Text in an equation is begun closed, before what follows it
+        // too: one quotation mark alone takes in all behind it.
+        Ground::Math if c == '"' && !text[at..].starts_with('"') => {
+            return Some((at..at, "\"\"".to_owned(), 1));
+        }
         Ground::Math | Ground::Code => return None,
     }
     let escaped = || plain(format!("\\{c}"));
@@ -649,10 +694,10 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         // After `#`, a name says what is meant; anything else, that the
         // sign itself is.
         Some(SyntaxKind::Hash) if !(c.is_alphabetic() || c == '_') => {
-            let (_, with, _) = typed(source, at - 1, c).unwrap_or((0..0, c.to_string(), 0));
+            let (_, with, within) =
+                typed(source, at - 1, c).unwrap_or((0..0, c.to_string(), c.len_utf8()));
             let with = format!("\\#{with}");
-            let within = with.len();
-            return Some((at - 1..at, with, within));
+            return Some((at - 1..at, with, within + 2));
         }
         Some(SyntaxKind::Hash) => return None,
         // The names of code and of what is referred to go on.
@@ -702,6 +747,9 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
     let line = before.rfind('\n').map_or(0, |found| found + 1);
     let begins_line = before[line..].trim().is_empty();
     match c {
+        // An equation begun is one closed: a dollar sign alone takes all
+        // that follows it in its paragraph for mathematics.
+        '$' if last != Some('\\') => Some((at..at, "$$".to_owned(), 1)),
         '*' | '_' | '`' | '<' | '[' | ']' | '\\' | '~' => escaped(),
         '@' if last.is_some_and(char::is_alphanumeric) => escaped(),
         // Two of them begin a comment; one before a line, a term.
@@ -709,6 +757,24 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         '=' | '-' | '+' if goes_on(text, at) => escaped(),
         _ => None,
     }
+}
+
+/// Where the label ends that stands behind an equation, byte `at` of
+/// `source` being between the two, where there is nothing but blanks:
+/// `$ x $ <eq>`.
+fn label_behind(source: &Source, at: usize) -> Option<usize> {
+    let text = source.text();
+    let end = text.get(..at)?.trim_end_matches(' ').len();
+    let root = LinkedNode::new(source.root());
+    let closing = root.leaf_at(end, Side::Before)?;
+    let equation = closing.parent().filter(|equation| {
+        equation.kind() == SyntaxKind::Equation && equation.range().end == end
+    })?;
+    let label = equation
+        .next_sibling()
+        .filter(|label| label.kind() == SyntaxKind::Label)?;
+    let between = text.get(end..label.range().start)?;
+    between.chars().all(|c| c == ' ').then(|| label.range().end)
 }
 
 /// What Ctrl-B and Ctrl-I do while typing at byte `at` of `source`: begin
@@ -757,6 +823,11 @@ pub fn set_off(
         };
     }
     match ground {
+        // Apart from a letter before it: one name with it, it would be
+        // none Typst knows.
+        Ground::Math if text[..at].ends_with(char::is_alphanumeric) => {
+            Some((at..at, format!(" {in_math}()"), in_math.len() + 2))
+        }
         Ground::Math => Some((at..at, format!("{in_math}()"), in_math.len() + 1)),
         Ground::Markup => {
             let letter = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
@@ -1366,28 +1437,85 @@ pub fn equation_as_seen(source: &Source, start: usize) -> Option<Range<usize>> {
 /// it is taken to mean.
 #[must_use]
 pub fn is_whole_equation(source: &Source, equation: &Range<usize>) -> bool {
-    // What the equation itself lacks (a mark that raises nothing yet)
-    // is no `$` missing: that is what is tidied away, or shown as an
-    // empty place.
-    fn amiss(node: &LinkedNode, equation: &Range<usize>) -> bool {
-        if node.kind() == SyntaxKind::Error {
-            let here = node.range();
-            let within = equation.start <= here.start && here.end <= equation.end;
-            let (errors, _) = node.get().errors_and_warnings();
-            let lacks = errors
-                .first()
-                .is_some_and(|error| error.message == "expected expression");
-            return !(within && lacks);
+    // Where something is wrong: an equation not closed. Other faults
+    // (a mark that raises nothing, left elsewhere) leave equations be.
+    fn unclosed(node: &LinkedNode) -> bool {
+        if node.kind() == SyntaxKind::Equation && closing(node, SyntaxKind::Dollar) == 0 {
+            return true;
         }
-        node.get().diagnosis().errors && node.children().any(|child| amiss(&child, equation))
+        node.children()
+            .any(|child| child.get().diagnosis().errors && unclosed(&child))
     }
-    !amiss(&LinkedNode::new(source.root()), equation)
+    let root = source.root();
+    !(root.diagnosis().errors && unclosed(&LinkedNode::new(root)))
         && equation_as_seen(source, equation.start).as_ref() == Some(equation)
+}
+
+/// What a deletion of bytes `range` of `source` on a page takes: all of
+/// it but the dollar signs of an equation it takes only a part of, the
+/// quotation marks of text in one, and the brackets of content. Those
+/// show as nothing; one taken
+/// with what is shown beside it would leave the other to run on into
+/// the text behind it. The parts that go, from the last; none if only
+/// such marks were to go.
+///
+/// The ranges refer to the text as it is: they are apart, and the last
+/// comes first so that each is still where it was when it is taken.
+#[must_use]
+pub fn deleted_on_page(source: &Source, range: &Range<usize>) -> Vec<Range<usize>> {
+    fn kept(node: &LinkedNode, range: &Range<usize>, math: bool, found: &mut Vec<usize>) {
+        let bytes = node.range();
+        let apart = bytes.end <= range.start || range.end <= bytes.start;
+        let all = range.start <= bytes.start && bytes.end <= range.end;
+        if apart || all {
+            return;
+        }
+        // So are the quotation marks of text in an equation, and the
+        // brackets around what a call is given (a cell of a table, a
+        // footnote, a caption) that an equation may begin or end.
+        let closed = match node.kind() {
+            SyntaxKind::Equation => closing(node, SyntaxKind::Dollar) > 0,
+            SyntaxKind::Str => math && bytes.len() >= 2 && node.leaf_text().ends_with('"'),
+            SyntaxKind::ContentBlock => {
+                node.children().next_back().map(|last| last.kind())
+                    == Some(SyntaxKind::RightBracket)
+            }
+            _ => false,
+        };
+        if closed {
+            for mark in [bytes.start, bytes.end - 1] {
+                if range.contains(&mark) {
+                    found.push(mark);
+                }
+            }
+        }
+        let math = math || node.kind() == SyntaxKind::Equation;
+        for child in node.children() {
+            kept(&child, range, math, found);
+        }
+    }
+    let mut found = Vec::new();
+    kept(&LinkedNode::new(source.root()), range, false, &mut found);
+    found.sort_unstable();
+    let mut parts = Vec::new();
+    let mut from = range.start;
+    for mark in found {
+        if from < mark {
+            parts.push(from..mark);
+        }
+        from = from.max(mark + 1);
+    }
+    if from < range.end {
+        parts.push(from..range.end);
+    }
+    parts.reverse();
+    parts
 }
 
 /// The marks in the equation at bytes `equation` of `source` that raise,
 /// lower or divide by nothing: each with the brackets it has, if those
-/// are empty. They are what is left when what they held is deleted.
+/// are empty; and the quotation marks of text with nothing in them. They
+/// are what is left when what they held is deleted.
 #[must_use]
 pub fn empty_scripts(source: &Source, equation: &Range<usize>) -> Vec<Range<usize>> {
     let text = source.text();
@@ -1406,6 +1534,10 @@ pub fn empty_scripts(source: &Source, equation: &Range<usize>) -> Vec<Range<usiz
 }
 
 fn scripts_in(node: &LinkedNode, text: &str, end: usize, found: &mut Vec<Range<usize>>) {
+    // Text with nothing in it shows as nothing too.
+    if node.kind() == SyntaxKind::Str && node.leaf_text() == "\"\"" {
+        found.push(node.range());
+    }
     if matches!(
         node.kind(),
         SyntaxKind::Hat | SyntaxKind::Underscore | SyntaxKind::Slash
@@ -1717,8 +1849,8 @@ fn is_named(source: &Source, name: &str) -> bool {
 /// The words of the equation at bytes `equation` of `source` that name
 /// nothing, each as its bytes: `xy`, where `x y` is meant. Typst reads
 /// letters that stand together as one name and refuses an equation for
-/// a name it does not know. `but` is a byte a word is being typed up
-/// to, if one is: that word may yet become a name.
+/// a name it does not know. `but` is a byte a word is being typed at,
+/// if one is: that word may yet become a name.
 #[must_use]
 pub fn unknown_names(
     source: &Source,
@@ -1746,20 +1878,30 @@ pub fn unknown_names(
         gather(equation, &mut found);
     }
     found.retain(|name| {
-        Some(name.end) != but
+        !but.is_some_and(|but| name.start < but && but <= name.end)
             && text.get(name.clone()).is_some_and(|word| {
-                word.chars().all(char::is_alphabetic) && !is_named(source, word)
+                word.chars().all(char::is_alphanumeric) && !is_named(source, word)
             })
     });
     found
 }
 
 /// `word` as the letters it is made of, each by itself: what somebody
-/// who types `xy` in an equation means.
+/// who types `xy` in an equation means. A number in it stays one
+/// (`a12` is `a 12`).
 #[must_use]
 pub fn spelled_out(word: &str) -> String {
-    let letters: Vec<String> = word.chars().map(String::from).collect();
-    letters.join(" ")
+    let mut spelled = String::with_capacity(2 * word.len());
+    let mut last = None;
+    for c in word.chars() {
+        let number = last.is_some_and(|last: char| last.is_ascii_digit()) && c.is_ascii_digit();
+        if last.is_some() && !number {
+            spelled.push(' ');
+        }
+        spelled.push(c);
+        last = Some(c);
+    }
+    spelled
 }
 
 /// The equations of `source`, the outermost: their bytes.
@@ -1829,6 +1971,9 @@ pub fn left_empty_everywhere(source: &Source, but: Option<&Range<usize>>) -> Vec
             } else if rest.starts_with([',', ';', ')', ']', '^', '_']) {
                 walk.places.push(end - rest.len());
             }
+        }
+        if lacks_base(node.kind(), node.leaf_text()) {
+            walk.places.push(start);
         }
         // The arguments of a call are told what the call is.
         let needs_all = match node.kind() {
@@ -2009,9 +2154,19 @@ fn empty_in(
     if lacks {
         places.extend(ends(end));
     }
+    if lacks_base(node.kind(), node.leaf_text()) {
+        places.push(node.range().start);
+    }
     for child in node.children() {
         empty_in(&child, ends, sure, places);
     }
+}
+
+/// Whether a node of `kind` with the text `text` is a mark that raises,
+/// lowers or divides with nothing before it, which Typst refuses: what
+/// is left of `x^2` when `x` is deleted.
+fn lacks_base(kind: SyntaxKind, text: &str) -> bool {
+    kind == SyntaxKind::Error && matches!(text, "^" | "_" | "/")
 }
 
 /// Something to put into a document from the insert menu, or by its
@@ -2227,8 +2382,24 @@ fn inline(
     let chain = ancestors(source, range.start);
     let in_math = chain.iter().any(|node| node.kind() == SyntaxKind::Equation);
     if in_math {
+        // Not beyond the equation: its dollar sign would be set off too.
+        let equation = chain
+            .iter()
+            .find(|node| node.kind() == SyntaxKind::Equation)?;
+        let end = equation.range().end - closing(equation, SyntaxKind::Dollar);
+        let range = trimmed(text, range.start..range.end.min(end).max(range.start));
+        if range.is_empty() {
+            return None;
+        }
         return in_equation(text, &chain, format, range);
     }
+    // An equation the range ends in is set off whole.
+    let range = match equation_at(source, range.end - 1) {
+        Some(equation) if equation.start > range.start && equation.end > range.end => {
+            range.start..equation.end
+        }
+        _ => range,
+    };
     // Marks are markup: they mean something else, or nothing, in code.
     let in_markup = chain.first().is_some_and(|leaf| {
         matches!(
@@ -2401,6 +2572,8 @@ mod tests {
         assert_eq!(typing("number #|", '1').as_deref(), Some("number \\#1|"));
         assert_eq!(typing("a #|", ' ').as_deref(), Some("a \\# |"));
         assert_eq!(typing("a #|", '*').as_deref(), Some("a \\#\\*|"));
+        // What the sign begins is begun behind it.
+        assert_eq!(typing("a #|", '$').as_deref(), Some("a \\#$|$"));
         assert_eq!(typing("#my|", '_'), None);
     }
 
@@ -2420,6 +2593,28 @@ mod tests {
         assert_eq!(typing("#f[a |]", '*').as_deref(), Some("#f[a \\*|]"));
         assert_eq!(typing("$x$|", '*').as_deref(), Some("$x$\\*|"));
         assert_eq!(typing("see <a|>", '_').as_deref(), Some("see <a_|>"));
+    }
+
+    #[test]
+    fn what_is_typed_behind_an_equation_leaves_it_its_label() {
+        assert_eq!(
+            typing("$ x $| <eq>\n", 'a').as_deref(),
+            Some("$ x $ <eq>a|\n")
+        );
+        assert_eq!(
+            typing("$ x $| <eq>\n", '*').as_deref(),
+            Some("$ x $ <eq>\\*|\n")
+        );
+        // A blank too, and what follows it.
+        assert_eq!(
+            typing("$ x $| <eq>\n", ' ').as_deref(),
+            Some("$ x $ <eq> |\n")
+        );
+        assert_eq!(
+            typing("$ x $ | <eq>\n", 'a').as_deref(),
+            Some("$ x $  <eq>a|\n")
+        );
+        assert_eq!(typing("$ x $|\n\n<eq>\n", 'a'), None);
     }
 
     #[test]
@@ -2457,6 +2652,9 @@ mod tests {
             set("$bold(x|)$", Format::Strong).as_deref(),
             Some("$bold(x)|$")
         );
+        // Not one name with the letter before.
+        assert_eq!(set("$x|$", Format::Strong).as_deref(), Some("$x bold(|)$"));
+        assert_eq!(set("$x|$", Format::Emph).as_deref(), Some("$x italic(|)$"));
         assert_eq!(set("#image(\"|\")", Format::Strong), None);
     }
 
@@ -2786,6 +2984,7 @@ mod tests {
         let text = "$xy + alp$";
         assert_eq!(unknown(text, Some(text.len() - 1)), ["xy"]);
         assert_eq!(spelled_out("xyz"), "x y z");
+        assert_eq!(spelled_out("a12b"), "a 12 b");
     }
 
     #[test]
@@ -2820,8 +3019,11 @@ mod tests {
             "$vec(1, 2, )$ $f()$ $$ $mat(1, ; 2, )$"
         );
         assert_eq!(left("$sqrt()$"), "$sqrt(?)$");
+        // A mark whose base was deleted lacks it.
+        assert_eq!(left("a $^2$ b $(_1)$ c $/y$"), "a $?^2$ b $(?_1)$ c $?/y$");
         // All at once, as it is done for every key: the same places.
         for text in [
+            "a $^2$ b $frac(_1, a)$ c $/y$",
             "a $x^$ b $frac(a, )$ c $y_$",
             "$vec(1, 2, )$ $f()$ $$ $mat(1, ; 2, )$ and #f[$a/$] - $x^()$",
         ] {
@@ -2843,6 +3045,7 @@ mod tests {
         assert_eq!(empties("$frac(, )$"), "$frac(?, ?)$");
         assert_eq!(empties("$frac(a, )$"), "$frac(a, ?)$");
         assert_eq!(empties("$sqrt()$"), "$sqrt(?)$");
+        assert_eq!(empties("$ ^2 + x$"), "$ ?^2 + x$");
         assert_eq!(empties("$x^$"), "$x^?$");
         // An equation that stands by itself keeps the blank it ends
         // with: without it, it would stand in its line.

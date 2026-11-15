@@ -78,9 +78,10 @@ fn finding_goes_by_the_line_of_the_page() {
     assert!(text[line.end..].lines().next().unwrap().contains('e'));
     press(&mut viewer, "fe");
     assert_eq!(cursor(&viewer), last);
-    // An operator takes what is found as the one thing it shows as.
+    // An operator takes what is found as the one thing it shows as; the
+    // equation it leaves empty goes.
     press(&mut viewer, "0fadfb");
-    assert!(viewer.text().unwrap().contains("*two* $$ and"));
+    assert!(viewer.text().unwrap().contains("*two* and"));
     let _ = std::fs::remove_dir_all(directory);
 }
 
@@ -105,9 +106,10 @@ fn counts_count_what_the_page_shows() {
     assert_eq!(cursor(&viewer), at(&viewer, "Next"));
     press(&mut viewer, "<BS>");
     assert_eq!(cursor(&viewer), at(&viewer, ".\n\nNext"));
-    // As many are deleted, a symbol being one.
+    // As many are deleted, a symbol being one; the equation left empty
+    // goes.
     press(&mut viewer, "0fa3x");
-    assert!(viewer.text().unwrap().contains("*two* $$ and more."));
+    assert!(viewer.text().unwrap().contains("*two* and more."));
     let _ = std::fs::remove_dir_all(directory);
 }
 

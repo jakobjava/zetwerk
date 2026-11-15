@@ -719,6 +719,7 @@ fn undoing_on_the_page_gives_back_what_was_there() {
     }
     press(&mut viewer, "ay<Esc>");
     let typed = viewer.text().unwrap_or_default().to_owned();
+    // Letters typed together are a product, in the same step.
     assert_eq!(typed, "Some $x y^$ here, and more words.\n");
     press(&mut viewer, "u");
     assert_eq!(viewer.text(), Some(text));

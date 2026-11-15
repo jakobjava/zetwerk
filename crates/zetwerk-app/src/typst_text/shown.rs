@@ -573,7 +573,15 @@ pub fn breaks(source: &Source, edits: &[(Range<usize>, &str)]) -> Option<String>
         if node.kind() == SyntaxKind::Error {
             let (errors, _) = node.get().errors_and_warnings();
             let message = errors.first().map(|error| error.message.to_string())?;
-            let lacks = lenient && in_equation && message == "expected expression";
+            // Nothing behind a mark that raises, lowers or divides, or
+            // nothing before it.
+            let lacking = [
+                "expected expression",
+                "unexpected hat",
+                "unexpected underscore",
+                "unexpected slash",
+            ];
+            let lacks = lenient && in_equation && lacking.contains(&message.as_str());
             return (!lacks).then_some(message);
         }
         if !node.get().diagnosis().errors {
