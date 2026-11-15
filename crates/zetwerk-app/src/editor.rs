@@ -625,10 +625,10 @@ impl Editor {
     pub fn position(&self) -> (usize, usize) {
         let before = &self.text()[..floor_boundary(self.text(), self.cursor())];
         let line_start = before.rfind('\n').map_or(0, |at| at + 1);
-        (
-            before.matches('\n').count() + 1,
-            before[line_start..].chars().count() + 1,
-        )
+        // Asked for every frame (the status line), of a text that may be
+        // a book: counted byte by byte, which goes many at a time.
+        let lines = before.bytes().filter(|&byte| byte == b'\n').count();
+        (lines + 1, before[line_start..].chars().count() + 1)
     }
 
     #[must_use]

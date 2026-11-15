@@ -33,6 +33,12 @@ const NOT_ALONE: &[&str] = &[
     "#place",
 ];
 
+#[cfg(test)]
+thread_local! {
+    /// How many parts were typeset on this thread, for tests.
+    pub(super) static PARTS_TYPESET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Viewer {
     /// Typesets what changed since the pages on screen were made, by
     /// itself, and puts it into the page it is on. Afterwards the pages
@@ -46,27 +52,30 @@ impl Viewer {
         else {
             return Err("nothing compiled yet".to_owned());
         };
-        let part = self.typeset_part(&before)?;
         // The page: where the cursor was last found, or one beside it.
         let near = self.cursor_page.get();
         let pages = document.pages();
-        let shows = |index: &usize| {
-            let page = pages.get(*index);
-            page.is_some_and(|page| part.region.is_on(&page.frame))
+        let page_of = |region: &local::Region| {
+            let shows = |index: &usize| {
+                let page = pages.get(*index);
+                page.is_some_and(|page| region.is_on(&page.frame))
+            };
+            let index = [Some(near), Some(near + 1), near.checked_sub(1)]
+                .into_iter()
+                .flatten()
+                .find(shows)
+                .ok_or("the part is on no page near the cursor")?;
+            if [index.checked_sub(1), Some(index + 1)]
+                .iter()
+                .flatten()
+                .any(shows)
+            {
+                return Err("the part is on two pages");
+            }
+            Ok(index)
         };
-        let index = [Some(near), Some(near + 1), near.checked_sub(1)]
-            .into_iter()
-            .flatten()
-            .find(shows)
-            .ok_or("the part is on no page near the cursor")?;
+        let (part, index) = self.typeset_part(&before, &page_of)?;
         let page = &pages[index];
-        if [index.checked_sub(1), Some(index + 1)]
-            .iter()
-            .flatten()
-            .any(shows)
-        {
-            return Err("the part is on two pages".to_owned());
-        }
         // What every page has around its text stays where it is.
         let map = self
             .maps
@@ -103,8 +112,16 @@ impl Viewer {
     }
 
     /// Finds what changed since `before` (what the pages on screen were
-    /// made of) and typesets it by itself, with the paragraphs beside it.
-    fn typeset_part(&mut self, before: &ProjectWorld) -> Result<Part, String> {
+    /// made of) and typesets it by itself, with the paragraphs beside it,
+    /// if `page_of` finds the one page it is on: which is returned with
+    /// it. Asked before the part is typeset: a part that runs on over
+    /// the rest of the document (a `$` not yet closed) takes as long to
+    /// typeset as the rest, and is on no one page.
+    fn typeset_part(
+        &mut self,
+        before: &ProjectWorld,
+        page_of: &dyn Fn(&local::Region) -> Result<usize, &'static str>,
+    ) -> Result<(Part, usize), String> {
         if !self.in_parts {
             return Err("typesetting in parts is off".to_owned());
         }
@@ -150,8 +167,11 @@ impl Viewer {
         } else {
             region
         };
+        let index = page_of(&region)?;
         let lead = typst_text::lead_for_part(&new, region.kept.start);
         let alone = world.with_text(local::cut_down(&new, &region, &lead));
+        #[cfg(test)]
+        PARTS_TYPESET.set(PARTS_TYPESET.get() + 1);
         let compiled = zetwerk_typst::compile(&alone);
         let Some(typeset) = compiled.document else {
             let first = compiled.errors.first();
@@ -165,7 +185,7 @@ impl Viewer {
             if let Some((at, why)) = refused
                 && self.show_as_written(at, &why)
             {
-                return self.typeset_part(before);
+                return self.typeset_part(before, page_of);
             }
             let why = first.map(|error| zetwerk_typst::describe(&alone, error));
             return Err(format!(
@@ -173,12 +193,13 @@ impl Viewer {
                 why.unwrap_or_default()
             ));
         };
-        Ok(Part {
+        let part = Part {
             revision,
             world,
             region,
             typeset,
-        })
+        };
+        Ok((part, index))
     }
 }
 

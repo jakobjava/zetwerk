@@ -13,8 +13,31 @@ const MARGIN_PT: f64 = 1.0;
 /// Culling is conservative: an item is dropped only when its bounds, grown by
 /// [`MARGIN_PT`], lie fully outside the region.
 pub fn crop(frame: &Frame, region: Rect) -> Frame {
+    crop_placed(&placed(frame), region)
+}
+
+/// An item of a frame where it is drawn, and the bounds of what it draws
+/// there.
+pub type Placed<'a> = (Point, &'a FrameItem, Rect);
+
+/// What `frame` draws, item by item in its order, looking into groups
+/// that are only containers: what [`crop`] chooses from. Worked out once
+/// for all the tiles of a page, the bounds of its text are not asked
+/// for again for each of them.
+pub fn placed(frame: &Frame) -> Vec<Placed<'_>> {
+    let mut out = Vec::new();
+    collect(frame, Point::zero(), &mut out);
+    out
+}
+
+/// [`crop`] of the frame whose items are `placed`.
+pub fn crop_placed(placed: &[Placed<'_>], region: Rect) -> Frame {
     let mut out = Frame::hard(region.size());
-    collect(frame, Point::zero(), region, &mut out);
+    for (pos, item, bounds) in placed {
+        if intersects(*bounds, region) {
+            out.push(*pos - region.min, (*item).clone());
+        }
+    }
     out
 }
 
@@ -29,7 +52,7 @@ pub fn content_bounds(frame: &Frame) -> Option<Rect> {
         .reduce(union)
 }
 
-fn collect(frame: &Frame, offset: Point, region: Rect, out: &mut Frame) {
+fn collect<'a>(frame: &'a Frame, offset: Point, out: &mut Vec<Placed<'a>>) {
     for (pos, item) in frame.items() {
         let pos = offset + *pos;
         if let FrameItem::Group(group) = item
@@ -38,11 +61,11 @@ fn collect(frame: &Frame, offset: Point, region: Rect, out: &mut Frame) {
             // A group that neither transforms nor clips is just a container,
             // so look inside instead of keeping or dropping it wholesale.
             // Page content is mostly nested this way.
-            collect(&group.frame, pos, region, out);
+            collect(&group.frame, pos, out);
             continue;
         }
-        if item_bounds(pos, item).is_some_and(|bounds| intersects(bounds, region)) {
-            out.push(pos - region.min, item.clone());
+        if let Some(bounds) = item_bounds(pos, item) {
+            out.push((pos, item, bounds));
         }
     }
 }

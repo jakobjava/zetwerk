@@ -522,6 +522,10 @@ type Landed = (usize, usize, FileId, usize);
 /// How many pages on are looked at for the nearest place for the cursor.
 const NEAR_PAGES: usize = 4;
 
+/// How many pages either way of the cursor's are looked through for the
+/// text a prediction is made for.
+const PREDICTED_NEAR: usize = 2;
+
 impl PageRows<'_> {
     /// The page that shows byte `then` of the compiled text of the file,
     /// or the text nearest to it.
@@ -1985,14 +1989,17 @@ impl Viewer {
         // for again.
         let index = match self.predicted_at {
             Some((at, index)) if at == offset => index,
-            _ => zetwerk_typst::locate(
+            // Near the cursor: a part typeset by itself is looked for
+            // no further either.
+            _ => zetwerk_typst::locate_near(
                 document,
                 &base,
                 offset.saturating_sub(1),
                 self.cursor_page.get(),
+                PREDICTED_NEAR,
             )
             .map(|position| position.page)
-            .ok_or("the text is on no page")?,
+            .ok_or("the text is on no page near the cursor")?,
         };
         self.predicted_at = Some((offset, index));
         let page = document
@@ -2843,10 +2850,13 @@ impl Viewer {
         // its complaints wait until typing is over. Not in an equation:
         // there the page shows what is typed only once it is one.
         let typing = editing.is_some_and(|editing| editing.mode == editor::Mode::Insert);
-        let in_equation = self.editor.as_ref().is_some_and(|editor| {
-            crate::typst_text::equation_at(editor.source(), editor.cursor()).is_some()
-        });
-        let problem = problem.filter(|_| !typing || in_equation);
+        // Asked only where it matters: it is looked for from the root.
+        let in_equation = || {
+            self.editor.as_ref().is_some_and(|editor| {
+                crate::typst_text::equation_at(editor.source(), editor.cursor()).is_some()
+            })
+        };
+        let problem = problem.filter(|_| !typing || in_equation());
         let (left, alert) = match (&command, &self.message, &problem) {
             (Some(command), ..) => (command.as_str(), false),
             (None, Some(message), _) => (message.text.as_str(), message.alert),

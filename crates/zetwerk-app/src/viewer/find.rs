@@ -117,6 +117,8 @@ struct Found {
     /// Whether they were looked for in what is read.
     read: bool,
     revision: u64,
+    /// The text they are in, to find them again in the next by.
+    source: Source,
     /// In bytes of the text, in its order.
     matches: Vec<Range<usize>>,
     /// Counts the searches made, so that what was mapped for an older one
@@ -427,7 +429,24 @@ impl Viewer {
             return;
         }
         let reading = read.then(|| editor.reading());
-        let matches = find_all(editor.text(), reading.as_deref(), &query);
+        // After an edit, in the paragraphs it changed: a long text is
+        // not to be looked through at every key.
+        let again = self
+            .find
+            .found
+            .as_ref()
+            .filter(|found| found.query == query && found.read == read && found.file == file);
+        let again = again.and_then(|found| {
+            let source = editor.source();
+            crate::reading::found_again(
+                &found.matches,
+                &found.source,
+                source,
+                reading.as_deref(),
+                &query,
+            )
+        });
+        let matches = again.unwrap_or_else(|| find_all(editor.text(), reading.as_deref(), &query));
         self.find.generation += 1;
         let generation = self.find.generation;
         self.find.found = Some(Found {
@@ -435,6 +454,7 @@ impl Viewer {
             file,
             read,
             revision,
+            source: editor.source().clone(),
             matches,
             generation,
         });

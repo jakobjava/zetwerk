@@ -41,6 +41,20 @@ pub fn locate(
     offset: usize,
     near: usize,
 ) -> Option<PagePosition> {
+    locate_near(document, source, offset, near, usize::MAX)
+}
+
+/// [`locate`], looking no further than `reach` pages from page `near`
+/// either way: what is typed is near the cursor, and text not on any
+/// page (just typed) is not looked for through all of a long document.
+#[must_use]
+pub fn locate_near(
+    document: &PagedDocument,
+    source: &Source,
+    offset: usize,
+    near: usize,
+    reach: usize,
+) -> Option<PagePosition> {
     // The leaves around the cursor, the nearest first.
     let root = LinkedNode::new(source.root());
     let at = root.leaf_at(offset.min(source.text().len()), Side::After)?;
@@ -66,7 +80,7 @@ pub fn locate(
     let pages = document.pages();
     let near = near.min(pages.len().saturating_sub(1));
     // `near`, the page after it, the page before it, two after it, ...
-    let outwards = (0..pages.len()).flat_map(|distance| {
+    let outwards = (0..pages.len().min(reach.saturating_add(1))).flat_map(|distance| {
         let after = near
             .checked_add(distance)
             .filter(|page| *page < pages.len());
@@ -174,6 +188,28 @@ mod tests {
         assert_eq!(page_of("Third"), Some(2));
         // In code that sets no glyph: the nearest text.
         assert!(page_of("#pagebreak").is_some());
+    }
+
+    #[test]
+    fn text_is_looked_for_no_further_than_asked() {
+        let text = "First.\n#pagebreak()\nSecond.\n#pagebreak()\nThird.\n#pagebreak()\nFourth.\n";
+        let env = Environment::new(FontSet::Embedded);
+        let project = Project::in_memory(env, PathBuf::from("/"), "main.typ", text.to_owned())
+            .expect("a valid name");
+        let world = project.snapshot();
+        let document = compile(&world).document.expect("it compiles");
+        let source = project.source(project.main()).expect("the main source");
+        let offset = text.find("Fourth").expect("the needle is in the text");
+        let page =
+            |reach| locate_near(&document, source, offset, 0, reach).map(|position| position.page);
+        assert_eq!(page(usize::MAX), Some(3));
+        assert_eq!(page(3), Some(3));
+        // Not that far: the nearest text on the pages looked at, or none.
+        assert_ne!(page(1), Some(3));
+        assert_eq!(
+            locate(&document, source, offset, 0).map(|position| position.page),
+            Some(3)
+        );
     }
 
     #[test]

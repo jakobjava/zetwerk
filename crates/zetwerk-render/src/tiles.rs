@@ -10,7 +10,7 @@ use tiny_skia::Pixmap;
 use typst::utils::hash128;
 use typst_layout::Page;
 
-use crate::{PixelRegion, crop_page, options, page_size_px};
+use crate::{PixelRegion, crop_placed_page, cull, options, page_size_px};
 
 /// Edge length of a tile in pixels. Tiles at the right and bottom edge of a
 /// page are smaller.
@@ -71,6 +71,8 @@ pub fn tiles(page: &Page, pixel_per_pt: f64, visible: PixelRegion) -> Vec<Tile> 
         width: right - visible.x,
         height: bottom - visible.y,
     };
+    // What the page draws and where, once for all its tiles.
+    let placed = cull::placed(&page.frame);
     tile_origins(on_page)
         .map(|(x, y)| {
             let region = PixelRegion {
@@ -79,7 +81,7 @@ pub fn tiles(page: &Page, pixel_per_pt: f64, visible: PixelRegion) -> Vec<Tile> 
                 width: TILE_PX.min(page_width - x),
                 height: TILE_PX.min(page_height - y),
             };
-            let cropped = crop_page(page, region, pixel_per_pt);
+            let cropped = crop_placed_page(page, &placed, region, pixel_per_pt);
             let key = TileKey(hash128(&(
                 &cropped.frame,
                 &cropped.fill,
