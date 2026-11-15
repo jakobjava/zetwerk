@@ -404,3 +404,27 @@ fn a_paragraph_behind_a_list_item_turned_text_is_typeset_whole() {
     let text = ARTICLE.replacen("<eq-weyl>\n\n", "<eq-weyl>\n\n-\n\n", 1);
     assert_eq!(after_keys(&text, "<eq-weyl>\n\n-", true, "a<C-b>"), None);
 }
+
+#[test]
+fn a_list_begun_and_taken_back_at_the_top_leaves_nothing_behind() {
+    // `- ` typed into a paragraph at the top of the text, and taken back:
+    // the bullet stayed on the page, and all below it a line lower. Its
+    // paragraph was numbered below what is kept now, and was taken to be
+    // of the rules; and the marks of its elements went in without it.
+    // The typist found it: seed 13 in an empty document.
+    let text = "of - nüber =\nüber \n\né\n";
+    for keys in ["O-<lt><C-w>of ", "O- <BS><BS>of ", "O- x<C-w><BS><BS>of "] {
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "gsgs");
+        if let Some(editor) = viewer.editor.as_mut() {
+            editor.set_cursor(0);
+        }
+        for key in keys::parse(keys).unwrap_or_default() {
+            viewer.key(key);
+            if viewer.document_revision == Some(viewer.revision) {
+                assert_eq!(differs_from_whole(&mut viewer), None, "{keys}: {key:?}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

@@ -258,8 +258,8 @@ impl Region {
     /// in the rules or the lead.
     #[must_use]
     pub fn in_whole(&self, at: usize, lead: usize) -> Option<usize> {
-        // The lead begins on a line of its own.
-        let kept = at.checked_sub(self.rules + 1 + lead)?;
+        // The lead is a paragraph of its own (see `cut_down`).
+        let kept = at.checked_sub(self.rules + 2 + lead)?;
         Some(self.kept.start.max(self.rules) + kept)
     }
 
@@ -269,7 +269,9 @@ impl Region {
             return None;
         }
         let number = number(span);
-        if span.id() == Some(self.file) && number < self.floor {
+        // What stood there before may be numbered below what is kept now:
+        // Typst numbers what it reads anew between what it did not.
+        if span.id() == Some(self.file) && number < self.floor.min(numbers.0) {
             return None;
         }
         Some(span.id() == Some(self.file) && numbers.0 <= number && number < numbers.1)
@@ -356,7 +358,6 @@ impl Region {
                     } else if run.is_none() {
                         (lead, inside) = (None, HashSet::new());
                     }
-                    ending = false;
                 }
                 FrameItem::Tag(Tag::End(location, ..)) => {
                     if run.is_some() && ending && inside.contains(location) {
@@ -485,10 +486,11 @@ pub fn cut_down(new: &Source, region: &Region, lead: &str) -> Result<Source, Ref
     }
     // The lead begins a line of its own: so its first node is never
     // taken by Typst for the first of what is kept, which would then be
-    // numbered anew.
+    // numbered anew. And it ends a paragraph: what is kept begins one, as
+    // it does behind the rules, and not behind a blank of the lead's.
     cut.edit(
         region.rules..region.kept.start.max(region.rules),
-        &format!("\n{lead}"),
+        &format!("\n{lead}\n"),
     );
     // The children of the root that are kept, from the first that is
     // not a break (the break before them joins the lead's last line).
@@ -885,7 +887,7 @@ mod tests {
             .unwrap_or_else(|why| panic!("{why:?}"));
         assert_eq!(
             cut.text(),
-            "#set text(size: 11pt)\n\n\n#set par(justify: true)\n\n\nSecond $x_i^2$ one."
+            "#set text(size: 11pt)\n\n\n#set par(justify: true)\n\n\n\nSecond $x_i^2$ one."
         );
         let with_both = cut_down(&new, &region, "").unwrap_or_else(|why| panic!("{why:?}"));
         assert!(
