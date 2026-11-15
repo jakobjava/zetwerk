@@ -330,7 +330,9 @@ impl Viewer {
         let trigger = text[..begun].chars().next_back();
         let typed = &text[begun..cursor];
         let source = editor.source().clone();
-        let in_math = crate::typst_text::is_in_equation(&source, begun.saturating_sub(1));
+        // Where the word begins: right behind an equation, it is not in
+        // it, though the dollar sign before it is.
+        let in_math = crate::typst_text::is_in_equation(&source, begun);
         let hash = trigger == Some('#');
         // In an equation a list comes with the second letter: there,
         // nearly every word is a name of something.

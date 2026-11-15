@@ -909,3 +909,20 @@ fn two_equations_typst_refuses_are_both_shown_as_written() {
     assert_eq!(shown.matches("[`$").count(), 1, "{shown:?}");
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn a_word_typed_right_behind_an_equation_is_offered_nothing_of_equations() {
+    // The dollar sign before the word is the equation's: its things were
+    // offered, and Tab put the template of a sum into running text, its
+    // underscore beginning emphasis that ran on to the end.
+    let (mut viewer, directory) = typed("A $x$ and more.\n\nNext.\n", " and", "isum");
+    assert!(viewer.completion.is_none());
+    press(&mut viewer, "<Tab><Esc>");
+    assert!(!viewer.text().unwrap_or_default().contains('_'));
+    settled(&mut viewer);
+    let _ = std::fs::remove_dir_all(directory);
+    // In an equation, at its end too, they are.
+    let (viewer, directory) = typed("A $x$ and more.\n", "$ and", "i su");
+    assert!(viewer.completion.is_some());
+    let _ = std::fs::remove_dir_all(directory);
+}
