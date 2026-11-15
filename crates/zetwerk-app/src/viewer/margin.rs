@@ -688,6 +688,15 @@ impl Viewer {
                 (rect.max.y - rect.min.y).to_pt() * zoom,
             )
         };
+        let typed_on = self.margin_typed_on(&notes);
+        let grounds: Vec<_> = grounds
+            .into_iter()
+            .filter(|(rect, _)| {
+                typed_on.is_none_or(|(_, top, bottom)| {
+                    rect.max.y.to_pt() <= top || rect.min.y.to_pt() >= bottom
+                })
+            })
+            .collect();
         if !self.margin.hide_errors {
             for (rect, error) in &grounds {
                 let colour = if *error { PAGE_ERROR } else { PAGE_WARNING };
@@ -696,11 +705,14 @@ impl Viewer {
         }
         let bar = (1.5 * self.scale).round().max(1.0);
         for note in &notes {
-            let pieces = self.margin.pieces(note, chosen, tags_wanted);
+            let mut pieces = self.margin.pieces(note, chosen, tags_wanted);
+            let mut complaint = self.margin_complaint(note);
+            if typed_on.is_some_and(|(line, ..)| line == note.line) && complaint.take().is_some() {
+                pieces.remove(0);
+            }
             if pieces.is_empty() {
                 continue;
             }
-            let complaint = self.margin_complaint(note);
             let (top, height) = (origin.1 + note.top * zoom, (note.bottom - note.top) * zoom);
             if let Some((error, message)) = &complaint {
                 let colour = if *error { ERROR_BAR } else { WARNING_BAR };
@@ -731,6 +743,34 @@ impl Viewer {
                 height: image_height as f32,
             });
         }
+    }
+
+    /// Of `notes`, the one beside the line typed on, while what is typed
+    /// is complained of: its line, top and bottom. What the compiler
+    /// makes of half a word is not worth reading; as in the status line,
+    /// it waits until typing is over. The complaint is that of what
+    /// begins before the cursor on its line. Not in an equation.
+    fn margin_typed_on(&self, notes: &[Note]) -> Option<(usize, f64, f64)> {
+        let editor = self.editor.as_ref()?;
+        let (text, cursor, file) = (editor.text(), editor.cursor(), editor.file());
+        if editor.mode() != editor::Mode::Insert
+            || crate::typst_text::equation_at(editor.source(), cursor).is_some()
+        {
+            return None;
+        }
+        let (.., typed) = self.diagnostics.iter().find(|(of, range, ..)| {
+            *of == file
+                && text
+                    .get(range.start..cursor)
+                    .is_some_and(|between| !between.contains('\n'))
+        })?;
+        notes
+            .iter()
+            .find(|note| {
+                self.margin_complaint(note)
+                    .is_some_and(|(_, message)| message == *typed)
+            })
+            .map(|note| (note.line, note.top, note.bottom))
     }
 
     /// The first complaint beside `note`, if complaints are shown: whether
