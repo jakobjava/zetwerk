@@ -292,9 +292,13 @@ impl Facts {
         }
         spans.sort_unstable();
         spans.dedup();
+        // As far right as the text may reach, if the margins are alike:
+        // the marks are not to move along as a line typed grows longer.
+        let left = boxes.iter().map(|(_, _, left, _)| *left).reduce(f64::min);
         let right = boxes
             .iter()
             .map(|(_, _, _, right)| *right)
+            .chain(left.map(|left| frame.width().to_pt() - left))
             .reduce(f64::max)
             .unwrap_or(0.0);
         let mut grounds = Vec::new();

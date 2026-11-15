@@ -1451,9 +1451,18 @@ impl Viewer {
         if shown.is_empty() {
             return;
         }
-        let Some(change) = self.places() else {
+        // While the page is worked out from what is typed, the notes
+        // stay where the page as compiled has them, but on the line typed
+        // into: its words have moved. The tags stay, not to come and go
+        // with every key.
+        let Some(change) = self.places_of_text() else {
             return;
         };
+        let typed = self
+            .predicted
+            .as_ref()
+            .filter(|predicted| predicted.index == index);
+        let typed = typed.map(|predicted| predicted.typed);
         let (Some(document), Some(world)) = (&self.document, &self.compiled_world) else {
             return;
         };
@@ -1480,6 +1489,9 @@ impl Viewer {
             let range = change.back_or_edge(range.start)..change.back_or_edge(range.end);
             let rects = map.selection(file, &range);
             for rect in &rects {
+                if typed.is_some_and(|typed| rect.min.y < typed.max.y && rect.max.y > typed.min.y) {
+                    continue;
+                }
                 let (x, y, w, h) = place(*rect);
                 tint(scene, has, NOTE_FILL, (x, y, w, h));
                 tint(scene, has, NOTE_LINE, (x, y + h - line, w, line));

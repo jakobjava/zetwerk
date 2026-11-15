@@ -95,6 +95,10 @@ const PAGE_BAR: [u8; 4] = [0x28, 0x28, 0x28, 0xff];
 const PAGE_SELECTION: [u8; 4] = [0x45, 0x85, 0x88, 0x55];
 /// How many rows stay visible beyond the cursor when the source scrolls.
 const SCROLL_MARGIN: usize = 3;
+/// How near the bottom of the view the top of the cursor may be put by
+/// pages that come, in points, before the view goes after it: about the
+/// height of a line.
+const LANDED_MARGIN: f64 = 16.0;
 /// A change an agent proposes, in the source and on the page; one whose
 /// text has changed since; and what an agent changed last.
 const PROPOSAL: [u8; 3] = [0x5c, 0x4a, 0x14];
@@ -1431,6 +1435,14 @@ impl Viewer {
     /// Scrolls the pages to where the text under the cursor is set, if the
     /// pages say where that is and it is out of view.
     fn follow_cursor(&mut self) {
+        let margin = f64::from(self.view.height) / 8.0;
+        self.follow_cursor_by(margin, margin);
+    }
+
+    /// Like [`Viewer::follow_cursor`], where the top of the cursor is
+    /// nearer than `above` device pixels to the top of the view, or than
+    /// `below` to its bottom.
+    fn follow_cursor_by(&mut self, above: f64, below: f64) {
         if self.shown_panes() == Panes::Source || self.follows_step() {
             return;
         }
@@ -1494,8 +1506,7 @@ impl Viewer {
         let zoom = self.view.zoom;
         let y = f64::from(page.y) + position.y * zoom;
         let (top, height) = (self.view.top * zoom, f64::from(self.view.height));
-        let margin = height / 8.0;
-        if y < top + margin || y > top + height - margin {
+        if y < top + above || y > top + height - below {
             self.view.top = (y - height / 3.0) / zoom;
             self.view.clamp(&self.layout);
         }
@@ -1561,8 +1572,19 @@ impl Viewer {
             self.landed.set(None);
             self.stale_files.clear();
             self.planned.clear();
+            if output.revision < self.revision {
+                // Of an older text than the one typed: what was typed
+                // since is worked into these pages as it was into the
+                // last, or it would be gone from the page until the
+                // next compile, and the cursor with it.
+                self.predict();
+            }
             self.relayout();
-            self.follow_cursor();
+            // No key moved the cursor: the view goes after it only where
+            // the pages put it out of the window (a paragraph begun at
+            // its foot), and not because it is near an edge, a moment
+            // after the key.
+            self.follow_cursor_by(0.0, LANDED_MARGIN * self.view.zoom);
         }
         self.refer_problems();
         // An equation Typst refuses is shown as it is written, and the
@@ -2280,15 +2302,56 @@ impl Viewer {
         };
         let zoom = self.view.zoom;
         let bar = (1.5 * self.scale).round().max(1.0);
-        if predicted.index == index && editor.cursor() == predicted.end {
+        let typing = editor.mode() == editor::Mode::Insert;
+        let cursor = editor.cursor();
+        if predicted.index == index && cursor == predicted.end && typing {
             let cell = predicted.typed;
             let y = origin.1 + cell.min.y.to_pt() * zoom;
             let height = (cell.max.y - cell.min.y).to_pt() * zoom;
             // Blanks typed at the end of a line show as nothing; the
-            // cursor is behind them all the same.
-            let blanks = blanks_before(editor.text(), editor.cursor());
+            // cursor is behind them all the same. Elsewhere they are in
+            // the cell already.
+            let rest = editor.text().get(cursor..).unwrap_or_default();
+            let line_ends = matches!(rest.chars().next(), None | Some('\n'));
+            let blanks = if line_ends {
+                blanks_before(editor.text(), cursor)
+            } else {
+                0
+            };
             let x = origin.0 + cell.max.x.to_pt() * zoom + blanks as f64 * BLANK * height;
             tint(scene, has, PAGE_BAR, (x.round(), y, bar, height));
+            self.cursor_at = Some((x, y, y + height));
+        } else if predicted.index == index
+            && let Some((offset, _)) = self.predicted_at
+            && (offset..=predicted.end).contains(&cursor)
+            && let Some(typed) = editor.text().get(offset..predicted.end)
+        {
+            // In what was typed, or on it after a key of normal mode
+            // (`x`, `r`, `u`, `p`, Escape): the cursor is not to be gone,
+            // nor a bar, until the page is typeset. Where in the typed
+            // text it is, is told by how many of its characters are
+            // before it; how wide the one it is on is, by how wide they
+            // are on average, or a blank's width twice behind them.
+            let cell = predicted.typed;
+            let (left, right) = (cell.min.x.to_pt() * zoom, cell.max.x.to_pt() * zoom);
+            let y = origin.1 + cell.min.y.to_pt() * zoom;
+            let height = (cell.max.y - cell.min.y).to_pt() * zoom;
+            let shown = typed.trim_end_matches(' ');
+            let all = shown.chars().count();
+            let before = shown
+                .get(..cursor - offset)
+                .map_or(all, |b| b.chars().count());
+            let width = if before < all {
+                (right - left) / all as f64
+            } else {
+                2.0 * BLANK * height
+            };
+            let x = origin.0 + left + (right - left) * before as f64 / all.max(1) as f64;
+            if typing {
+                tint(scene, has, PAGE_BAR, (x.round(), y, bar, height));
+            } else {
+                tint(scene, has, PAGE_CURSOR, (x, y, width.max(bar), height));
+            }
             self.cursor_at = Some((x, y, y + height));
         }
         true
@@ -2380,10 +2443,16 @@ impl Viewer {
             let (x, y, _, height) = place(caret.cell);
             self.cursor_at.get_or_insert((x, y, y + height));
         }
-        let Some(cursor) = cursor else {
+        // Typing in what was put in, the cursor is where it was put in:
+        // not gone until the page has it (a blank typed beside another,
+        // where nothing is typeset by itself). On it in normal mode, it
+        // is on nothing the page shows.
+        if cursor.is_none() && !typing {
             return;
-        };
-        if caret.as_ref().is_none_or(|caret| caret.after && !typing) {
+        }
+        if let Some(cursor) = cursor
+            && caret.as_ref().is_none_or(|caret| caret.after && !typing)
+        {
             // No text of the source is shown here; something made of it
             // may be, such as what a reference refers to by.
             let object = map.object(file, cursor);
@@ -2719,7 +2788,11 @@ impl Viewer {
             (None, None, Some(problem)) => (problem.as_str(), true),
             (None, None, None) => (name.as_str(), false),
         };
-        let progress = if self.is_compiled() {
+        // Only while the pages are behind the text: where they show what
+        // was typed (worked out, or a part typeset by itself), the word
+        // would come and go with every key, and all beside it with it.
+        let shown = self.is_predicted() || self.document_revision == Some(self.revision);
+        let progress = if self.is_compiled() || shown {
             ""
         } else {
             "compiling  "
@@ -3026,6 +3099,7 @@ mod tests {
 
     mod cursor;
     mod files;
+    mod frames;
     mod left_behind;
     mod speed;
     mod typist;

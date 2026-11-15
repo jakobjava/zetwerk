@@ -518,10 +518,52 @@ fn slot_hints(
             } else {
                 Side::Below
             };
+            // Not over the line above or below: behind the box, if there
+            // is room there.
+            let over = |side| covers_text(map, hint_area(glyph.rect, side, word));
+            let side = if over(side) && !over(Side::Behind) {
+                Side::Behind
+            } else {
+                side
+            };
             hints.push((glyph.rect, side, word));
         }
     }
     hints
+}
+
+/// About where the word for the empty place `rect` stands on `side` of
+/// it, in points: as [`Viewer::draw_focus`] puts it, with the letters of
+/// its monospaced font about 0.6 of its size wide, and as high as it
+/// is large and a fifth.
+fn hint_area(rect: Rect, side: Side, word: &str) -> Rect {
+    let (width, height) = (0.6 * HINT_SIZE * word.len() as f64, 1.2 * HINT_SIZE);
+    let (left, right) = (rect.min.x.to_pt(), rect.max.x.to_pt());
+    let (top, bottom) = (rect.min.y.to_pt(), rect.max.y.to_pt());
+    let middle = f64::midpoint(left, right) - width / 2.0;
+    let (x, y) = match side {
+        Side::Above => (middle, top - height - HINT_GAP),
+        Side::Below => (middle, bottom + HINT_GAP),
+        Side::Behind => (
+            right + 2.0 * HINT_GAP,
+            f64::midpoint(top, bottom) - height / 2.0,
+        ),
+    };
+    let point = |x: f64, y: f64| Point::new(Abs::pt(x), Abs::pt(y));
+    Rect::new(point(x, y), point(x + width, y + height))
+}
+
+/// Whether `area` of page `map` has a glyph of its text in it.
+fn covers_text(map: &PageMap, area: Rect) -> bool {
+    map.glyphs().iter().any(|glyph| {
+        let cell = glyph.rect;
+        !glyph.furniture
+            && !glyph.blank
+            && cell.min.x < area.max.x
+            && area.min.x < cell.max.x
+            && cell.min.y < area.max.y
+            && area.min.y < cell.max.y
+    })
 }
 
 #[cfg(test)]
