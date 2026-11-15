@@ -13,7 +13,9 @@
 //! the same and the ways out, whose keys are the panel's while it is up:
 //! Enter goes there (into the file it is in), `x` takes out of the text
 //! what Typst refuses (the code behind `#` it is in, the `@` of a
-//! reference, the mark that is not closed), `u` goes back by undoing to
+//! reference, the mark that is not closed), `c` makes a name Typst does
+//! not know the one it most likely is (`page` with letters typed into
+//! it, say), `u` goes back by undoing to
 //! the text the pages show, `e` loads the file as it was saved (`:e!`), and Esc puts
 //! the panel away; any other key puts it away too and does what it
 //! always does. Undo brings back what any of them changed.
@@ -27,6 +29,7 @@ use std::fmt::Write;
 use std::ops::Range;
 use std::sync::Arc;
 
+use typst::World;
 use typst::syntax::{FileId, LinkedNode, Source, SyntaxKind};
 use zetwerk_core::StateId;
 use zetwerk_typst::ProjectWorld;
@@ -62,6 +65,9 @@ pub(super) struct Refused {
     /// What the last compile was made of: the text of the other files
     /// it complains about.
     last: Option<Arc<ProjectWorld>>,
+    /// Of a name Typst knows nothing of, where it is and the name it
+    /// most likely is: worked out once for each compile.
+    likely: Option<(FileId, Range<usize>, String)>,
 }
 
 /// The first thing Typst refuses in the newest text.
@@ -236,6 +242,99 @@ pub(super) fn for_writer(message: &str) -> String {
     message.to_owned()
 }
 
+/// How many letters are to be put in, taken out, changed or swapped
+/// with their neighbour to make `one` into `other`.
+fn distance(one: &str, other: &str) -> usize {
+    let (one, other): (Vec<char>, Vec<char>) = (one.chars().collect(), other.chars().collect());
+    let mut rows = vec![(0..=other.len()).collect::<Vec<_>>()];
+    for (i, a) in one.iter().enumerate() {
+        let mut row = vec![i + 1];
+        for (j, b) in other.iter().enumerate() {
+            let mut best = (rows[i][j] + usize::from(a != b))
+                .min(rows[i][j + 1] + 1)
+                .min(row[j] + 1);
+            if i > 0 && j > 0 && *a == other[j - 1] && one[i - 1] == *b {
+                best = best.min(rows[i - 1][j - 1] + 1);
+            }
+            row.push(best);
+        }
+        rows.push(row);
+    }
+    rows[one.len()][other.len()]
+}
+
+/// Of `names`, the one `name` most likely is meant to be: one a letter
+/// or two away from it (one for a short name), or one that has letters
+/// typed into it, beginning alike. `None` where none is, or where two
+/// are as likely and begin alike.
+pub(super) fn likely<'a>(name: &str, names: impl Iterator<Item = &'a str>) -> Option<String> {
+    let length = name.chars().count();
+    if length < 3 {
+        return None;
+    }
+    let typed_into = |known: &str| {
+        let mut letters = name.chars();
+        known.chars().count() >= 3
+            && known.chars().next() == name.chars().next()
+            && known.chars().all(|c| letters.any(|typed| typed == c))
+    };
+    let mut best: Option<(usize, bool, &str)> = None;
+    let mut tied = false;
+    for known in names {
+        if known == name {
+            return None;
+        }
+        let away = distance(name, known);
+        let near = away <= if length <= 4 { 1 } else { 2 };
+        if !near && !typed_into(known) {
+            continue;
+        }
+        // Nearer first; then one that begins as the name does.
+        let alike = known.chars().next() == name.chars().next();
+        let rank = (away, !alike);
+        match best {
+            Some((at, unlike, _)) if (at, unlike) < rank => {}
+            Some((at, unlike, _)) if (at, unlike) == rank => tied = true,
+            _ => {
+                best = Some((away, !alike, known));
+                tied = false;
+            }
+        }
+    }
+    best.filter(|_| !tied).map(|(.., known)| known.to_owned())
+}
+
+/// The names `source` binds with `#let`, and those of Typst's library:
+/// what a name Typst does not know may be meant to be.
+fn known_names<'a>(world: &'a ProjectWorld, source: &'a Source) -> Vec<&'a str> {
+    let mut names: Vec<&str> = world
+        .library()
+        .global
+        .scope()
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let mut stack = vec![source.root()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == SyntaxKind::LetBinding
+            && let Some(bound) = node
+                .children()
+                .find(|child| matches!(child.kind(), SyntaxKind::Ident | SyntaxKind::Closure))
+        {
+            let ident = if bound.kind() == SyntaxKind::Closure {
+                bound
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::Ident)
+            } else {
+                Some(bound)
+            };
+            names.extend(ident.map(|ident| ident.leaf_text().as_str()));
+        }
+        stack.extend(node.children());
+    }
+    names
+}
+
 /// The deepest node of `source` that holds byte `at`.
 fn node_at(source: &Source, at: usize) -> LinkedNode<'_> {
     let mut node = LinkedNode::new(source.root());
@@ -379,13 +478,22 @@ impl Viewer {
                 },
             )
         });
+        let mut said = for_writer(message);
+        if let Some((_, _, name)) = self
+            .refused
+            .likely
+            .as_ref()
+            .filter(|(file, place, _)| file == of && place == range)
+        {
+            let _ = write!(said, "; “{name}”, perhaps?");
+        }
         Some(Refusal {
             file: *of,
             range: Some(range.clone()),
             elsewhere,
             line: line + 1,
             begins: excerpt(&text[start..end], at - start),
-            said: for_writer(message),
+            said,
             more: errors().count() - 1,
         })
     }
@@ -417,6 +525,8 @@ impl Viewer {
         if self.document.is_some() {
             self.refused.away = false;
         }
+        self.refused.likely = None;
+        self.refused.likely = self.likely_name(world);
         let Some(editor) = &self.editor else {
             return;
         };
@@ -432,6 +542,24 @@ impl Viewer {
             self.refused.up = true;
         }
         self.refused.again = false;
+    }
+
+    /// Of the first thing Typst refuses, if it is a name it knows
+    /// nothing of: where it is and the name it most likely is.
+    fn likely_name(&self, world: &ProjectWorld) -> Option<(FileId, Range<usize>, String)> {
+        let refusal = self.refusal()?;
+        let range = refusal.range?;
+        let (.., message) = self
+            .diagnostics
+            .iter()
+            .find(|(of, at, error, _)| *error && *of == refusal.file && *at == range)?;
+        let name = message.strip_prefix("unknown variable: ")?;
+        let source = world.written(refusal.file).ok()?;
+        if source.text().get(range.clone()) != Some(name) {
+            return None;
+        }
+        let name = likely(name, known_names(world, &source).into_iter())?;
+        Some((refusal.file, range, name))
     }
 
     /// `:why`: the panel, with what Typst refuses and the ways out.
@@ -467,6 +595,9 @@ impl Viewer {
             Key::Escape => {}
             Key::Enter => self.go_to_refused(&refusal),
             Key::Char('x') => self.take_out_refused(&refusal),
+            Key::Char('c') if self.likely_here(&refusal).is_some() => {
+                self.correct_refused(&refusal);
+            }
             Key::Char('u') if self.good_state().is_some() => self.back_to_good(),
             Key::Char('e')
                 if self
@@ -504,6 +635,35 @@ impl Viewer {
             self.open_file(refusal.file, Some(range.start));
         }
         self.alert(refusal.told());
+    }
+
+    /// What `c` would make of the name Typst refuses, in the text being
+    /// edited: where it is and the name.
+    fn likely_here(&self, refusal: &Refusal) -> Option<(Range<usize>, String)> {
+        let editor = self.editor.as_ref()?;
+        let (file, range, name) = self.refused.likely.as_ref()?;
+        (editor.file() == *file && *file == refusal.file && refusal.range.as_ref() == Some(range))
+            .then(|| (range.clone(), name.clone()))
+    }
+
+    /// `c`: makes the name Typst refuses the one it most likely is.
+    fn correct_refused(&mut self, refusal: &Refusal) {
+        let Some((range, name)) = self.likely_here(refusal) else {
+            return;
+        };
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let was = editor.text()[range.clone()].to_owned();
+        match editor.replace(&[(range.clone(), name.as_str())]) {
+            Ok(()) => {
+                editor.set_cursor(range.start);
+                self.text_changed(super::Edited::Command);
+                self.refused.again = true;
+                self.notice(format!("“{was}” made “{name}”  (u brings it back)"));
+            }
+            Err(why) => self.alert(format!("not changed: {why}")),
+        }
     }
 
     /// What `x` would take out, in the text being edited.
@@ -669,6 +829,9 @@ impl Viewer {
                 "x      take out “{}”{lines_of}",
                 shortened(taken, BEGINS)
             ));
+        }
+        if let Some((_, name)) = self.likely_here(&refusal) {
+            lines.push(format!("c      make it “{name}”"));
         }
         if let Some((_, steps)) = self.good_state() {
             let undos = if steps == 1 { "undo" } else { "undos" };

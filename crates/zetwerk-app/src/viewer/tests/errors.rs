@@ -382,3 +382,82 @@ fn a_reference_begun_from_the_menu_and_left_is_got_out_of_from_the_page() {
     );
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn a_name_with_letters_typed_into_it_is_made_what_it_was() {
+    // The case of the journal: `gsgs` typed into `page`. `c` makes it
+    // `page` again, and keeps what the rule says.
+    let text = "#set pagsgse(paper: \"a4\", margin: 2cm)\n= Intro\n\nText.\n";
+    let (mut viewer, directory) = editing(text);
+    let status = said(&viewer);
+    assert!(
+        status.contains("Typst knows nothing called “pagsgse”; “page”, perhaps?"),
+        "{status}"
+    );
+    press(&mut viewer, "c");
+    assert_eq!(
+        viewer.text(),
+        Some("#set page(paper: \"a4\", margin: 2cm)\n= Intro\n\nText.\n")
+    );
+    assert_eq!(problems(&mut viewer), Vec::<String>::new());
+    assert!(viewer.document.is_some());
+    press(&mut viewer, "u");
+    assert_eq!(viewer.text(), Some(text));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn names_are_corrected_only_where_one_is_likely() {
+    let names = ["page", "text", "table", "label", "heading", "theorem"];
+    for (typed, meant) in [
+        ("pagsgse", Some("page")),
+        ("tetx", Some("text")),
+        ("haeding", Some("heading")),
+        ("theroem", Some("theorem")),
+        // Two as likely, each beginning otherwise than the other.
+        ("tabel", Some("table")),
+        ("xyz", None),
+        ("pa", None),
+        ("page", None),
+    ] {
+        assert_eq!(
+            refused::likely(typed, names.into_iter()).as_deref(),
+            meant,
+            "{typed}"
+        );
+    }
+}
+
+#[test]
+fn a_name_the_document_defines_is_what_a_typo_is_made() {
+    let text = "#let theorem(body) = body\n\n#theroem[It holds.]\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, ":why<CR>c");
+    assert_eq!(
+        viewer.text(),
+        Some("#let theorem(body) = body\n\n#theorem[It holds.]\n")
+    );
+    assert_eq!(problems(&mut viewer), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_name_being_typed_is_not_complained_of_beside_its_line() {
+    // What Typst makes of half a name is not worth reading: as in the
+    // status line, the complaint waits until typing is over.
+    let text = "#set page(width: 300pt, height: 300pt)\nSome words.\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, "gsgs");
+    change(&mut viewer, "words", "#xy words");
+    landed(&mut viewer);
+    let bars = |viewer: &mut Viewer| tints(viewer, crate::viewer::margin::ERROR_BAR).len();
+    assert_eq!(bars(&mut viewer), 1);
+    let at = viewer.text().unwrap().find("#xy").unwrap() + 3;
+    viewer.editor.as_mut().unwrap().set_cursor(at - 1);
+    press(&mut viewer, "a");
+    assert_eq!(viewer.editor.as_ref().unwrap().cursor(), at);
+    assert_eq!(bars(&mut viewer), 0);
+    press(&mut viewer, "<Esc>");
+    assert_eq!(bars(&mut viewer), 1);
+    let _ = std::fs::remove_dir_all(directory);
+}
