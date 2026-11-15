@@ -10,6 +10,7 @@ pub mod find;
 pub mod keys;
 mod motion;
 mod object;
+pub mod pattern;
 mod text;
 mod took;
 

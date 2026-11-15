@@ -22,6 +22,11 @@ pub enum Key {
     PageDown,
     Home,
     End,
+    /// Shift-Tab: back to where Tab came from.
+    BackTab,
+    /// Shift-Enter: a line break within a paragraph, where the host
+    /// shows pages; elsewhere Enter.
+    ShiftEnter,
     /// Not a key of any keyboard: a text put in whole in insert mode, as
     /// when one of a list of completions is taken. The number says which,
     /// to the engine that made it (see `Engine::completed`); it is what
@@ -50,8 +55,8 @@ impl KeyPress {
 
 /// Parses keys written in Vim's notation: plain characters stand for
 /// themselves, special keys and modifiers are written in angle brackets
-/// (`<Esc>`, `<CR>`, `<C-d>`, `<A-x>`, `<C-A-Left>`), and a literal `<` is
-/// `<lt>`.
+/// (`<Esc>`, `<CR>`, `<C-d>`, `<A-x>`, `<C-A-Left>`, `<S-Tab>`), and a
+/// literal `<` is `<lt>`.
 pub fn parse(notation: &str) -> Result<Vec<KeyPress>, String> {
     let mut keys = Vec::new();
     let mut rest = notation;
@@ -73,8 +78,12 @@ pub fn parse(notation: &str) -> Result<Vec<KeyPress>, String> {
 fn parse_special(name: &str) -> Result<KeyPress, String> {
     let mut press = KeyPress::plain(Key::Escape);
     let mut name = name;
+    let mut shift = false;
     loop {
-        if let Some(rest) = name.strip_prefix("C-") {
+        if let Some(rest) = name.strip_prefix("S-") {
+            shift = true;
+            name = rest;
+        } else if let Some(rest) = name.strip_prefix("C-") {
             press.ctrl = true;
             name = rest;
         } else if let Some(rest) = name.strip_prefix("A-").or_else(|| name.strip_prefix("M-")) {
@@ -109,6 +118,16 @@ fn parse_special(name: &str) -> Result<KeyPress, String> {
         (_, Some(c), None) => Key::Char(c),
         _ => return Err(format!("unknown key <{name}>")),
     };
+    if shift {
+        // Shift is in a character already (`<S-a>` is `A`); of the
+        // other keys, Tab and Enter have a meaning of their own with it.
+        press.key = match press.key {
+            Key::Tab => Key::BackTab,
+            Key::Enter => Key::ShiftEnter,
+            Key::Char(c) => Key::Char(c.to_uppercase().next().unwrap_or(c)),
+            _ => return Err(format!("no key of its own with Shift: <S-{name}>")),
+        };
+    }
     Ok(press)
 }
 
@@ -150,6 +169,24 @@ mod tests {
                 KeyPress::plain(Key::Char(' ')),
             ])
         );
+    }
+
+    #[test]
+    fn shift_is_written_for_tab_and_enter() {
+        assert_eq!(
+            parse("<S-Tab><S-CR><S-a><C-S-Tab>"),
+            Ok(vec![
+                KeyPress::plain(Key::BackTab),
+                KeyPress::plain(Key::ShiftEnter),
+                KeyPress::plain(Key::Char('A')),
+                KeyPress {
+                    key: Key::BackTab,
+                    ctrl: true,
+                    alt: false
+                },
+            ])
+        );
+        assert!(parse("<S-Left>").is_err());
     }
 
     #[test]

@@ -2,14 +2,17 @@
 # The same as ./scripts/check.sh on a developer's machine.
 name: check
 
+# On main only: page-surface is pushed with it, the same commit. A run
+# under way is let finish when the next push comes (of several that
+# wait, GitHub keeps the newest): pushes come faster than a run takes.
 on:
   push:
-    branches: [main, page-surface]
+    branches: [main]
   pull_request:
 
 concurrency:
   group: check-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # Without what a debugger needs, and without what makes the next build
 # of the same tree faster: with them a build of Typst and of the tests

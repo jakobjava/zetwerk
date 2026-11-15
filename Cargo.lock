@@ -9752,6 +9752,7 @@ name = "zetwerk-vim"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "regex",
  "serde_json",
 ]
 

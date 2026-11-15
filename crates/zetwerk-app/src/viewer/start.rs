@@ -170,6 +170,15 @@ fn next_blank(text: &str, from: usize) -> Option<Range<usize>> {
         .or_else(|| blanks(text).next())
 }
 
+/// The last place to fill in of `text` that begins before byte `before`;
+/// else the last of all.
+fn prev_blank(text: &str, before: usize) -> Option<Range<usize>> {
+    blanks(text)
+        .filter(|blank| blank.start < before)
+        .last()
+        .or_else(|| blanks(text).last())
+}
+
 /// Whether `range` of `text` is a place to fill in.
 fn is_blank(text: &str, range: &Range<usize>) -> bool {
     blanks(text.get(range.clone()).unwrap_or("")).next() == Some(0..range.len())
@@ -426,6 +435,22 @@ impl Viewer {
                 self.start.filling = false;
                 false
             }
+            // Shift-Tab: back to the place to fill in before.
+            Key::BackTab if plain && mode == editor::Mode::Normal => {
+                let Some(before) = prev_blank(text, cursor) else {
+                    return false;
+                };
+                self.start.filling = true;
+                self.go_to_blank(before.start)
+            }
+            Key::BackTab if plain && typing && self.start.filling => {
+                let from = blank.map_or(cursor, |blank| blank.start);
+                if let Some(before) = prev_blank(text, from) {
+                    return self.go_to_blank(before.start);
+                }
+                self.start.filling = false;
+                false
+            }
             Key::Char(_) if plain => {
                 if let Some(blank) = blank {
                     self.clear_blank(blank, Edited::Typing);
@@ -479,7 +504,8 @@ impl Viewer {
         if at == Some(blank.start) {
             self.start.blank = Some(blank);
             self.notice(format!(
-                "what is typed takes the place of {what}; Tab: the next place to fill in"
+                "what is typed takes the place of {what}; Tab: the next place to fill in, \
+                 Shift-Tab: the one before"
             ));
         }
         self.follow_cursor();

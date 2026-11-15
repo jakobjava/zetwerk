@@ -20,6 +20,9 @@ use crate::keys::{Key, KeyPress};
 
 pub use zetwerk_vim::Mode;
 
+mod mark;
+pub use mark::Mark;
+
 /// How many cells of the source pane a tab takes.
 pub const TAB_CELLS: usize = 4;
 
@@ -1236,6 +1239,11 @@ impl Host for DocumentHost<'_> {
     fn next_field(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
         matches!(self.rows, RowsOf::Pages(_))
             .then(|| crate::typst_text::tab_key(&self.document.buffer().0, at))?
+    }
+
+    fn prev_field(&self, at: usize) -> Option<usize> {
+        matches!(self.rows, RowsOf::Pages(_))
+            .then(|| crate::typst_text::prev_field(&self.document.buffer().0, at))?
     }
 
     fn stop(&self, at: usize, seek: Seek) -> Option<Range<usize>> {

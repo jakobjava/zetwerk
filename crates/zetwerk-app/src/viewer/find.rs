@@ -33,6 +33,7 @@ use typst::layout::{Abs, Rect};
 use typst::syntax::{FileId, LinkedNode, Source, SyntaxKind};
 use zetwerk_typst::{Origin, PageMap};
 use zetwerk_vim::find::{MOST, find_all};
+use zetwerk_vim::pattern::{Pattern, Replacement};
 use zetwerk_vim::{Query, Took};
 
 use super::{Change, Paging, Panes, Scene, TextureId, Viewer, tint};
@@ -88,6 +89,8 @@ pub(super) struct Find {
     /// What the last key yanked or put, the revision of the text that is
     /// true of, and until when it is shown.
     took: Option<(u64, Range<usize>, Instant)>,
+    /// The last substitution, for `&` and `:&&`.
+    substituted: Option<Substitute>,
 }
 
 impl Default for Find {
@@ -105,6 +108,7 @@ impl Default for Find {
             generation: 0,
             placed: HashMap::new(),
             took: None,
+            substituted: None,
         }
     }
 }
@@ -634,30 +638,74 @@ impl Viewer {
 
     /// `:s/this/that/` and its like (see [`Substitute`]).
     fn substitute(&mut self, substitute: Result<Substitute, String>) {
-        let substitute = match substitute {
+        let mut substitute = match substitute {
             Ok(substitute) => substitute,
             Err(why) => return self.alert(why),
         };
+        // Nothing to look for: what the last search looked for, as it is
+        // written.
+        if substitute.pattern.is_empty() {
+            let searched = (self.editor.as_ref()).and_then(|editor| editor.engine().last_search());
+            let Some(searched) = searched else {
+                return self.alert("nothing to look for: :s/this/that/");
+            };
+            substitute.pattern = searched.pattern;
+            substitute.literal = true;
+        }
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let edits = match substitute.edits(editor.text(), editor.cursor()) {
+            Ok(edits) => edits,
+            Err(why) => return self.alert(why),
+        };
+        let (count_only, confirm) = (substitute.count_only, substitute.confirm);
+        let pattern = substitute.pattern.clone();
+        self.find.substituted = Some(substitute);
+        if edits.is_empty() {
+            return self.alert(format!("not found: {pattern}"));
+        }
+        if count_only {
+            let text = editor.text();
+            let mut lines: Vec<usize> = edits
+                .iter()
+                .map(|(range, _)| text[..range.start].matches('\n').count())
+                .collect();
+            lines.dedup();
+            let count = edits.len();
+            let matches = if count == 1 { "match" } else { "matches" };
+            let on = if lines.len() == 1 { "line" } else { "lines" };
+            return self.notice(format!("{count} {matches} on {} {on}", lines.len()));
+        }
+        if confirm {
+            return self.confirm_substitute(edits);
+        }
+        self.make_substitute(&edits);
+    }
+
+    /// Makes the replacements `edits` (in the order of the text, apart),
+    /// as one undo step, and says how many.
+    pub(super) fn make_substitute(&mut self, edits: &[(Range<usize>, String)]) {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let (edits, last) = substitute.edits(editor.text(), editor.cursor());
-        if edits.is_empty() {
-            return self.alert(format!("not found: {}", substitute.pattern));
-        }
+        let Some((last, _)) = edits.last() else {
+            return;
+        };
         // From the last: the ranges before it stay those of the text.
         let backwards: Vec<(Range<usize>, &str)> = edits
             .iter()
             .rev()
-            .map(|range| (range.clone(), substitute.with.as_str()))
+            .map(|(range, with)| (range.clone(), with.as_str()))
             .collect();
         match editor.replace(&backwards) {
             Ok(()) => {
                 // To the start of the last line that changed, as in Vim:
                 // where it is now that those before it changed.
                 let before = &edits[..edits.len() - 1];
-                let taken: usize = before.iter().map(Range::len).sum();
-                let last = (last + before.len() * substitute.with.len()).saturating_sub(taken);
+                let put: usize = before.iter().map(|(_, with)| with.len()).sum();
+                let taken: usize = before.iter().map(|(range, _)| range.len()).sum();
+                let last = (last.start + put).saturating_sub(taken);
                 let text = editor.text();
                 let line = text[..last.min(text.len())]
                     .rfind('\n')
@@ -672,6 +720,22 @@ impl Viewer {
             }
             Err(why) => self.alert(format!("not changed: {why}")),
         }
+    }
+
+    /// `&`, `:&&`, `g&` and their like: the last substitution again, in
+    /// the line of the cursor or in `all`; with its flags if `keep`.
+    pub(super) fn substitute_again(&mut self, all: bool, keep: bool) {
+        let Some(mut again) = self.find.substituted.clone() else {
+            return self.alert("no substitution to make again: :s/this/that/ first");
+        };
+        again.lines = if all { Lines::All } else { Lines::Cursor };
+        if !keep {
+            again.all = false;
+            again.any_case = false;
+            again.count_only = false;
+            again.confirm = false;
+        }
+        self.substitute(Ok(again));
     }
 
     /// Tints on page `index`, whose top-left corner is drawn at `origin`,
@@ -754,21 +818,31 @@ impl Viewer {
     }
 }
 
-/// `:s/this/that/`, `:%s/this/that/g` and `:3,7s/this/that/`: what is
-/// written as `pattern` becomes `with`, in the line of the text the
-/// cursor is in, in all of them (`%`) or in those counted; the first in
-/// each line, or with `g` all; with `i` in any case. The pattern is
-/// taken as it is written, not as Vim's regular expression: a backslash
-/// only lets the sign that parts the three stand for itself.
+/// `:s/this/that/`, `:%s/this/that/g` and `:3,7s/this/that/`: what
+/// `pattern` finds becomes `with`, in the line of the text the cursor is
+/// in, in all of them (`%`) or in those counted; the first in each line,
+/// or with `g` all; with `i` in any case (`I`: not); with `n` they are
+/// only counted, with `c` each is asked about. The pattern is Vim's
+/// regular expression, and `with` may hold `\1` and `&` (see
+/// [`zetwerk_vim::pattern`]); a backslash before the sign that parts the
+/// three lets it stand for itself. A pattern left empty is what the
+/// last search looked for, as it is written.
+#[derive(Clone)]
+#[allow(clippy::struct_excessive_bools, reason = "the flags of :s")]
 struct Substitute {
     lines: Lines,
     pattern: String,
+    /// Whether the pattern is text as it is written, not a pattern.
+    literal: bool,
     with: String,
     all: bool,
     any_case: bool,
+    count_only: bool,
+    confirm: bool,
 }
 
 /// The lines a substitution is made in.
+#[derive(Clone, Copy)]
 enum Lines {
     Cursor,
     All,
@@ -827,34 +901,37 @@ impl Substitute {
         let pattern = parts.next().unwrap_or_default();
         let with = parts.next().unwrap_or_default();
         let flags = parts.next().unwrap_or_default();
-        if pattern.is_empty() {
-            return Some(Err("nothing to look for: :s/this/that/".to_owned()));
-        }
-        if let Some(flag) = flags.chars().find(|flag| !matches!(flag, 'g' | 'i' | 'I')) {
+        let flags = flags.trim_end();
+        if let Some(flag) = flags
+            .chars()
+            .find(|flag| !matches!(flag, 'g' | 'i' | 'I' | 'n' | 'c'))
+        {
             return Some(Err(format!("not a flag of :s here: {flag}")));
         }
         Some(Ok(Self {
             lines,
             pattern,
+            literal: false,
             with,
             all: flags.contains('g'),
             any_case: flags.contains('i'),
+            count_only: flags.contains('n'),
+            confirm: flags.contains('c'),
         }))
     }
 
     /// Where in `text`, with the cursor at byte `cursor`, the pattern is
-    /// found to be replaced, in order; and where the last of them is.
-    fn edits(&self, text: &str, cursor: usize) -> (Vec<Range<usize>>, usize) {
+    /// found to be replaced, in order, and what with; or why it cannot be
+    /// looked for.
+    fn edits(&self, text: &str, cursor: usize) -> Result<Vec<(Range<usize>, String)>, String> {
+        let pattern = if self.literal {
+            Pattern::literal(&self.pattern, self.any_case)?
+        } else {
+            Pattern::with_case(&self.pattern, self.any_case)?
+        };
+        let with = Replacement::new(&self.with)?;
         let mut found = Vec::new();
         let mut start = 0;
-        let lowered = |text: &str| {
-            if self.any_case {
-                text.to_lowercase()
-            } else {
-                text.to_owned()
-            }
-        };
-        let pattern = lowered(&self.pattern);
         for (index, line) in text.split_inclusive('\n').enumerate() {
             let range = start..start + line.len();
             start = range.end;
@@ -865,24 +942,23 @@ impl Substitute {
                 Lines::All => true,
                 Lines::Counted(from, to) => (from..=to).contains(&(index + 1)),
             };
-            // Lower case where it is as long: else the places would not
-            // be those of the text.
-            let searched = lowered(line);
-            if !wanted || searched.len() != line.len() {
+            if !wanted {
                 continue;
             }
-            let mut from = 0;
-            while let Some(at) = searched[from..].find(&pattern) {
-                let at = from + at;
-                found.push(range.start + at..range.start + at + pattern.len());
-                from = at + pattern.len().max(1);
-                if !self.all || from >= searched.len() {
+            // Within the line, without its line break: `$` is its end.
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            for captures in pattern.captures(body) {
+                let Some(whole) = captures.get(0) else {
+                    continue;
+                };
+                let at = range.start + whole.start()..range.start + whole.end();
+                found.push((at, with.expand(&captures)));
+                if !self.all {
                     break;
                 }
             }
         }
-        let last = found.last().map_or(cursor, |range| range.start);
-        (found, last)
+        Ok(found)
     }
 }
 

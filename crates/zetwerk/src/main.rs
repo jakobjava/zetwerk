@@ -61,8 +61,12 @@ Settings are read from ~/.config/zetwerk/config.toml:
   block = true            it stands by itself, like a figure
   [keys.normal]           your own keys, as Vim's nnoremap
   \"<C-s>\" = \":w<CR>\"
-  [keys.insert]           and inoremap (one key each)
+  [keys.insert]           and inoremap
   \"<C-s>\" = \"<Esc>:w<CR>\"
+  \"jk\" = \"<Esc>\"
+  [keys]
+  timeoutlen = 1000       how long, in ms, the first keys of a mapping
+                          wait for the rest
 
 A file that another file includes is opened as part of that document:
 the whole document is shown, the file is what is edited.

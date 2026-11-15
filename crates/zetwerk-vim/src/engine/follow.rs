@@ -46,6 +46,12 @@ const G: &[(&str, &str, When)] = &[
         When::NoOperator,
     ),
     ("J", "join lines without a blank", When::NoOperator),
+    (
+        "; ,",
+        "to the place of an older, a newer change",
+        When::NoOperator,
+    ),
+    ("&", "the last :s again, on all lines", When::Idle),
     ("i", "type where typing was left", When::Idle),
     ("v", "the last selection again", When::Idle),
     ("o", "go to a heading", When::Idle),
@@ -151,6 +157,7 @@ const REGISTERS: &[(&str, &str)] = &[
     ("-", "what was last deleted in a line"),
     ("_", "nowhere: nothing is kept"),
     ("+", "the system clipboard, where the host has one"),
+    (":", "the last command line"),
 ];
 
 /// The keys after `m`, after `` ` `` or `'`, after `q` and after `@`.
@@ -167,10 +174,13 @@ const GOTO: &[(&str, &str)] = &[
 const RECORD: &[(&str, &str)] = &[
     ("a–z 0–9", "record keys into that register; q ends"),
     ("A–Z", "record more keys into it"),
+    (":", "the command lines entered, to run one again"),
+    ("/ ?", "the searches made, to make one again"),
 ];
 const PLAY: &[(&str, &str)] = &[
     ("a–z 0–9", "play the keys of that register"),
     ("@", "play the last played again"),
+    (":", "the last command line again"),
 ];
 
 /// What the engine waits for, and what can come next.
@@ -353,7 +363,10 @@ mod tests {
             text: TEXT.to_owned(),
         };
         let mut engine = Engine::new();
-        for press in parse(&format!("/e<CR>gg0jwvl<Esc>{keys}")).unwrap() {
+        // Changes made and taken back in each line, and the change list
+        // gone back to the middle one: `g;` and `g,` both lead somewhere.
+        let changes = "kxujxujxug;g;";
+        for press in parse(&format!("/e<CR>gg0jwvl<Esc>{changes}{keys}")).unwrap() {
             engine.key(press, &mut host);
         }
         (engine, host)

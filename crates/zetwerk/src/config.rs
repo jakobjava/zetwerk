@@ -38,6 +38,9 @@
 //! "<C-s>" = ":w<CR>"
 //! [keys.insert]
 //! "<C-s>" = "<Esc>:w<CR>"
+//! "jk" = "<Esc>"
+//! [keys]
+//! timeoutlen = 1000  # how long the first keys of a mapping wait, in ms
 //! ```
 
 use std::collections::BTreeMap;
@@ -221,6 +224,9 @@ pub struct Keys {
     pub normal: BTreeMap<String, String>,
     #[serde(default)]
     pub insert: BTreeMap<String, String>,
+    /// How long, in milliseconds, keys that may begin a mapping wait for
+    /// the next: Vim's `timeoutlen`.
+    pub timeoutlen: Option<u64>,
 }
 
 impl Keys {
@@ -233,7 +239,11 @@ impl Keys {
                 .map(|(typed, stands_for)| (typed.as_str(), stands_for.as_str()))
                 .collect()
         }
-        Keymap::parse(pairs(&self.normal), pairs(&self.insert))
+        let (keymap, complaint) = Keymap::parse(pairs(&self.normal), pairs(&self.insert));
+        match self.timeoutlen {
+            Some(millis) => (keymap.with_timeout(millis), complaint),
+            None => (keymap, complaint),
+        }
     }
 }
 
@@ -357,7 +367,13 @@ mod tests {
         assert_eq!(config.power.mode, Some(Mode::Saver));
         assert_eq!(config.keys.keymap().1, None);
         assert!(parse("[keys.normal]\n\"gx\" = 3\n").is_err());
-        let odd = parse("[keys.insert]\n\"jk\" = \"<Esc>\"\n").unwrap_or_default();
+        // Several keys in insert mode too, as Vim's `inoremap jk <Esc>`;
+        // and how long they wait for each other.
+        let jk = parse("[keys]\ntimeoutlen = 300\n[keys.insert]\n\"jk\" = \"<Esc>\"\n");
+        let jk = jk.unwrap_or_default();
+        assert_eq!(jk.keys.keymap().1, None);
+        assert_eq!(jk.keys.timeoutlen, Some(300));
+        let odd = parse("[keys.insert]\n\"\" = \"<Esc>\"\n").unwrap_or_default();
         assert!(odd.keys.keymap().1.is_some());
         assert_eq!(
             parse("[ai]\nsave = true\n").map(|config| config.ai.edit_mode),

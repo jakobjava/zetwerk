@@ -94,6 +94,72 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("feedback"),
     ),
     (
+        "replace asking at each match (c), only count them (n)",
+        ":s/x/y/gc  :s/x/y/gn",
+        Does::Tells,
+    ),
+    (
+        "the last command line again; the last :s, here, on all lines",
+        "@:  &  g&",
+        Does::Tells,
+    ),
+    (
+        "the command lines entered, the searches made, to use again",
+        "q:  q/",
+        Does::Run("q:"),
+    ),
+    (
+        "keys typed on each line; d or keys on the lines that match",
+        ":normal  :g/x/d  :v/x/d",
+        Does::Ask("normal "),
+    ),
+    (
+        "sort the lines (n: by number, u: once each, !: backwards)",
+        ":sort",
+        Does::Ask("sort "),
+    ),
+    (
+        "the text as it was some steps before, or after",
+        ":earlier 3  :later 3",
+        Does::Ask("earlier "),
+    ),
+    (
+        "what the registers hold",
+        ":registers",
+        Does::Run("registers"),
+    ),
+    ("the marks, to go to one", ":marks", Does::Run("marks")),
+    (
+        "the places jumped from, to go back to one",
+        ":jumps",
+        Does::Run("jumps"),
+    ),
+    (
+        "the places of the changes, to go to one",
+        "g;  g,  :changes",
+        Does::Run("changes"),
+    ),
+    (
+        "a number one larger, one smaller",
+        "Ctrl-A  Ctrl-X",
+        Does::Tells,
+    ),
+    (
+        "select a block of columns; on a page, of cells of a table",
+        "Ctrl-V",
+        Does::Tells,
+    ),
+    (
+        "back to the place to fill in before; up the list",
+        "Shift-Tab",
+        Does::Tells,
+    ),
+    (
+        "a line break within the paragraph (typing on a page)",
+        "Shift-Enter",
+        Does::Tells,
+    ),
+    (
         "join this paragraph with the next; part it at a blank",
         "J  r Enter",
         Does::Tells,

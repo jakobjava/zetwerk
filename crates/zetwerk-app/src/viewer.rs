@@ -10,6 +10,7 @@ pub mod agent;
 mod aids;
 mod assist;
 mod buffers;
+mod cells;
 pub mod export;
 mod figures;
 mod find;
@@ -40,6 +41,7 @@ mod sources_undo;
 pub mod start;
 mod structure;
 mod styles;
+mod vim;
 mod waiting;
 mod written;
 
@@ -827,6 +829,11 @@ pub struct Viewer {
     /// of them.
     keymap: Keymap,
     typed: Vec<KeyPress>,
+    /// When the keys typed are taken as they are, and how to take back
+    /// those of them typed already (see `keymap`).
+    mapping: keymap::Waiting,
+    /// What Vim's keys that the window carries out keep (see `vim`).
+    vim: vim::Vim,
     /// The revision that document was compiled from. Differs from
     /// `compiled_revision` while the newest text has errors.
     document_revision: Option<u64>,
@@ -978,6 +985,8 @@ impl Viewer {
             equation_set: false,
             keymap: Keymap::default(),
             typed: Vec::new(),
+            mapping: keymap::Waiting::default(),
+            vim: vim::Vim::default(),
             document_revision: None,
             predicted: None,
             changed: None,
@@ -1738,7 +1747,8 @@ impl Viewer {
     /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
         self.message = None;
-        if self.stop_key(press) {
+        let press = self.shift_enter(press);
+        if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
             return;
         }
         if self.grid.is_some() {
@@ -2101,6 +2111,7 @@ impl Viewer {
             || self.language_command(command)
             || self.notes_command(command)
             || self.refused_command(command)
+            || self.vim_command(command)
         {
             return;
         }
@@ -2479,7 +2490,7 @@ impl Viewer {
         let Some(change) = self.places() else {
             return;
         };
-        let agent_marks = self.agent_marks();
+        let (agent_marks, cells) = (self.agent_marks(), self.cell_marks());
         let (Some(editor), Some(document), Some(world)) =
             (&self.editor, &self.document, &self.compiled_world)
         else {
@@ -2511,7 +2522,8 @@ impl Viewer {
             };
             marked.push((range, colour));
         }
-        marked.extend(editor.selection().map(|range| (range, PAGE_SELECTION)));
+        let selected = editor.selections().into_iter().chain(cells);
+        marked.extend(selected.map(|range| (range, PAGE_SELECTION)));
         for (range, colour) in marked {
             let mut range = change.back_or_edge(range.start)..change.back_or_edge(range.end);
             if range.is_empty() {
@@ -2754,7 +2766,7 @@ impl Viewer {
         self.source_metrics = (gutter, cell, row_height);
         let top = self.pointer.top(editor, columns, visible, SCROLL_MARGIN);
         editor.set_view(columns, visible);
-        let (cursor, selection, mode) = (editor.cursor(), editor.selection(), editor.mode());
+        let (cursor, selections, mode) = (editor.cursor(), editor.selections(), editor.mode());
         let rows = editor.rows(columns);
         let shown: Vec<editor::Row> = rows.iter().skip(top).take(visible + 1).cloned().collect();
         let last_row_of_line: Vec<bool> = (top..top + shown.len())
@@ -2788,10 +2800,10 @@ impl Viewer {
                     solid(scene, has, colour, (from, y, width, row_height));
                 }
             }
-            if let Some(selection) = &selection
-                && selection.start <= row.range.end
-                && selection.end > row.range.start
-            {
+            for selection in &selections {
+                if !(selection.start <= row.range.end && selection.end > row.range.start) {
+                    continue;
+                }
                 // A selection that goes on past the end of a line takes
                 // its line break, shown as one more cell.
                 let line_break = last_row_of_line[index] && selection.end > row.range.end;
@@ -3229,6 +3241,7 @@ mod tests {
     mod speed;
     mod typing;
     mod typist;
+    mod vim;
     mod waits;
 
     /// A viewer in an 800×620 window showing `pages` A4 pages.

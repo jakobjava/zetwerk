@@ -12,8 +12,11 @@ use std::ops::Range;
 use typst::syntax::{LinkedNode, Side, Source, SyntaxKind};
 use zetwerk_vim::Format;
 
+mod back;
 mod shown;
 mod slots;
+
+pub use back::{line_break_within, prev_field};
 
 pub use shown::{breaks, cuts, join, letters, put_over, raw_blank};
 pub use shown::{parted, pieces};

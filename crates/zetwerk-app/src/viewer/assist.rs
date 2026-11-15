@@ -275,7 +275,7 @@ impl Viewer {
         );
         let previous = matches!(
             (press.key, press.ctrl),
-            (Key::Char('p'), true) | (Key::Up, _)
+            (Key::Char('p'), true) | (Key::Up | Key::BackTab, _)
         );
         let take = matches!(
             (press.key, press.ctrl),
