@@ -333,6 +333,7 @@ fn shown_bytes(text: &str, places: &[Range<usize>]) -> Vec<bool> {
 /// Which bytes of `before` are gone from `after`, and which of `after`
 /// are new, by the longest run the two have in common around what
 /// changed.
+#[allow(clippy::many_single_char_names, reason = "the names of the textbook")]
 fn changed(before: &str, after: &str) -> (Vec<bool>, Vec<bool>) {
     let (a, b) = (before.as_bytes(), after.as_bytes());
     // The end first: what went is taken to begin where it can begin
@@ -454,7 +455,8 @@ fn hidden_gone(before: &Source, shown: &[bool], gone: &[bool], joins: bool) -> V
             node.kind(),
             SyntaxKind::LineComment | SyntaxKind::BlockComment
         ) && all_gone(line_start..line_end);
-        if !(whole && showed) && !comment {
+        let along = whole && showed;
+        if !along && !comment {
             wrong.push(format!(
                 "{:?} of {:?} went",
                 &text[node.range()],
@@ -494,6 +496,7 @@ const LOSES_HIDDEN: &[&str] = &["db", "dB", "de", "dd", "2dd", "dk", "vjd", "d3w
 /// Typst could read before, it reads after, and nothing the page does
 /// not show went while what it is part of stayed. An `X` typed goes
 /// into what is shown, never into code.
+#[allow(clippy::too_many_lines, reason = "one check after the other")]
 fn sweep(keys: &[&str]) {
     let text = format!("{PAGE}{EVERYTHING}");
     let directory = directory(&text);

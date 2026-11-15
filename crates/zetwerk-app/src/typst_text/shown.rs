@@ -143,12 +143,12 @@ pub fn letters(source: &Source, range: &Range<usize>) -> Vec<Range<usize>> {
         if here.end <= range.start || here.start >= range.end {
             return;
         }
-        let note = node.kind() == SyntaxKind::FuncCall
+        let footnote = node.kind() == SyntaxKind::FuncCall
             && node
                 .children()
                 .next()
                 .is_some_and(|callee| callee.leaf_text() == "footnote");
-        if note && !(here.start < range.start && range.end < here.end) {
+        if footnote && !(here.start < range.start && range.end < here.end) {
             return;
         }
         if matches!(node.kind(), SyntaxKind::Text | SyntaxKind::MathText) {

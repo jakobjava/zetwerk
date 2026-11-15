@@ -1011,8 +1011,9 @@ fn an_equation_selected_whole_is_all_that_goes() {
         ("A b.\n\n$ x + y $\n\nC d.\n", "A b.\n\n\n\nC d.\n"),
         (
             "A b.\n\n#math.equation(block: true, numbering: \"(1)\", $ x + y $)\n\nC d.\n",
-            // One given to a function stays: the function would lack it.
-            "A b.\n\n#math.equation(block: true, numbering: \"(1)\", $ x + y $)\n\nC d.\n",
+            // One given to a function that shows nothing else goes with
+            // it: the writer deletes the equation (see `hidden.rs`).
+            "A b.\n\n\n\nC d.\n",
         ),
     ] {
         let (viewer, directory) = typed(text, "x", "va$d");
