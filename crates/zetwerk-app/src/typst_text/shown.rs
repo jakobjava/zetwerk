@@ -278,7 +278,34 @@ pub fn parted(source: &Source, range: Range<usize>) -> bool {
             })
             .map(LinkedNode::range)
     };
-    part(range.start) != part(range.end)
+    // Nor into a comment, nor across a line break onto the line of a
+    // comment or of code: neither shows, and the text joined to it would
+    // not show either, or would be code.
+    let root = LinkedNode::new(source.root());
+    let comment = |leaf: &LinkedNode| {
+        matches!(
+            leaf.kind(),
+            SyntaxKind::LineComment | SyntaxKind::BlockComment
+        )
+    };
+    let cuts = |at: usize| {
+        root.leaf_at(at, Side::After)
+            .is_some_and(|leaf| comment(&leaf) && leaf.range().start < at && at < leaf.range().end)
+    };
+    let breaks = text.get(range.clone()).is_some_and(|it| it.contains('\n'));
+    let after_hidden = range.start.checked_sub(1).is_some_and(|before| {
+        ground(source, before) == Ground::Code
+            || root
+                .leaf_at(range.start, Side::Before)
+                .is_some_and(|leaf| comment(&leaf))
+    });
+    let before_hidden = root.leaf_at(range.end, Side::After).is_some_and(|leaf| {
+        (comment(&leaf) || leaf.kind() == SyntaxKind::Hash) && leaf.range().start == range.end
+    });
+    cuts(range.start)
+        || cuts(range.end)
+        || (breaks && (after_hidden || before_hidden))
+        || part(range.start) != part(range.end)
 }
 
 /// What deleting bytes `range` of `source` takes where only pages are

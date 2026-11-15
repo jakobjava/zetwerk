@@ -322,6 +322,37 @@ fn backspace_leaves_labels_and_code_before_a_paragraph_alone() {
 }
 
 #[test]
+fn backspace_and_delete_take_nothing_into_a_comment() {
+    // The paragraph behind a comment went into it, and from the page;
+    // the next Backspace took a letter of the comment.
+    let cases = [
+        ("// note\nText here.\n", "/Text<CR>i<BS><BS>"),
+        ("/* note */\nText here.\n", "/Text<CR>i<BS><BS>"),
+        ("Text here.\n// note\n", "/here<CR>A<Del><Del>"),
+        ("Text here.\n/* note */\n", "/here<CR>A<Del><Del>"),
+    ];
+    for (text, keys) in cases {
+        let after = typed(text, keys);
+        assert_eq!(after.replace('|', ""), text, "{keys:?} in {text:?}");
+    }
+    // Nor, typing faster than the page is typeset, into code.
+    for (text, keys) in [
+        ("#let x = 1\nText after.\n", "/Text<CR>ix<BS><BS><BS><Esc>"),
+        (
+            "Text after.\n#let x = 1\n",
+            "/after<CR>Ax<BS><Del><Del><Esc>",
+        ),
+    ] {
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "gsgs");
+        compile(&mut viewer);
+        press(&mut viewer, keys);
+        assert_eq!(viewer.text(), Some(text), "{keys:?}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 #[ignore = "probe"]
 fn probe() {
     let cases: Vec<(String, String)> =
