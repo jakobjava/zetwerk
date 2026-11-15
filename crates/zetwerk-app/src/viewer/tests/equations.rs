@@ -1019,3 +1019,19 @@ fn bold_begun_right_behind_a_letter_stays_bold() {
     settled(&mut viewer);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn text_begun_in_an_equation_and_left_empty_goes() {
+    // A quotation mark typed in an equation comes with the one that
+    // closes it; left so, the two stayed, showing as nothing.
+    for (keys, left) in [("a\"<Esc>", "A $x$ b.\n"), ("a \"\"<Esc>", "A $x $ b.\n")] {
+        let (mut viewer, directory) = typed("A $x$ b.\n", "x", keys);
+        assert_eq!(viewer.text(), Some(left), "{keys}");
+        settled(&mut viewer);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+    // Text with something in it stays, and so does an equation of it.
+    let (viewer, directory) = typed("A $x$ b.\n", "x", "a \"if\"<Esc>");
+    assert_eq!(viewer.text(), Some("A $x \"if\"$ b.\n"));
+    let _ = std::fs::remove_dir_all(directory);
+}

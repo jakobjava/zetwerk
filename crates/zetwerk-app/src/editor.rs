@@ -174,6 +174,9 @@ impl Editor {
                 self.part_put();
             }
             let left = typing && self.engine.mode() != Mode::Insert;
+            if left {
+                self.clear_empty_text(here);
+            }
             if self.document.text().len() < length || left {
                 self.clear_empty_equation(here);
                 // A deletion from one equation into the next empties
@@ -322,6 +325,48 @@ impl Editor {
         if letter(before.chars().next_back()) && letter(put.chars().next()) {
             replaces.push(Replace::new(range.start..range.start, " "));
             cursor += usize::from(cursor >= range.start);
+        }
+        if replaces.is_empty() {
+            return;
+        }
+        if let Err(err) = self.document.edit(&replaces, true) {
+            self.failure = Some(err.to_string());
+            return;
+        }
+        self.engine.set_cursor(cursor, self.document.text());
+    }
+
+    /// When typing is over: text begun in the equation the cursor was in
+    /// (`here`, see [`Editor::equation_here`]) and left with nothing in it,
+    /// `""`, which shows as nothing, goes.
+    fn clear_empty_text(&mut self, here: Option<(usize, bool)>) {
+        let Some((start, _)) = here else {
+            return;
+        };
+        let source = &self.document.buffer().0;
+        let Some(equation) = crate::typst_text::equation_at(source, start + 1)
+            .filter(|equation| equation.start == start)
+            .filter(|equation| crate::typst_text::is_whole_equation(source, equation))
+        else {
+            return;
+        };
+        let text = source.text();
+        let mut cursor = self.engine.cursor();
+        let mut replaces = Vec::new();
+        // From the last: the bytes before it stay where they are.
+        for empty in crate::typst_text::empty_scripts(source, &equation)
+            .into_iter()
+            .rev()
+        {
+            if text.get(empty.clone()) != Some("\"\"") {
+                continue;
+            }
+            if empty.end <= cursor {
+                cursor -= empty.len();
+            } else if empty.start < cursor {
+                cursor = empty.start;
+            }
+            replaces.push(Replace::new(empty, ""));
         }
         if replaces.is_empty() {
             return;
