@@ -325,6 +325,12 @@ impl Region {
         // (the number of an item of a list, of a heading) is of the
         // element it is in.
         let mut open: Vec<(Location, bool)> = Vec::new();
+        // The marks of the elements of the nodes that begin right before
+        // the first item and end right behind the last go with them:
+        // where the first of them is, how far the last reaches, and which
+        // elements they are.
+        let (mut lead, mut tail, mut ending) = (None, None, false);
+        let mut inside: HashSet<Location> = HashSet::new();
         for (index, (position, item)) in frame.items().enumerate() {
             // What is below the line above the footnotes is not looked
             // at: the notes stay as they are.
@@ -337,13 +343,43 @@ impl Region {
                     .shows(numbers, item)
                     .or_else(|| open.last().is_some_and(|(_, of)| *of).then_some(true)),
             };
+            let before = open.len();
             self.follow(numbers, item, &mut open);
+            match item {
+                FrameItem::Tag(Tag::Start(element, _)) if open.len() > before => {
+                    let of = open.last().is_some_and(|(_, of)| *of);
+                    if of {
+                        inside.extend(element.location());
+                        if run.is_none() {
+                            lead.get_or_insert(index);
+                        }
+                    } else if run.is_none() {
+                        (lead, inside) = (None, HashSet::new());
+                    }
+                    ending = false;
+                }
+                FrameItem::Tag(Tag::End(location, ..)) => {
+                    if run.is_some() && ending && inside.contains(location) {
+                        tail = Some(index + 1);
+                    } else if run.is_none() && !inside.contains(location) {
+                        (lead, inside) = (None, HashSet::new());
+                    }
+                }
+                FrameItem::Tag(_) => {}
+                _ if shows == Some(true) => ending = true,
+                _ => {
+                    ending = false;
+                    if run.is_none() {
+                        (lead, inside) = (None, HashSet::new());
+                    }
+                }
+            }
             match shows {
                 Some(true) => {
                     let (top, bottom) = extent(*position, item);
                     run = Some(match run {
                         None => Run {
-                            items: index..index + 1,
+                            items: lead.unwrap_or(index)..index + 1,
                             top,
                             bottom,
                         },
@@ -354,10 +390,14 @@ impl Region {
                             bottom: run.bottom.max(bottom),
                         },
                     });
+                    tail = None;
                 }
                 Some(false) if run.is_some() => others += 1,
                 _ => {}
             }
+        }
+        if let (Some(run), Some(tail)) = (run.as_mut(), tail) {
+            run.items.end = tail;
         }
         Ok(run)
     }

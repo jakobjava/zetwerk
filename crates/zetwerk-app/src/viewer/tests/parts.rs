@@ -381,3 +381,16 @@ fn a_list_item_with_no_text_yet_is_taken_out_where_it_stands() {
         }
     }
 }
+
+#[test]
+fn what_is_worked_out_from_where_it_stands_is_typeset_whole() {
+    // A part is typeset on a first page of its own: the number of the
+    // page it is on, or of the headings before it, came out otherwise.
+    let text = format!(
+        "#set page(width: 300pt, height: 200pt)\n\n{}On page #context counter(page).display() of \
+         the text, $y$ here.\n\n{}",
+        paragraphs(5),
+        paragraphs(1)
+    );
+    assert_eq!(after_keys(&text, "$y", true, "a^2"), None);
+}
