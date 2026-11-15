@@ -358,14 +358,51 @@ fn a_list_of_files_and_the_completions_are_not_up_at_once() {
         .picker
         .as_ref()
         .map(|picker| picker.listing().1.len());
-    println!(
-        "completion {completion}, picker {picker:?}, text {:?}",
-        viewer.text()
-    );
-    assert!(picker.is_some(), "the files are offered");
+    assert_eq!(picker, Some(2), "the files are offered");
     assert!(!completion, "and nothing else");
     // Escape leaves the list and nothing else.
     press(&mut viewer, "<Esc>");
     assert!(viewer.picker.is_none());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+#[ignore = "exploration: an agent's change while the user looks through the history"]
+fn an_agent_changes_the_text_while_the_user_looks_back() {
+    let (mut viewer, directory) = editing("Broken #nope(\n");
+    press(&mut viewer, "ccFixed text.<Esc>");
+    compile(&mut viewer);
+    println!(
+        "now: {:?} problems {:?}",
+        viewer.text(),
+        viewer.state().problems
+    );
+    press(&mut viewer, "gh<Down>");
+    compile(&mut viewer);
+    println!(
+        "looking back: problems {:?} looks_back {}",
+        viewer.state().problems,
+        viewer.looks_back()
+    );
+    viewer
+        .agent_replace("Fixed", "Fine", false, None, false)
+        .unwrap();
+    compile(&mut viewer);
+    let state = viewer.state();
+    println!(
+        "after the agent: text {:?} revision {} compiled {:?} problems {:?} is_compiled {}",
+        viewer.text(),
+        state.revision,
+        state.compiled_revision,
+        state.problems,
+        viewer.is_compiled()
+    );
+    press(&mut viewer, "<Esc>");
+    compile(&mut viewer);
+    println!(
+        "after escape: {:?} problems {:?}",
+        viewer.text(),
+        viewer.state().problems
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }

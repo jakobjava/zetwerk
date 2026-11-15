@@ -261,10 +261,20 @@ impl Editor for Bridge {
             })),
             Outcome::Changed { revision, lines } => {
                 // What the compiler says to the text as it is by then.
-                let (state, now) = self.compiled(|viewer| {
+                let (state, now, back) = self.compiled(|viewer| {
                     let state = viewer.state();
-                    (state.clone(), state.revision)
+                    (state.clone(), state.revision, viewer.pages_look_back())
                 })?;
+                if back {
+                    return Ok(json!({
+                        "applied": true,
+                        "revision": revision,
+                        "first_line": lines.0,
+                        "last_line": lines.1,
+                        "diagnostics": null,
+                        "note": LOOKING_BACK,
+                    }));
+                }
                 let (diagnostics, more) = some_of(&state.problems);
                 Ok(json!({
                     "applied": true,
@@ -281,7 +291,10 @@ impl Editor for Bridge {
     }
 
     fn diagnostics(&self) -> Result<Value, String> {
-        let state = self.compiled(|viewer| viewer.state())?;
+        let (state, back) = self.compiled(|viewer| (viewer.state(), viewer.pages_look_back()))?;
+        if back {
+            return Err(LOOKING_BACK.to_owned());
+        }
         let (diagnostics, more) = some_of(&state.problems);
         Ok(json!({
             "revision": state.revision,
@@ -645,6 +658,12 @@ pub fn encode(screenshot: Screenshot) -> Result<Vec<u8>, String> {
         .map_err(|err| format!("cannot encode the screenshot: {err}"))
 }
 
+/// Why what the compiler says is not known: the pages are of another
+/// state of the text.
+const LOOKING_BACK: &str = "the user is looking through the history of the text: the pages \
+                            show another state of it, and what the compiler says of the \
+                            text is not known; ask get_diagnostics again in a moment";
+
 /// More errors than this are not listed: one slip (an unclosed bracket)
 /// makes hundreds, and the first ones say what it is.
 const MAX_DIAGNOSTICS: usize = 20;
@@ -901,6 +920,28 @@ mod tests {
         assert!(bridge.export_pdf(Some("notes.txt"), None).is_err());
         bridge.export_pdf(Some("copy.pdf"), None).unwrap();
         assert!(session.directory.join("copy.pdf").is_file());
+    }
+
+    #[test]
+    fn an_agent_is_not_told_the_errors_of_a_state_the_user_looks_back_at() {
+        let session = session("Broken #nope(\n", AgentEdits::Live);
+        let bridge = &session.bridge;
+        bridge.send_keys("ccFixed text.<Esc>").unwrap();
+        assert_eq!(bridge.diagnostics().unwrap()["diagnostics"], json!([]));
+        // The user looks at the text as it was, which did not compile.
+        bridge.send_keys("gh<Down>").unwrap();
+        let changed = bridge.change(replace("Fixed", "Fine", None)).unwrap();
+        assert_eq!(changed["applied"], true);
+        assert!(
+            !changed.to_string().contains("unclosed"),
+            "the old state's errors are not the change's: {changed}"
+        );
+        assert!(bridge.diagnostics().is_err());
+        let headings = bridge.outline().unwrap();
+        assert_eq!(headings["headings"], json!([]));
+        // Back at the text: what is said is of it.
+        bridge.send_keys("<Esc>").unwrap();
+        assert_eq!(bridge.diagnostics().unwrap()["diagnostics"], json!([]));
     }
 
     #[test]
