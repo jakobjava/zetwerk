@@ -990,3 +990,22 @@ fn what_is_put_into_an_equation_keeps_the_symbols_beside_it() {
     settled(&mut viewer);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn an_equation_selected_whole_is_all_that_goes() {
+    // `va$` ended the selection on the dollar sign that closes the
+    // equation, which shows as nothing; it was moved on to what is shown
+    // next, the first letter of the next paragraph, and `d` took that,
+    // the label and the bracket of the call between.
+    for (text, left) in [
+        ("A b.\n\n$ x + y $\n\nC d.\n", "A b.\n\n\n\nC d.\n"),
+        (
+            "A b.\n\n#math.equation(block: true, numbering: \"(1)\", $ x + y $)\n\nC d.\n",
+            "A b.\n\n#math.equation(block: true, numbering: \"(1)\", )\n\nC d.\n",
+        ),
+    ] {
+        let (viewer, directory) = typed(text, "x", "va$d");
+        assert_eq!(viewer.text(), Some(left), "{text:?}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

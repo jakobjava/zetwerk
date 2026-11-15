@@ -522,6 +522,9 @@ pub struct Engine {
     searches: u64,
     /// What the last key yanked, deleted or put.
     took: Option<Took>,
+    /// Whether the last key selected a text object, whose ends are where
+    /// they are: not moved to rest on what the host shows.
+    selected_object: bool,
     /// Whether `j` and `k` go by the rows the host shows instead of by
     /// lines of the text, as `gj` and `gk` always do where it shows any.
     rows_first: bool,
@@ -616,6 +619,7 @@ impl Engine {
             last_search: None,
             searches: 0,
             took: None,
+            selected_object: false,
             rows_first: false,
             pairs: false,
             line_select: false,
@@ -816,6 +820,7 @@ impl Engine {
     pub fn key(&mut self, press: KeyPress, host: &mut impl Host) -> Vec<Effect> {
         let before = self.cursor;
         self.took = None;
+        self.selected_object = false;
         let effects = self.key_as_typed(press, host);
         self.rest_on_shown(before, host);
         effects
@@ -831,6 +836,13 @@ impl Engine {
         }
         self.extent = None;
         if !self.rows_first || !matches!(self.mode, Mode::Normal | Mode::Visual) {
+            return;
+        }
+        // A text object selected ends where it ends: moved on to what is
+        // shown next (behind the dollar sign that closes an equation, the
+        // next paragraph) the selection would take more than it.
+        if self.selected_object {
+            self.extent = None;
             return;
         }
         let rest = |at: usize, forward: bool| {
@@ -2276,6 +2288,7 @@ impl Engine {
         if visual {
             self.wanted_column = None;
             if found.end > found.start {
+                self.selected_object = true;
                 self.anchor = found.start;
                 self.cursor = text.prev(found.end);
                 if found.linewise {
