@@ -182,6 +182,8 @@ fn notation(keys: &[KeyPress]) -> String {
             Key::Backspace => "BS".to_owned(),
             Key::Delete => "Del".to_owned(),
             Key::Tab => "Tab".to_owned(),
+            Key::BackTab => "S-Tab".to_owned(),
+            Key::ShiftEnter => "S-CR".to_owned(),
             Key::Text(_) => continue,
             other => format!("{other:?}"),
         };

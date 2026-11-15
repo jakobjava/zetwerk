@@ -1199,6 +1199,11 @@ impl Host for DocumentHost<'_> {
             .then(|| crate::typst_text::tab_key(&self.document.buffer().0, at))?
     }
 
+    fn prev_field(&self, at: usize) -> Option<usize> {
+        matches!(self.rows, RowsOf::Pages(_))
+            .then(|| crate::typst_text::prev_field(&self.document.buffer().0, at))?
+    }
+
     fn stop(&self, at: usize, seek: Seek) -> Option<Range<usize>> {
         // The dollar sign that closes an equation with nothing in it is
         // the place to fill in, which is no bytes: also before the pages

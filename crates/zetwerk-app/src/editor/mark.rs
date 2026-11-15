@@ -93,3 +93,16 @@ impl Editor {
         changed
     }
 }
+
+impl Editor {
+    /// What is selected, as parts of the text: the one range of a
+    /// selection, or the range in each line of a block (Ctrl-V). Empty
+    /// where nothing is.
+    #[must_use]
+    pub fn selections(&self) -> Vec<std::ops::Range<usize>> {
+        let text = self.document.text();
+        self.engine
+            .block(text)
+            .unwrap_or_else(|| self.engine.selection(text).into_iter().collect())
+    }
+}

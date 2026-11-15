@@ -447,11 +447,14 @@ impl Session {
                 let Some(key) = translate(&event.logical_key, event.text.as_deref(), ctrl) else {
                     return;
                 };
-                self.viewer.key(KeyPress {
-                    key,
+                let key = shifted(key, self.modifiers.shift_key());
+                let alt = alt_held(
+                    event.text.as_deref(),
                     ctrl,
-                    alt: self.modifiers.alt_key(),
-                });
+                    self.modifiers.alt_key(),
+                    cfg!(target_os = "macos"),
+                );
+                self.viewer.key(KeyPress { key, ctrl, alt });
                 self.after_keys();
             }
             WindowEvent::MouseInput {
@@ -713,9 +716,57 @@ fn translate(key: &WinitKey, text: Option<&str>, ctrl: bool) -> Option<Key> {
     })
 }
 
+/// `key` as it is with Shift held: Tab and Enter have a meaning of their
+/// own then. (Characters have Shift in them already.)
+fn shifted(key: Key, shift: bool) -> Key {
+    match key {
+        Key::Tab if shift => Key::BackTab,
+        Key::Enter if shift => Key::ShiftEnter,
+        key => key,
+    }
+}
+
+/// Whether a key counts as pressed with Alt. On a Mac, Option (which is
+/// Alt) is how many characters are typed, as AltGr is elsewhere: a
+/// character it typed (`text`, without Ctrl) is that character, not
+/// Alt and a key. Elsewhere Alt is Alt (AltGr is not reported as it).
+fn alt_held(text: Option<&str>, ctrl: bool, alt: bool, mac: bool) -> bool {
+    let typed = text.is_some_and(|text| {
+        let mut chars = text.chars();
+        chars
+            .next()
+            .is_some_and(|first| chars.next().is_none() && !first.is_control())
+    });
+    alt && !(mac && typed && !ctrl)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_tab_and_shift_enter_are_keys_of_their_own() {
+        assert_eq!(shifted(Key::Tab, true), Key::BackTab);
+        assert_eq!(shifted(Key::Enter, true), Key::ShiftEnter);
+        assert_eq!(shifted(Key::Tab, false), Key::Tab);
+        // Shift is in a character already, and an arrow is an arrow.
+        assert_eq!(shifted(Key::Char('A'), true), Key::Char('A'));
+        assert_eq!(shifted(Key::Left, true), Key::Left);
+    }
+
+    #[test]
+    fn a_character_typed_with_option_on_a_mac_is_that_character() {
+        // Option-2 on a German Mac types `@`: no Alt, so that it can be
+        // typed on the command line too.
+        assert!(!alt_held(Some("@"), false, true, true));
+        assert!(!alt_held(Some("\u{e5}"), false, true, true));
+        // Option with a key that types nothing (a dead key, an arrow) is
+        // still Alt, as is Alt everywhere else.
+        assert!(alt_held(None, false, true, true));
+        assert!(alt_held(Some("x"), false, true, false));
+        assert!(alt_held(Some("\u{1b}"), false, true, true));
+        assert!(!alt_held(Some("@"), false, false, true));
+    }
 
     #[test]
     fn keyboard_dead_keys_and_compose_type_what_they_make() {

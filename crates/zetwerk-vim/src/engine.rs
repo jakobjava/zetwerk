@@ -11,7 +11,9 @@ use crate::object::{self, Object};
 use crate::text::{Class, Text};
 use crate::took::Took;
 
+mod block;
 mod follow;
+mod more;
 mod read;
 mod shown;
 
@@ -147,6 +149,13 @@ pub trait Host {
     /// cell of a table Tab makes a row), what with, and how far into
     /// that the cursor goes.
     fn next_field(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
+        let _ = at;
+        None
+    }
+
+    /// Where Shift-Tab leads from byte `at`: back to the place to fill in
+    /// before the one `at` is in, as [`Host::next_field`] leads on.
+    fn prev_field(&self, at: usize) -> Option<usize> {
         let _ = at;
         None
     }
@@ -627,6 +636,8 @@ pub struct Engine {
     repeatable: bool,
     last_change: Option<Recorded>,
     effects: Vec<Effect>,
+    /// What the keys that came late keep (see `more`).
+    more: more::More,
 }
 
 impl Default for Engine {
@@ -700,6 +711,7 @@ impl Engine {
             repeatable: true,
             last_change: None,
             effects: Vec::new(),
+            more: more::More::default(),
         }
     }
 
@@ -1089,6 +1101,12 @@ impl Engine {
             press.key == Key::Delete && !matches!(self.mode, Mode::Insert | Mode::Command);
         let press = if deletes {
             KeyPress::plain(Key::Char('x'))
+        } else if press.key == Key::ShiftEnter {
+            // What else Shift-Enter is, the host makes of it before.
+            KeyPress {
+                key: Key::Enter,
+                ..press
+            }
         } else if press.ctrl && press.key == Key::Char('h') {
             // Ctrl-H is Backspace, as it is in Vim: in every mode.
             KeyPress::plain(Key::Backspace)
@@ -1242,6 +1260,7 @@ impl Engine {
             Mode::Visual
         };
         self.line_select = false;
+        self.more.block = false;
         self.reselected = false;
         self.anchor = clamp(text, anchor, true);
         self.cursor = clamp(text, cursor, true);
@@ -1385,6 +1404,7 @@ impl Engine {
         self.prev_jump.iter_mut().for_each(shift);
         self.jumps.iter_mut().for_each(shift);
         self.last_insert.iter_mut().for_each(shift);
+        self.more.shift(start, old_end, new_end);
         if let Some((anchor, cursor, _)) = &mut self.last_visual {
             shift(anchor);
             shift(cursor);
@@ -1404,6 +1424,8 @@ impl Engine {
             self.redo_cursors.clear();
         }
         self.shift_marks(range.start, range.end, range.start + text.len());
+        self.more
+            .changed(Text(host.text()), range.start, !self.joined);
         host.edit(
             &[Edit {
                 range,
@@ -1593,6 +1615,9 @@ impl Engine {
 
     #[allow(clippy::too_many_lines, reason = "one arm per key of the grammar")]
     fn normal_key(&mut self, press: KeyPress, host: &mut impl Host) {
+        if self.more.block && self.block_key(press, host) {
+            return;
+        }
         let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
         match std::mem::take(&mut self.pending.awaiting) {
             Awaiting::Nothing => {}
@@ -1661,6 +1686,9 @@ impl Engine {
             }
             Awaiting::Record => {
                 self.reset_pending();
+                if self.list_command_lines(press) {
+                    return;
+                }
                 match press.key {
                     Key::Char(name) if name.is_ascii_alphanumeric() => {
                         self.recording = Some((name, Vec::new()));
@@ -1672,6 +1700,9 @@ impl Engine {
             Awaiting::Play => {
                 let (count, _) = self.take_count();
                 self.reset_pending();
+                if self.play_command_line(press, count) {
+                    return;
+                }
                 let name = match press.key {
                     Key::Char('@') => self.last_macro,
                     Key::Char(name) => Some(name.to_ascii_lowercase()),
@@ -1803,7 +1834,7 @@ impl Engine {
             return;
         };
 
-        if press.ctrl && c == '^' && self.pending.is_idle() && !self.selecting() {
+        if press.ctrl && matches!(c, '^' | '6') && self.pending.is_idle() && !self.selecting() {
             // To the file that was edited before this one.
             self.effects.push(Effect::Command("b#".to_owned()));
             return;
@@ -1849,6 +1880,10 @@ impl Engine {
                 }
                 'o' | 'i' if !visual && self.pending.operator.is_none() => {
                     self.jump_list(c == 'o', host);
+                }
+                'v' if self.pending.operator.is_none() => self.block_toggle(host),
+                'a' | 'x' if !visual && self.pending.operator.is_none() => {
+                    self.add_to_number(if c == 'a' { 1 } else { -1 }, host);
                 }
                 'c' | '[' => {
                     self.reset_pending();
@@ -2116,6 +2151,8 @@ impl Engine {
                 self.joined = false;
             }
             '.' => self.repeat(host),
+            // `:s` again, on this line, without its flags.
+            '&' => self.effects.push(Effect::Command("&".to_owned())),
             _ => self.fail(),
         }
     }
@@ -2297,6 +2334,12 @@ impl Engine {
             // visual mode too, to extend the selection.
             'w' if self.pending.is_idle() => {
                 self.effects.push(Effect::Command("jump".to_owned()));
+            }
+            // The change list, back and on.
+            ';' | ',' if self.pending.operator.is_none() => self.change_list(c == ';', host),
+            // `:s` again, on all lines, with its flags.
+            '&' if self.pending.is_idle() && !self.selecting() => {
+                self.effects.push(Effect::Command("%&&".to_owned()));
             }
             _ => self.fail(),
         }
@@ -3483,6 +3526,9 @@ impl Engine {
     // ---- Other normal-mode commands ---------------------------------------
 
     fn put(&mut self, after: bool, host: &mut impl Host) {
+        if self.put_block(after, host) {
+            return;
+        }
         let (count, _) = self.take_count();
         let name = self.pending.register.take().unwrap_or('"');
         self.reset_pending();
@@ -4249,6 +4295,12 @@ impl Engine {
                 let column = text.column(self.cursor);
                 self.insert_text(&" ".repeat(SHIFT_WIDTH - column % SHIFT_WIDTH), host);
             }
+            (Key::BackTab, _) => {
+                let Some(to) = host.prev_field(self.cursor) else {
+                    return false;
+                };
+                self.cursor = to.min(host.text().len());
+            }
             (Key::Backspace, _) => return self.insert_backspace(host),
             (Key::Delete, _) => {
                 // What is behind the cursor: what the host shows there,
@@ -4669,6 +4721,7 @@ impl Engine {
     }
 
     fn leave_insert(&mut self, host: &mut impl Host) {
+        self.end_block_insert(host);
         if self.insert_moved {
             // The insert `.` repeats was settled when the cursor moved.
             self.repeatable = false;
@@ -4699,6 +4752,9 @@ impl Engine {
     // ---- Command line ------------------------------------------------------
 
     fn command_key(&mut self, press: KeyPress, host: &mut impl Host) {
+        if self.command_line_key(press, host) {
+            return;
+        }
         let cancel = |engine: &mut Self| {
             engine.mode = engine.prompt_return;
             engine.reset_pending();
@@ -4916,6 +4972,8 @@ fn key_of(c: char) -> KeyPress {
         '\u{e007}' => special(Key::PageUp),
         '\u{e008}' => special(Key::PageDown),
         '\u{e009}' => special(Key::Delete),
+        '\u{e00a}' => special(Key::BackTab),
+        '\u{e00b}' => special(Key::ShiftEnter),
         '\u{e100}'..='\u{f8ff}' => special(Key::Text(c as u32 - TEXT_KEYS)),
         '\u{1}'..='\u{1f}' => KeyPress {
             key: Key::Char(char::from(c as u8 | 0x60)),
@@ -4946,6 +5004,8 @@ fn char_of(press: KeyPress) -> char {
         Key::PageUp => '\u{e007}',
         Key::PageDown => '\u{e008}',
         Key::Delete => '\u{e009}',
+        Key::BackTab => '\u{e00a}',
+        Key::ShiftEnter => '\u{e00b}',
         // The rest of the private use area numbers the texts put in
         // whole; beyond that many, the last stands for all.
         Key::Text(number) => {
