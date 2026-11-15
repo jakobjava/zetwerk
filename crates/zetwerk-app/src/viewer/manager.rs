@@ -32,6 +32,10 @@ enum Free {
     Count,
     /// A language, as its code of two or three letters (`de`).
     Language,
+    /// A paper Typst knows by name.
+    Paper,
+    /// The family of a font there is.
+    Font,
 }
 
 /// Something to decide about a document.
@@ -71,7 +75,7 @@ const ON_OFF: &[(&str, &str)] = &[("on", "true"), ("off", "false")];
 /// All there is to decide, in the order it is listed in. The font's
 /// choices are the fonts there are.
 const SETTINGS: &[Setting] = &[
-    setting("font", "text", "font", "Libertinus Serif", &[], Free::Text),
+    setting("font", "text", "font", "Libertinus Serif", &[], Free::Font),
     setting(
         "font size",
         "text",
@@ -132,7 +136,7 @@ const SETTINGS: &[Setting] = &[
             ("slides 16:9", "\"presentation-16-9\""),
             ("slides 4:3", "\"presentation-4-3\""),
         ],
-        Free::Text,
+        Free::Paper,
     ),
     setting(
         "orientation",
@@ -351,6 +355,50 @@ const SETTINGS: &[Setting] = &[
     ),
 ];
 
+/// The row of the document manager that leads to the styles: the one
+/// behind all settings.
+pub(super) const STYLES_ROW: usize = SETTINGS.len();
+
+/// The names of the papers Typst knows, as its own list has them.
+fn paper_names() -> Vec<String> {
+    use typst::foundations::{CastInfo, Reflect, Value};
+    let mut names = Vec::new();
+    <typst::layout::Paper as Reflect>::input().walk(|info| {
+        if let CastInfo::Value(Value::Str(name), _) = info {
+            names.push(name.as_str().to_owned());
+        }
+    });
+    names
+}
+
+/// Of `names`, those nearest to `typed`, the nearest first: those it is
+/// part of, then those a letter or a few away; none that is far off.
+pub(super) fn nearest(typed: &str, names: impl IntoIterator<Item = String>) -> Vec<String> {
+    /// How many are offered.
+    const MOST: usize = 8;
+    let typed = typed.trim().to_lowercase();
+    let far = (typed.chars().count() / 3).max(2);
+    let mut ranked: Vec<(usize, usize, String)> = names
+        .into_iter()
+        .filter_map(|name| {
+            let known = name.to_lowercase();
+            let away = if known.contains(&typed) {
+                0
+            } else {
+                super::refused::distance(&typed, &known) + 1
+            };
+            (away <= far + 1).then(|| (away, name.chars().count(), name))
+        })
+        .collect();
+    ranked.sort();
+    ranked.dedup_by(|a, b| a.2 == b.2);
+    ranked
+        .into_iter()
+        .take(MOST)
+        .map(|(.., name)| name)
+        .collect()
+}
+
 /// A text as Typst writes a string.
 fn quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
@@ -378,7 +426,12 @@ fn typed_value(free: Free, typed: &str) -> Option<String> {
             let known = matches!(own, "" | "pt" | "mm" | "cm" | "in" | "em" | "%");
             (fine && known).then(|| format!("{number}{}", if own.is_empty() { unit } else { own }))
         }
-        Free::Text => Some(quoted(typed)),
+        Free::Text | Free::Font => Some(quoted(typed)),
+        // Any other is refused by Typst, and the document with it.
+        Free::Paper => paper_names()
+            .into_iter()
+            .find(|name| name.eq_ignore_ascii_case(typed))
+            .map(|name| quoted(&name)),
         // Between brackets, with every mark that means something in
         // running text made to mean nothing: a dollar sign there began
         // an equation that never ended, and the document was no more.
@@ -466,7 +519,8 @@ impl Viewer {
             .collect();
         // Last, the styles: how headings, links and the rest look.
         items.push(super::styles::manager_row(source));
-        self.open_picker("document", items, chosen.min(SETTINGS.len() - 1));
+        let chosen = chosen.min(items.len() - 1);
+        self.open_picker("document", items, chosen);
     }
 
     /// What setting `row` can be, to choose from or to type.
@@ -521,6 +575,104 @@ impl Viewer {
         }
         let free = (setting.free != Free::No).then(|| format!("doc set {row} "));
         self.open_picker_for(setting.name, items, chosen, format!("doc {row}"), free);
+        self.setting_accepts(setting.free);
+    }
+
+    /// Makes the list that is up offer as typed only what a setting of
+    /// kind `kind` can be: what it cannot be is not offered, and what is
+    /// like it comes first.
+    fn setting_accepts(&mut self, kind: Free) {
+        let fonts = if kind == Free::Font {
+            self.font_families()
+        } else {
+            Vec::new()
+        };
+        self.picker_accepts(move |typed| {
+            typed_value(kind, typed).is_some()
+                && (kind != Free::Font || fonts.contains(&typed.trim().to_lowercase()))
+        });
+    }
+
+    /// The families of the fonts there are, in small letters: as Typst
+    /// finds them by name.
+    fn font_families(&self) -> Vec<String> {
+        let world = self.project.snapshot();
+        let families = world
+            .book()
+            .families()
+            .map(|(family, _)| family.to_lowercase());
+        families.collect()
+    }
+
+    /// Where what was typed for setting `row` is nothing it can be: says
+    /// why, and puts up what is nearest to it, to choose from or to type
+    /// again; or the list of settings where nothing is near.
+    fn refuse_setting(&mut self, row: usize, typed: &str) {
+        let Some(setting) = SETTINGS.get(row) else {
+            return;
+        };
+        let typed = typed.trim();
+        let listed = || setting.choices.iter().map(|(label, _)| (*label).to_owned());
+        let (why, names): (String, Vec<String>) = match setting.free {
+            Free::Paper => (
+                format!("Typst knows no paper \u{201c}{typed}\u{201d}"),
+                nearest(typed, paper_names()),
+            ),
+            Free::Font => {
+                let world = self.project.snapshot();
+                let families = world.book().families().map(|(family, _)| family.to_owned());
+                let names = nearest(typed, families.collect::<Vec<_>>());
+                (
+                    format!("no font \u{201c}{typed}\u{201d} is installed"),
+                    names,
+                )
+            }
+            Free::Length(unit) => (
+                format!(
+                    "{} cannot be {typed}: a number and a unit, as 2{unit}",
+                    setting.name
+                ),
+                Vec::new(),
+            ),
+            Free::Count => (
+                format!(
+                    "{} cannot be {typed}: a whole number from 1 to 8",
+                    setting.name
+                ),
+                Vec::new(),
+            ),
+            Free::Language => (
+                format!(
+                    "{} cannot be {typed}: a code of two or three letters, as de",
+                    setting.name
+                ),
+                nearest(typed, listed()),
+            ),
+            Free::No | Free::Text | Free::Words => {
+                (format!("{} cannot be {typed}", setting.name), Vec::new())
+            }
+        };
+        if names.is_empty() {
+            self.open_manager(row);
+            return self.alert(why);
+        }
+        let items: Vec<(String, Target)> = names
+            .into_iter()
+            .map(|name| {
+                let choice = setting.choices.iter().find(|(label, _)| *label == name);
+                let value = choice.map_or_else(|| quoted(&name), |(_, value)| (*value).to_owned());
+                let set = Target::Set {
+                    row,
+                    value,
+                    told: name.clone(),
+                };
+                (name, set)
+            })
+            .collect();
+        let free = (setting.free != Free::No).then(|| format!("doc set {row} "));
+        self.open_picker_for(setting.name, items, 0, format!("doc {row}"), free);
+        self.setting_accepts(setting.free);
+        self.alert(format!("{why}: the nearest are listed"));
     }
 
     /// Makes setting `row` what was typed for it, if it can be that.
@@ -528,11 +680,15 @@ impl Viewer {
         let Some(setting) = SETTINGS.get(row) else {
             return;
         };
-        if let Some(value) = typed_value(setting.free, typed) {
-            self.apply_setting(row, &value, typed.trim());
-        } else {
-            self.open_manager(row);
-            self.alert(format!("{} cannot be {typed}", setting.name));
+        let installed = || {
+            let fonts = self.font_families();
+            fonts.contains(&typed.trim().to_lowercase())
+        };
+        match typed_value(setting.free, typed) {
+            Some(value) if setting.free != Free::Font || installed() => {
+                self.apply_setting(row, &value, typed.trim());
+            }
+            _ => self.refuse_setting(row, typed),
         }
     }
 

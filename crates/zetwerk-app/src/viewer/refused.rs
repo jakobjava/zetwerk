@@ -271,7 +271,7 @@ fn needs_unit(message: &str) -> bool {
 
 /// How many letters are to be put in, taken out, changed or swapped
 /// with their neighbour to make `one` into `other`.
-fn distance(one: &str, other: &str) -> usize {
+pub(super) fn distance(one: &str, other: &str) -> usize {
     let (one, other): (Vec<char>, Vec<char>) = (one.chars().collect(), other.chars().collect());
     let mut rows = vec![(0..=other.len()).collect::<Vec<_>>()];
     for (i, a) in one.iter().enumerate() {

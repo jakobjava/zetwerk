@@ -187,3 +187,153 @@ fn a_list_of_files_and_the_completions_are_not_up_at_once() {
     assert!(viewer.picker.is_none());
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// What the list that is up shows, as the query leaves it.
+fn listed(viewer: &Viewer) -> Vec<String> {
+    let picker = viewer.picker.as_ref();
+    picker.map_or_else(Vec::new, |picker| {
+        picker.listing().1.into_iter().map(str::to_owned).collect()
+    })
+}
+
+#[test]
+fn a_paper_typst_does_not_know_is_not_written_and_the_nearest_is_offered() {
+    let (mut viewer, directory) = editing("Words.\n");
+    // Typed in the list: what is no paper is not offered as itself; the
+    // paper it is part of is.
+    press(&mut viewer, "gDpaper<CR>letter");
+    assert_eq!(
+        listed(&viewer).first().map(String::as_str),
+        Some("us-letter")
+    );
+    press(&mut viewer, "<CR>");
+    let text = viewer.text().unwrap_or_default().to_owned();
+    assert!(text.contains("paper: \"us-letter\""), "{text:?}");
+    // As a command: refused, said why, and the nearest are listed.
+    press(&mut viewer, "<Esc>");
+    viewer.execute("doc set 4 a44");
+    assert_eq!(viewer.text(), Some(text.as_str()));
+    assert!(said(&viewer).contains("no paper"), "{}", said(&viewer));
+    assert_eq!(listed(&viewer).first().map(String::as_str), Some("a4"));
+    press(&mut viewer, "<CR>");
+    assert!(
+        viewer
+            .text()
+            .is_some_and(|text| text.contains("paper: \"a4\""))
+    );
+    // One Typst knows that is not in the short list is taken, as Typst
+    // writes it.
+    viewer.execute("doc set 4 ISO-B5");
+    assert!(
+        viewer
+            .text()
+            .is_some_and(|text| text.contains("paper: \"iso-b5\"")),
+        "{:?}",
+        viewer.text()
+    );
+    compile(&mut viewer);
+    assert_eq!(viewer.document_revision, Some(viewer.revision));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_font_that_is_not_installed_is_said_to_be_so_with_the_near_ones() {
+    let (mut viewer, directory) = editing("Words.\n");
+    viewer.execute("doc set 0 Libertinus");
+    assert_eq!(viewer.text(), Some("Words.\n"));
+    assert!(said(&viewer).contains("no font"), "{}", said(&viewer));
+    assert!(
+        listed(&viewer).contains(&"Libertinus Serif".to_owned()),
+        "{:?}",
+        listed(&viewer)
+    );
+    // One that is there, in any capitals.
+    viewer.execute("doc set 0 dejavu sans mono");
+    assert!(
+        viewer
+            .text()
+            .is_some_and(|text| text.contains("font: \"dejavu sans mono\"")),
+        "{:?}",
+        viewer.text()
+    );
+    // A length without a unit gets the row's; a word is no length.
+    viewer.execute("doc set 6 wide");
+    assert!(
+        said(&viewer).contains("a number and a unit"),
+        "{}",
+        said(&viewer)
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_colour_that_is_none_offers_the_near_ones() {
+    let (mut viewer, directory) = editing("Words.\n");
+    press(&mut viewer, ":styles<CR>links: colour<CR>tael<CR>");
+    assert!(!viewer.text().unwrap_or_default().contains("#show link"));
+    assert!(said(&viewer).contains("no colour"), "{}", said(&viewer));
+    assert_eq!(listed(&viewer).first().map(String::as_str), Some("teal"));
+    press(&mut viewer, "<CR>");
+    assert!(
+        viewer
+            .text()
+            .is_some_and(|text| text.contains("#show link: set text(fill: teal)")),
+        "{:?}",
+        viewer.text()
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn what_is_typed_is_taken_as_itself_before_an_item_like_it() {
+    for (typed, written) in [("no", "header: [no]"), ("on", "header: [on]")] {
+        let (mut viewer, directory) = editing("Words.\n");
+        press(&mut viewer, &format!("gDrunning head<CR>{typed}"));
+        let first = listed(&viewer).first().cloned().unwrap_or_default();
+        assert_eq!(first, format!("use \u{201c}{typed}\u{201d}"));
+        press(&mut viewer, "<CR>");
+        let text = viewer.text().unwrap_or_default();
+        assert!(text.contains(written), "{typed}: {text:?}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+    // What is an item exactly is that item.
+    let (mut viewer, folder) = editing("Words.\n");
+    press(&mut viewer, "gDrunning head<CR>none");
+    assert_eq!(listed(&viewer), ["none"]);
+    let _ = std::fs::remove_dir_all(folder);
+    // A new file is not one like it that is there.
+    let folder = directory("#figure(image(\"network.svg\"), caption: [A net])\n");
+    let image = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\"/>";
+    std::fs::write(folder.join("network.svg"), image).unwrap();
+    let (mut viewer, _) = open(&folder);
+    press(&mut viewer, "gF<CR>file<CR>new.svg");
+    let first = listed(&viewer).first().cloned().unwrap_or_default();
+    assert_eq!(first, "use \u{201c}new.svg\u{201d}");
+    press(&mut viewer, "<CR>");
+    assert!(
+        said(&viewer).contains("no file new.svg"),
+        "{}",
+        said(&viewer)
+    );
+    assert!(
+        viewer
+            .text()
+            .is_some_and(|text| text.contains("network.svg"))
+    );
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn escape_from_the_styles_leads_back_to_their_row() {
+    let (mut viewer, directory) = editing("Words.\n");
+    press(&mut viewer, "gDstyles<CR><Esc>");
+    let chosen = viewer
+        .picker
+        .as_ref()
+        .and_then(|picker| picker.chosen().cloned());
+    assert_eq!(
+        chosen,
+        Some(super::super::assist::Target::Command("styles 0".to_owned()))
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}

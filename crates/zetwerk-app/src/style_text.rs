@@ -619,7 +619,7 @@ pub const STYLES: &[Style] = styles!(
 );
 
 /// The colours Typst has names for.
-const NAMED_COLOURS: &[&str] = &[
+pub const NAMED_COLOURS: &[&str] = &[
     "black", "gray", "silver", "white", "navy", "blue", "aqua", "teal", "eastern", "purple",
     "fuchsia", "maroon", "red", "orange", "yellow", "olive", "green", "lime",
 ];

@@ -51,6 +51,10 @@ pub(super) struct Picker {
     /// Where what is typed may be taken as it is (it is none of the
     /// items): the command it is handed to, which it is put behind.
     free: Option<String>,
+    /// What may be typed for `free`; where nothing says, anything.
+    accepts: Option<Box<dyn Fn(&str) -> bool + Send>>,
+    /// Whether the last item is what was typed, offered as itself.
+    offered: bool,
 }
 
 /// Where an entry of a list leads.
@@ -656,6 +660,8 @@ impl Viewer {
             chosen,
             back: None,
             free: None,
+            accepts: None,
+            offered: false,
         });
     }
 
@@ -674,6 +680,15 @@ impl Viewer {
         if let Some(picker) = &mut self.picker {
             picker.back = Some(back);
             picker.free = free;
+        }
+    }
+
+    /// Makes only what `accepts` be offered as typed in the list that is
+    /// up: what it refuses is not offered as itself, and the items like
+    /// it come first.
+    pub(super) fn picker_accepts(&mut self, accepts: impl Fn(&str) -> bool + Send + 'static) {
+        if let Some(picker) = &mut self.picker {
+            picker.accepts = Some(Box::new(accepts));
         }
     }
 
@@ -880,7 +895,14 @@ impl Viewer {
 
 impl Picker {
     /// Narrows the list to what the query is found in, best first.
+    /// Where the list takes what is typed, and that is none of its items
+    /// exactly, it is offered as itself first: an item that is only like
+    /// it is not what was typed ("no" is not "none").
     fn narrow(&mut self) {
+        if self.offered {
+            self.items.pop();
+            self.offered = false;
+        }
         let mut ranked: Vec<(i32, usize)> = self
             .items
             .iter()
@@ -890,6 +912,22 @@ impl Picker {
         ranked.sort_by_key(|(score, index)| (std::cmp::Reverse(*score), *index));
         self.shown = ranked.into_iter().map(|(_, index)| index).collect();
         self.chosen = 0;
+        let Some(command) = &self.free else {
+            return;
+        };
+        let typed = self.query.trim();
+        let listed = self.items.iter().any(|(label, _)| {
+            let name = label.split('\t').next().unwrap_or(label);
+            name == typed || name.split("  ").next() == Some(typed)
+        });
+        let fits = self.accepts.as_ref().is_none_or(|accepts| accepts(typed));
+        if !typed.is_empty() && !listed && fits {
+            let take = Target::Command(format!("{command}{typed}"));
+            self.items
+                .push((format!("use \u{201c}{typed}\u{201d}"), take));
+            self.offered = true;
+            self.shown.insert(0, self.items.len() - 1);
+        }
     }
 
     /// Where the chosen entry leads, if one is chosen.
