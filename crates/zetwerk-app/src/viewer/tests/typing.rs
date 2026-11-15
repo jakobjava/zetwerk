@@ -353,6 +353,16 @@ fn backspace_and_delete_take_nothing_into_a_comment() {
 }
 
 #[test]
+fn a_heading_with_a_label_is_not_joined_to_the_paragraph_before() {
+    // As text of the paragraph its label named text, and the reference
+    // to it was an error.
+    let text = "#set heading(numbering: \"1.\")\nBefore.\n\n= Intro <intro>\n\nSee @intro.\n";
+    for keys in ["/Before<CR>A<Del>", "/Intro<CR>i<BS>", "/Before<CR>J"] {
+        assert_eq!(typed(text, keys).replace('|', ""), text, "{keys:?}");
+    }
+}
+
+#[test]
 fn enter_at_the_start_of_a_heading_keeps_it_a_heading() {
     // The mark stayed behind as an empty heading, and the heading's text
     // became a paragraph.

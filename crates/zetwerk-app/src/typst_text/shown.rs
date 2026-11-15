@@ -218,6 +218,12 @@ pub fn join(source: &Source, at: usize, spaced: bool) -> Option<(Range<usize>, S
     let mut to = text.len() - behind.len();
     let to_line = text[..to].rfind('\n').map_or(0, |found| found + 1);
     if let Some(mark) = marked(source, to_line) {
+        // A heading with a label is referred to as one: as text of this
+        // paragraph it could not be.
+        let line_end = text[to..].find('\n').map_or(text.len(), |found| to + found);
+        if labels(&LinkedNode::new(source.root()), &(to..line_end)) {
+            return None;
+        }
         to = mark.end;
     }
     // Without a blank between, the mark of strong or emphasised text
@@ -230,6 +236,17 @@ pub fn join(source: &Source, at: usize, spaced: bool) -> Option<(Range<usize>, S
     }
     let with = if spaced { " " } else { "" };
     Some((from..to, with.to_owned()))
+}
+
+/// Whether there is a label in bytes `range` of `node`.
+fn labels(node: &LinkedNode, range: &Range<usize>) -> bool {
+    if node.kind() == SyntaxKind::Label {
+        return range.contains(&node.offset());
+    }
+    node.children().any(|child| {
+        let part = child.range();
+        part.start < range.end && range.start < part.end && labels(&child, range)
+    })
 }
 
 /// The functions whose content goes on in the text around them: what is
