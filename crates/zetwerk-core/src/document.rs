@@ -24,11 +24,21 @@ pub struct Document<B: Buffer> {
     /// Whether the file starts with a byte order mark. It is not part of the
     /// text, and is written back on save.
     bom: bool,
+    /// Whether every line of the file ends in CR LF. The text then has
+    /// line feeds alone, as everything that edits it expects, and the
+    /// carriage returns are written back on save (see [`file_bytes`]).
+    crlf: bool,
     history: History,
     journal: Journal,
+    /// Where the journal is.
+    journal_path: PathBuf,
     _lock: Lock,
     /// The state whose text is in the file, if any state's is.
     saved: Option<StateId>,
+    /// Every state that was ever in the file, with the hash of its bytes
+    /// then; the most recent last. Finding the state a file holds is a
+    /// lookup in these, and thinning the history leaves them.
+    saves: Vec<(StateId, Hash)>,
     /// Hash of the file's bytes when last read or written; `None` if there
     /// was no file.
     disk_hash: Option<Hash>,
@@ -36,6 +46,10 @@ pub struct Document<B: Buffer> {
     /// When the unsaved changes that opening brought back from the
     /// journal were last made, until the text is saved or loaded.
     restored: Option<SystemTime>,
+    /// What opening found that is to be said; see [`Document::remarks`].
+    remarks: Vec<String>,
+    /// Whether the last save wrote over the file in place.
+    in_place: bool,
 }
 
 /// What opening a document found.
@@ -153,40 +167,82 @@ pub enum DiskStatus {
 }
 
 /// What is in a file: its text without the byte order mark, whether it had
-/// one, and the hash of its bytes.
+/// one, whether its lines end in CR LF (the text then has line feeds alone),
+/// and the hash of its bytes.
 struct FileContents {
     text: String,
     bom: bool,
+    crlf: bool,
     hash: Hash,
 }
 
-fn read_file(path: &Path) -> Result<Option<FileContents>, DiskError> {
-    let Some(bytes) = disk::read(path).map_err(DiskError::Io)? else {
-        return Ok(None);
-    };
-    let hash = disk::hash(&bytes);
-    let text = String::from_utf8(bytes).map_err(|_| DiskError::NotUtf8)?;
-    Ok(Some(match text.strip_prefix(BOM) {
-        Some(rest) => FileContents {
-            text: rest.to_owned(),
-            bom: true,
-            hash,
-        },
-        None => FileContents {
-            text,
-            bom: false,
-            hash,
-        },
-    }))
+/// Whether every line of `text` ends in CR LF, and there is no carriage
+/// return anywhere else: such a text is stored with line feeds alone and
+/// comes back byte for byte. A text with endings of both kinds is taken
+/// as it is.
+fn ends_lines_in_crlf(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut any = false;
+    for (at, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'\n' if at == 0 || bytes[at - 1] != b'\r' => return false,
+            b'\n' => any = true,
+            b'\r' if bytes.get(at + 1) != Some(&b'\n') => return false,
+            _ => {}
+        }
+    }
+    any
 }
 
-/// The bytes a file holding `text` consists of.
-fn file_bytes(bom: bool, text: &str) -> Vec<u8> {
+fn read_file(path: &Path) -> Result<Option<FileContents>, DiskError> {
+    match disk::read(path).map_err(DiskError::Io)? {
+        Some(bytes) => contents(bytes).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// What a file of `bytes` holds.
+fn contents(bytes: Vec<u8>) -> Result<FileContents, DiskError> {
+    let hash = disk::hash(&bytes);
+    let text = String::from_utf8(bytes).map_err(|_| DiskError::NotUtf8)?;
+    let (text, bom) = match text.strip_prefix(BOM) {
+        Some(rest) => (rest.to_owned(), true),
+        None => (text, false),
+    };
+    let crlf = ends_lines_in_crlf(&text);
+    let text = if crlf {
+        str::replace(&text, "\r\n", "\n")
+    } else {
+        text
+    };
+    Ok(FileContents {
+        text,
+        bom,
+        crlf,
+        hash,
+    })
+}
+
+/// The bytes a file holding `text` consists of. With `crlf`, a carriage
+/// return goes before every line feed that has none: a text kept from
+/// before line ends were stored as line feeds alone has them already.
+fn file_bytes(bom: bool, crlf: bool, text: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() + BOM.len());
     if bom {
         bytes.extend_from_slice(BOM.as_bytes());
     }
-    bytes.extend_from_slice(text.as_bytes());
+    if crlf {
+        let mut last = 0;
+        for byte in text.bytes() {
+            if byte == b'\n' && last != b'\r' {
+                bytes.push(b'\r');
+            }
+            bytes.push(byte);
+            last = byte;
+        }
+    } else {
+        bytes.extend_from_slice(text.as_bytes());
+    }
     bytes
 }
 
@@ -196,6 +252,9 @@ struct Replayed {
     history: History,
     text: String,
     saved: Option<(StateId, Hash)>,
+    /// Every state that was ever in the file, as far as the journal tells,
+    /// with the hash of the file's bytes then; the most recent last.
+    saves: Vec<(StateId, Hash)>,
     /// Whether every record was used. If not, a record contradicted the
     /// ones before it, which a crash alone cannot cause.
     complete: bool,
@@ -207,6 +266,7 @@ fn replay(records: &[Record]) -> Option<Replayed> {
     let mut history = History::new();
     let mut text: Option<String> = None;
     let mut saved = None;
+    let mut saves = Vec::new();
     let mut used = 0;
     for record in records {
         // A record that does not fit what came before ends the replay:
@@ -215,14 +275,27 @@ fn replay(records: &[Record]) -> Option<Replayed> {
         if replay_record(&mut history, &mut text, &mut saved, record).is_none() {
             break;
         }
+        if let Record::Saved { state, hash } = record {
+            note_save(&mut saves, (*state, *hash));
+        }
         used += 1;
     }
     Some(Replayed {
         history,
         text: text?,
         saved,
+        saves,
         complete: used == records.len(),
     })
+}
+
+/// Notes that the file held `state` with the bytes of `hash`, as the most
+/// recent of `saves`.
+fn note_save(saves: &mut Vec<(StateId, Hash)>, save: (StateId, Hash)) {
+    if saves.last() != Some(&save) {
+        saves.retain(|known| *known != save);
+        saves.push(save);
+    }
 }
 
 /// Applies one record. On `None`, history and text are as before.
@@ -268,6 +341,10 @@ fn replay_record(
                 return None;
             }
             *text = Some(snapshot.clone());
+            // A journal is rewritten from a snapshot on: the states saved
+            // before it are those that were once in the file, and which
+            // one is in it now is said after it (see `compact`).
+            *saved = None;
         }
         Record::Prefer { state, child } => {
             history.set_redo_target(*state, *child).then_some(())?;
@@ -278,6 +355,98 @@ fn replay_record(
         }
     }
     Some(())
+}
+
+/// Rebuilds what can be rebuilt from `records`, the part of a damaged
+/// journal from a snapshot on (see [`journal::salvage`]): the history
+/// before the snapshot is lost, so the snapshot's text is the root. The
+/// records that follow are used as long as they fit; those about states
+/// that are lost and that change no text (where redo leads, what was
+/// saved) are passed over. `None` if `records` do not begin with a
+/// snapshot.
+///
+/// With `file`, the text of the file, that is the root instead, as the
+/// one state known to have been saved, and the snapshot's text a step
+/// from it: what was recovered is unsaved, and undo leads to the file.
+fn replay_salvaged(records: &[Record], file: Option<&FileContents>) -> Option<Replayed> {
+    let (Record::Snapshot { state, text }, rest) = records.split_first()? else {
+        return None;
+    };
+    let mut history = History::new();
+    let mut saves = Vec::new();
+    let mut snapshot = ROOT;
+    let text = match file {
+        Some(file) => {
+            saves.push((ROOT, file.hash));
+            let mut base = file.text.clone();
+            if let Some(replace) = difference(&base, text) {
+                let changes = change::perform(&mut base, &[replace]).ok()?;
+                snapshot = history.push(changes);
+            }
+            base
+        }
+        None => text.clone(),
+    };
+    let mut text = text;
+    let mut ids = std::collections::HashMap::from([(*state, snapshot)]);
+    for record in rest {
+        let current = history.current();
+        let fits = match record {
+            Record::Push {
+                id,
+                parent,
+                changes,
+            } => {
+                let fits = ids.get(parent) == Some(&current)
+                    && change::apply(&mut text, changes, Direction::Forward).is_ok();
+                if fits {
+                    ids.insert(*id, history.push(changes.clone()));
+                }
+                fits
+            }
+            Record::Extend { state, changes } => {
+                let fits = ids.get(state) == Some(&current)
+                    && change::apply(&mut text, changes, Direction::Forward).is_ok();
+                if fits && !history.extend(changes.clone()) {
+                    // The snapshot's own state is the root here, which
+                    // takes no changes: they make a state of their own,
+                    // which stands for it from now on.
+                    ids.insert(*state, history.push(changes.clone()));
+                }
+                fits
+            }
+            Record::Goto { state } => ids
+                .get(state)
+                .is_some_and(|&to| travel(&mut history, Some(&mut text), to).is_some()),
+            Record::Snapshot {
+                state,
+                text: snapshot,
+            } => ids.get(state) == Some(&current) && *snapshot == text,
+            Record::Prefer { state, child } => {
+                if let (Some(&state), Some(&child)) = (ids.get(state), ids.get(child)) {
+                    history.set_redo_target(state, child);
+                }
+                true
+            }
+            Record::Saved { state, hash } => {
+                if let Some(&state) = ids.get(state) {
+                    note_save(&mut saves, (state, *hash));
+                }
+                true
+            }
+        };
+        if !fits {
+            break;
+        }
+    }
+    let saved = saves.last().copied();
+    Some(Replayed {
+        history,
+        text,
+        saved,
+        saves,
+        complete: false,
+    })
 }
 
 /// Moves `history` to state `to`, taking `text` along if it is known. On
@@ -320,8 +489,15 @@ fn opposite(direction: Direction) -> Direction {
     }
 }
 
-/// The shortest journal that describes `history` at its current state.
-fn compact(history: &History, text: &str, saved: Option<(StateId, Hash)>) -> Vec<Record> {
+/// The shortest journal that describes `history` at its current state:
+/// `saves` are the states that were once in the file, `saved` the one
+/// that is in it now.
+fn compact(
+    history: &History,
+    text: &str,
+    saves: &[(StateId, Hash)],
+    saved: Option<(StateId, Hash)>,
+) -> Vec<Record> {
     let mut records = Vec::new();
     let mut at = ROOT;
     for id in 1..history.len() as StateId {
@@ -349,6 +525,12 @@ fn compact(history: &History, text: &str, saved: Option<(StateId, Hash)>) -> Vec
             records.push(Record::Prefer { state, child });
         }
     }
+    // Before the snapshot, which ends what they say about the file now.
+    for &(state, hash) in saves {
+        if saved != Some((state, hash)) && history.contains(state) {
+            records.push(Record::Saved { state, hash });
+        }
+    }
     records.push(Record::Snapshot {
         state: history.current(),
         text: text.to_owned(),
@@ -359,15 +541,47 @@ fn compact(history: &History, text: &str, saved: Option<(StateId, Hash)>) -> Vec
     records
 }
 
-/// Looks for a state of `history` whose text, as a file, has `hash`.
-/// `text` is the text of the current state.
-fn state_with_hash(history: &History, text: &str, bom: bool, hash: Hash) -> Option<StateId> {
+/// Looks for a state of `history` whose text is the one in `file`. `text`
+/// is the text of the current state.
+///
+/// How long each state's text is follows from the changes alone, so only
+/// the states as long as the file's text are gone to and compared: the
+/// cost is that of reading the history, not of hashing every state's text.
+fn state_holding(history: &History, text: &str, file: &FileContents) -> Option<StateId> {
+    let growth = |state: StateId| {
+        history.changes(state).map_or(0, |changes| {
+            changes
+                .iter()
+                .map(|change| change.new.len() as i128 - change.old.len() as i128)
+                .sum::<i128>()
+        })
+    };
+    let mut root = text.len() as i128;
+    let mut at = history.current();
+    while let Some(parent) = history.parent(at) {
+        root -= growth(at);
+        at = parent;
+    }
+    let mut lengths = Vec::with_capacity(history.len());
+    lengths.push(root);
+    for state in 1..history.len() as StateId {
+        let parent = history.parent(state)?;
+        let parent = lengths[usize::try_from(parent).ok()?];
+        lengths.push(parent + growth(state));
+    }
+    let wanted = file.text.len() as i128;
+    let candidates: Vec<StateId> = (0..history.len() as StateId)
+        .rev()
+        .filter(|&state| usize::try_from(state).is_ok_and(|at| lengths[at] == wanted))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
     let mut history = history.clone();
     let mut text = text.to_owned();
-    (0..history.len() as StateId).rev().find(|&state| {
-        travel(&mut history, Some(&mut text), state).is_some()
-            && disk::hash(&file_bytes(bom, &text)) == hash
-    })
+    candidates
+        .into_iter()
+        .find(|&state| travel(&mut history, Some(&mut text), state).is_some() && text == file.text)
 }
 
 /// Where the journal of `path` is kept under `state_dir`.
@@ -376,6 +590,12 @@ fn journal_path(state_dir: &Path, path: &Path) -> PathBuf {
     state_dir
         .join("journals")
         .join(format!("{}.journal", &name[..32]))
+}
+
+/// Where the journal of `path` is kept, beside the journal `journal`.
+fn journal_beside(journal: &Path, path: &Path) -> PathBuf {
+    let journals = journal.parent().unwrap_or(journal);
+    journal_path(journals.parent().unwrap_or(journals), path)
 }
 
 /// A name beside `journal` that no file has yet, for keeping it as it is
@@ -401,82 +621,237 @@ fn set_aside(journal: &Path, why: &str) -> io::Result<PathBuf> {
     Ok(kept)
 }
 
-/// A history to carry on with: the history, the text of its current state,
-/// and the state whose text is in the file.
-type Adopted = (History, String, Option<StateId>);
-
-/// Decides what the journal at `journal_path` means for a file whose bytes
-/// hash to `file_hash` (`None`: there is no file). Returns the outcome and,
-/// if the journal's history is to be continued, that history.
-fn reconcile(
-    journal_path: &Path,
-    bom: bool,
-    file_hash: Option<Hash>,
-) -> io::Result<(Opened, Option<Adopted>)> {
-    let Some(bytes) = disk::read(journal_path)?.filter(|bytes| !bytes.is_empty()) else {
-        return Ok((Opened::Clean, None));
+/// Notes beside `journal` which file it is the journal of, so that the
+/// journal can be found again when the file has moved. Only a path that
+/// is text can be noted.
+fn note_file(journal: &Path, path: &Path) {
+    let note = journal.with_extension("file");
+    let Some(name) = path.to_str() else {
+        return;
     };
-    let Some(replayed) = journal::decode(&bytes).and_then(|(records, _)| replay(&records)) else {
-        let journal = set_aside(journal_path, "unusable")?;
-        return Ok((Opened::JournalUnusable { journal }, None));
-    };
-    if !replayed.complete {
-        // Something beyond a crash went wrong with this journal. Use what
-        // is consistent, keep the original for inspection.
-        std::fs::copy(journal_path, journal_path.with_extension("damaged"))?;
+    if disk::read(&note).ok().flatten().as_deref() != Some(name.as_bytes()) {
+        let _ = disk::write_atomically(&note, name.as_bytes());
     }
-    let Replayed {
-        history,
-        text,
-        saved,
-        ..
-    } = replayed;
-    let current = history.current();
-    let current_hash = disk::hash(&file_bytes(bom, &text));
+}
 
-    let Some(hash) = file_hash else {
-        // No file. If the journal holds text, the file is gone but its
-        // text is not.
-        let opened = if text.is_empty() {
-            Opened::Clean
-        } else {
-            Opened::Restored
+/// Which file `journal` is the journal of, if that was noted.
+fn noted_file(journal: &Path) -> Option<PathBuf> {
+    let bytes = disk::read(&journal.with_extension("file")).ok()??;
+    String::from_utf8(bytes).ok().map(PathBuf::from)
+}
+
+/// Takes over the history of a file that was moved or renamed and is now
+/// the file at `path`, holding `file`: called when `path` has no journal
+/// of its own, which is to be at `journal`.
+///
+/// A journal is taken over if the text it last knew (the file's when it
+/// was last written or read, or the text as it was left) is the file's,
+/// and the file it was the journal of is not there or no longer holds a
+/// text it knew: if it still does, that file is still its own. A journal
+/// that a window has open, or that was taken over before, is not taken.
+/// If more than one would do, none is: which is the right one is not for
+/// zetwerk to guess. The journal taken over is copied, and the original
+/// is kept where it was, marked as taken over.
+///
+/// Returns what to say about it, and when the journal was last written.
+fn take_over(
+    journal: &Path,
+    path: &Path,
+    file: &FileContents,
+) -> io::Result<Option<(String, Option<SystemTime>)>> {
+    let Some(directory) = journal.parent() else {
+        return Ok(None);
+    };
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(directory)?.flatten() {
+        let candidate = entry.path();
+        if candidate == journal
+            || candidate
+                .extension()
+                .is_none_or(|ending| ending != "journal")
+            || candidate.with_extension("moved").exists()
+        {
+            continue;
+        }
+        let was = noted_file(&candidate);
+        let there = was
+            .as_deref()
+            .and_then(|was| disk::read(was).ok().flatten())
+            .map(|bytes| disk::hash(&bytes));
+        // A copy of a file that is still there, as it was.
+        if there == Some(file.hash) {
+            continue;
+        }
+        let Ok(Some(bytes)) = disk::read(&candidate) else {
+            continue;
         };
-        return Ok((opened, Some((history, text, None))));
-    };
-    if hash == current_hash {
-        return Ok((Opened::Clean, Some((history, text, Some(current)))));
+        let Some(replayed) = journal::decode(&bytes).and_then(|(records, _)| replay(&records))
+        else {
+            continue;
+        };
+        let last_known = [
+            replayed.saved.map(|(_, hash)| hash),
+            Some(disk::hash(&file_bytes(file.bom, file.crlf, &replayed.text))),
+        ];
+        if !last_known.contains(&Some(file.hash))
+            || there.is_some_and(|there| last_known.contains(&Some(there)))
+        {
+            continue;
+        }
+        let in_use = !matches!(
+            Lock::acquire(&candidate.with_extension("lock")),
+            Ok(Some(_))
+        );
+        if !in_use {
+            found.push((candidate, was, bytes));
+        }
     }
-    // The file is not the journal's current text. If it is some other state
-    // of this history, the difference is unsaved work; if it is none,
-    // someone else wrote it.
-    let known = saved
-        .filter(|(_, saved_hash)| *saved_hash == hash)
-        .map(|(state, _)| state)
-        .or_else(|| state_with_hash(&history, &text, bom, hash));
-    if let Some(state) = known {
-        return Ok((Opened::Restored, Some((history, text, Some(state)))));
+    match found.as_slice() {
+        [] => Ok(None),
+        [(candidate, was, bytes)] => {
+            let when = std::fs::metadata(candidate)
+                .and_then(|meta| meta.modified())
+                .ok();
+            disk::write_atomically(journal, bytes)?;
+            if let Some(name) = path.to_str() {
+                let _ = disk::write_atomically(&candidate.with_extension("moved"), name.as_bytes());
+            }
+            let from = was.as_ref().map_or_else(
+                || "a file with this text that is no longer known".to_owned(),
+                |was| was.display().to_string(),
+            );
+            Ok(Some((format!("history taken over from {from}"), when)))
+        }
+        several => Ok(Some((
+            format!(
+                "the histories of {} earlier files fit this one: none was taken over",
+                several.len()
+            ),
+            None,
+        ))),
     }
-    let unsaved = match saved {
-        Some((state, _)) => state != current,
-        None => !text.is_empty(),
+}
+
+/// A history to carry on with: the history, the text of its current state,
+/// the state whose text is in the file, and the states that were.
+struct Found {
+    history: History,
+    text: String,
+    saved: Option<StateId>,
+    saves: Vec<(StateId, Hash)>,
+}
+
+/// What a journal means for the file: the outcome, the history to carry
+/// on with if there is one, and what else is to be said.
+struct Reconciled {
+    opened: Opened,
+    found: Option<Found>,
+    remark: Option<String>,
+}
+
+/// Decides what the journal at `journal_path` means for the file `file`
+/// (`None`: there is no file).
+fn reconcile(journal_path: &Path, file: Option<&FileContents>) -> io::Result<Reconciled> {
+    let Some(bytes) = disk::read(journal_path)?.filter(|bytes| !bytes.is_empty()) else {
+        return Ok(Reconciled {
+            opened: Opened::Clean,
+            found: None,
+            remark: None,
+        });
     };
-    // Either way the history goes on and the file's text is put on top of
-    // it (see `Document::open`): what zetwerk had is one undo away, never
-    // dropped.
-    if unsaved {
-        let journal = aside(journal_path, "conflict");
-        std::fs::copy(journal_path, &journal)?;
-        Ok((
-            Opened::Conflict {
-                recovered: text.clone(),
-                journal,
-            },
-            Some((history, text, None)),
+    let decoded = journal::decode(&bytes);
+    let valid = decoded.as_ref().map_or(0, |(_, valid)| *valid);
+    // Damage, not a write cut short, ends what can be read: there may be
+    // more beyond it. A file that does not begin as a journal is damage
+    // too, or no journal at all.
+    let damaged = decoded.is_none() || !journal::is_torn_tail(&bytes[valid..]);
+    let mut replayed = decoded.and_then(|(records, _)| replay(&records));
+    let mut history_lost = false;
+    if replayed.is_none() && damaged {
+        // The text is never said before the damage. The last snapshot
+        // beyond it says it, and what was done after it can follow.
+        replayed = replay_salvaged(&journal::salvage(&bytes, valid), file);
+        history_lost = replayed.is_some();
+    }
+    let Some(replayed) = replayed else {
+        let journal = set_aside(journal_path, "unusable")?;
+        return Ok(Reconciled {
+            opened: Opened::JournalUnusable { journal },
+            found: None,
+            remark: None,
+        });
+    };
+    let remark = if damaged || !replayed.complete {
+        // Use what is consistent, keep the original as it is.
+        let kept = aside(journal_path, "damaged");
+        std::fs::copy(journal_path, &kept)?;
+        let lost = if history_lost {
+            "the history before the file was last opened is lost; the text as it was \
+             last written there is back"
+        } else {
+            "what was done after a damaged part of it is not back"
+        };
+        Some(format!(
+            "the journal was damaged: {lost}; it is kept as it was at {}",
+            kept.display()
         ))
     } else {
-        Ok((Opened::ChangedWhileClosed, Some((history, text, None))))
-    }
+        None
+    };
+    let current = replayed.history.current();
+    let (opened, saved_now) = match file {
+        // No file. If the journal holds text, the file is gone but its
+        // text is not.
+        None if replayed.text.is_empty() => (Opened::Clean, None),
+        None => (Opened::Restored, None),
+        Some(file) if file.hash == disk::hash(&file_bytes(file.bom, file.crlf, &replayed.text)) => {
+            (Opened::Clean, Some(current))
+        }
+        Some(file) => {
+            // The file is not the journal's current text. If it is some
+            // other state of this history, the difference is unsaved work;
+            // if it is none, someone else wrote it.
+            let known = replayed
+                .saved
+                .into_iter()
+                .chain(replayed.saves.iter().rev().copied())
+                .find(|(_, hash)| *hash == file.hash)
+                .map(|(state, _)| state)
+                .or_else(|| state_holding(&replayed.history, &replayed.text, file));
+            if let Some(state) = known {
+                (Opened::Restored, Some(state))
+            } else {
+                let unsaved = match replayed.saved {
+                    Some((state, _)) => state != current,
+                    None => !replayed.text.is_empty(),
+                };
+                // Either way the history goes on and the file's text is
+                // put on top of it (see `Document::open`): what zetwerk
+                // had is one undo away, never dropped.
+                if unsaved {
+                    let journal = aside(journal_path, "conflict");
+                    std::fs::copy(journal_path, &journal)?;
+                    let opened = Opened::Conflict {
+                        recovered: replayed.text.clone(),
+                        journal,
+                    };
+                    (opened, None)
+                } else {
+                    (Opened::ChangedWhileClosed, None)
+                }
+            }
+        }
+    };
+    Ok(Reconciled {
+        opened,
+        found: Some(Found {
+            history: replayed.history,
+            text: replayed.text,
+            saved: saved_now,
+            saves: replayed.saves,
+        }),
+        remark,
+    })
 }
 
 /// Whether the journal under `state_dir` of the file at `path` holds
@@ -500,33 +875,126 @@ pub fn has_unsaved_changes(path: &Path, state_dir: &Path) -> bool {
         None => !replayed.text.is_empty(),
     };
     let in_file = match read_file(&path) {
-        Ok(Some(file)) => file.text == replayed.text,
+        Ok(Some(file)) => file.hash == disk::hash(&file_bytes(file.bom, file.crlf, &replayed.text)),
         Ok(None) => replayed.text.is_empty(),
         Err(_) => false,
     };
     unsaved && !in_file
 }
 
+/// Asks the window that has the file at `path` open to say so, and to ask
+/// for the user's attention: another start of zetwerk wanted the file
+/// too. The window notices the file this leaves (see [`knock_path`]).
+pub fn knock(path: &Path, state_dir: &Path) -> io::Result<()> {
+    let knock = knock_path(path, state_dir);
+    if let Some(directory) = knock.parent() {
+        disk::create_private_dir(directory)?;
+    }
+    std::fs::write(knock, b"")
+}
+
+/// The file another start of zetwerk leaves to say it wanted the file at
+/// `path` (see [`knock`]): one per file, in a directory of its own under
+/// `state_dir`, which a window can watch.
+#[must_use]
+pub fn knock_path(path: &Path, state_dir: &Path) -> PathBuf {
+    let path = std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_owned());
+    let journal = journal_path(state_dir, &path);
+    let name = journal.file_stem().unwrap_or_default();
+    state_dir.join("knocks").join(name)
+}
+
 /// Removes temporary files that a session which died while saving left next
 /// to the document. That directory is the user's, so only a file that
 /// provably holds a text of this very document is removed; anything else is
 /// not ours to judge.
-fn remove_own_leftovers(
-    path: &Path,
-    file_hash: Option<Hash>,
-    history: &History,
-    text: &str,
-    bom: bool,
-) {
+fn remove_own_leftovers(path: &Path, file_hash: Option<Hash>, found: &Found) {
     for leftover in disk::leftovers(path) {
         let ours = disk::read(&leftover).ok().flatten().is_some_and(|bytes| {
             let hash = disk::hash(&bytes);
-            Some(hash) == file_hash || state_with_hash(history, text, bom, hash).is_some()
+            Some(hash) == file_hash
+                || found.saves.iter().any(|(_, saved)| *saved == hash)
+                || contents(bytes).is_ok_and(|leftover| {
+                    state_holding(&found.history, &found.text, &leftover).is_some()
+                })
         });
         if ours {
             let _ = std::fs::remove_file(leftover);
         }
     }
+}
+
+/// Above this many states, the oldest steps of a history are folded into
+/// coarser ones when the file is opened; see [`Document::thin`].
+const THIN_BEYOND: usize = 10_000;
+/// How many of the newest states thinning leaves as they are.
+const THIN_KEEPS: usize = 5_000;
+
+/// `history` thinned (see [`History::thinned`]): the newest `recent`
+/// states, and every state that was ever in the file, stay.
+fn thin_history(
+    history: &History,
+    recent: usize,
+    saves: &[(StateId, Hash)],
+) -> (History, Vec<Option<StateId>>) {
+    let first_recent = history.len().saturating_sub(recent) as StateId;
+    let saved: std::collections::HashSet<StateId> = saves.iter().map(|(state, _)| *state).collect();
+    history.thinned(|state| state >= first_recent || saved.contains(&state))
+}
+
+/// `saves` with the states' ids as `map` (from [`History::thinned`]) has
+/// them.
+fn renumber(saves: &[(StateId, Hash)], map: &[Option<StateId>]) -> Vec<(StateId, Hash)> {
+    saves
+        .iter()
+        .filter_map(|&(state, hash)| {
+            let state = map.get(usize::try_from(state).ok()?).copied()??;
+            Some((state, hash))
+        })
+        .collect()
+}
+
+/// `path` made absolute, with symbolic links resolved in its directory.
+fn resolved(path: &Path) -> io::Result<PathBuf> {
+    let path = std::path::absolute(path)?;
+    match (path.parent(), path.file_name()) {
+        (Some(directory), Some(name)) => Ok(std::fs::canonicalize(directory)?.join(name)),
+        _ => Ok(path),
+    }
+}
+
+/// The error for a file at `path` that is not to be written over.
+fn exists(path: &Path) -> DiskError {
+    DiskError::Io(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("{} exists", path.display()),
+    ))
+}
+
+/// Takes the lock of the file at `path`, whose journal is `journal`.
+fn lock_for(journal: &Path, path: &Path) -> Result<Lock, DiskError> {
+    Lock::acquire(&journal.with_extension("lock"))
+        .map_err(DiskError::Io)?
+        .ok_or_else(|| {
+            DiskError::Io(io::Error::other(format!(
+                "{} is open in another zetwerk",
+                path.display()
+            )))
+        })
+}
+
+/// Starts the journal of the file at `path` at `journal` with `records`. A
+/// journal that is there already is of a file that was at `path` before,
+/// and is kept aside.
+fn new_journal(journal: &Path, path: &Path, records: &[Record]) -> Result<Journal, DiskError> {
+    if journal.exists() {
+        set_aside(journal, "replaced").map_err(DiskError::Journal)?;
+    }
+    let created = Journal::create(journal, records).map_err(DiskError::Journal)?;
+    note_file(journal, path);
+    Ok(created)
 }
 
 impl<B: Buffer> Document<B> {
@@ -535,7 +1003,9 @@ impl<B: Buffer> Document<B> {
     ///
     /// Journals live under `state_dir`. If the file's journal shows that an
     /// earlier session ended without saving, its changes are brought back;
-    /// see [`Opened`] for the possible outcomes.
+    /// see [`Opened`] for the possible outcomes. A file without a journal
+    /// may take over that of the file it was before it was moved (see
+    /// [`Document::remarks`]).
     pub fn open(
         path: &Path,
         state_dir: &Path,
@@ -555,7 +1025,7 @@ impl<B: Buffer> Document<B> {
         };
         let journal_path = journal_path(state_dir, &path);
         // When the last session last wrote it, before it is compacted.
-        let last_written = std::fs::metadata(&journal_path)
+        let mut last_written = std::fs::metadata(&journal_path)
             .and_then(|meta| meta.modified())
             .ok();
         let journal_dir = journal_path.parent().unwrap_or(state_dir);
@@ -576,18 +1046,49 @@ impl<B: Buffer> Document<B> {
             other => OpenError::Io(path.clone(), io::Error::other(other.to_string())),
         })?;
         let bom = file.as_ref().is_some_and(|file| file.bom);
+        let crlf = file.as_ref().is_some_and(|file| file.crlf);
         let file_hash = file.as_ref().map(|file| file.hash);
 
-        let (opened, adopted) =
-            reconcile(&journal_path, bom, file_hash).map_err(io(&journal_path))?;
-        let (history, text, saved) = adopted.unwrap_or_else(|| {
-            let text = file.map(|file| file.text).unwrap_or_default();
-            (History::new(), text, file_hash.map(|_| ROOT))
+        let mut remarks = Vec::new();
+        let own = disk::read(&journal_path)
+            .map_err(io(&journal_path))?
+            .is_some_and(|bytes| !bytes.is_empty());
+        if let Some(file) = file.as_ref().filter(|file| !own && !file.text.is_empty()) {
+            // Finding none is no reason not to open the file.
+            if let Ok(Some((remark, when))) = take_over(&journal_path, &path, file) {
+                remarks.push(remark);
+                last_written = when;
+            }
+        }
+        note_file(&journal_path, &path);
+
+        let reconciled = reconcile(&journal_path, file.as_ref()).map_err(io(&journal_path))?;
+        let opened = reconciled.opened;
+        remarks.extend(reconciled.remark);
+        let mut found = reconciled.found.unwrap_or_else(|| Found {
+            history: History::new(),
+            text: file.map(|file| file.text).unwrap_or_default(),
+            saved: file_hash.map(|_| ROOT),
+            saves: Vec::new(),
         });
-        remove_own_leftovers(&path, file_hash, &history, &text, bom);
-        let saved_record = saved.zip(file_hash);
-        let journal = Journal::create(&journal_path, &compact(&history, &text, saved_record))
-            .map_err(io(&journal_path))?;
+        if found.history.len() > THIN_BEYOND {
+            let (history, map) = thin_history(&found.history, THIN_KEEPS, &found.saves);
+            found.saves = renumber(&found.saves, &map);
+            found.saved = found
+                .saved
+                .and_then(|state| map.get(usize::try_from(state).ok()?).copied()?);
+            found.history = history;
+        }
+        remove_own_leftovers(&path, file_hash, &found);
+        let saved_record = found.saved.zip(file_hash);
+        if let Some(save) = saved_record {
+            note_save(&mut found.saves, save);
+        }
+        let journal = Journal::create(
+            &journal_path,
+            &compact(&found.history, &found.text, &found.saves, saved_record),
+        )
+        .map_err(io(&journal_path))?;
         let restored = last_written.filter(|_| opened == Opened::Restored);
         if let Some(when) = restored {
             // Compacting is no change: how old the unsaved changes are is
@@ -596,15 +1097,20 @@ impl<B: Buffer> Document<B> {
         }
         let mut document = Self {
             path,
-            buffer: buffer(text),
+            buffer: buffer(found.text),
             bom,
-            history,
+            crlf,
+            history: found.history,
             journal,
+            journal_path,
             _lock: lock,
-            saved,
+            saved: found.saved,
+            saves: found.saves,
             disk_hash: file_hash,
             revision: 0,
             restored,
+            remarks,
+            in_place: false,
         };
         if matches!(opened, Opened::ChangedWhileClosed | Opened::Conflict { .. }) {
             // The file's text, as one undo step on top of the history.
@@ -615,6 +1121,14 @@ impl<B: Buffer> Document<B> {
             document.revision = 0;
         }
         Ok((document, opened))
+    }
+
+    /// What opening found that [`Opened`] does not say, for the user to
+    /// hear: that the history of the file before it was moved was taken
+    /// over, that the journal was damaged and what of it is lost.
+    #[must_use]
+    pub fn remarks(&self) -> &[String] {
+        &self.remarks
     }
 
     /// When the unsaved changes that opening brought back from the
@@ -794,21 +1308,214 @@ impl<B: Buffer> Document<B> {
     /// it, nothing is written and [`DiskError::ChangedOnDisk`] is returned,
     /// unless `overwrite` is set. The write is atomic: the file is the old
     /// one or the new one at every moment, never part of each.
+    ///
+    /// Only where that cannot be done because the directory takes no new
+    /// file, while the file itself may be written, the file is written
+    /// over in place: then, for a moment, it is neither; the journal is
+    /// on the disk before, so the text is not lost even then. See
+    /// [`Document::wrote_in_place`].
     pub fn save(&mut self, overwrite: bool) -> Result<(), DiskError> {
         if !overwrite && self.disk_status()? == DiskStatus::Changed {
             return Err(DiskError::ChangedOnDisk);
         }
-        let bytes = file_bytes(self.bom, self.buffer.text());
-        disk::write_atomically(&self.path, &bytes).map_err(DiskError::Io)?;
+        let bytes = file_bytes(self.bom, self.crlf, self.buffer.text());
+        self.in_place = match disk::write_atomically(&self.path, &bytes) {
+            Ok(()) => false,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied && self.path.is_file() => {
+                self.journal.sync().map_err(DiskError::Journal)?;
+                match disk::write_in_place(&self.path, &bytes) {
+                    Ok(()) => true,
+                    // Not even opened for writing: the file is as it was.
+                    Err(again) if again.kind() == io::ErrorKind::PermissionDenied => {
+                        return Err(DiskError::Io(err));
+                    }
+                    Err(again) => {
+                        return Err(DiskError::Io(io::Error::other(format!(
+                            "writing over the file failed ({again}): it may be cut short; \
+                             the text is safe in the journal, :w! writes it again"
+                        ))));
+                    }
+                }
+            }
+            Err(err) => return Err(DiskError::Io(err)),
+        };
         let hash = disk::hash(&bytes);
         let state = self.history.current();
         self.disk_hash = Some(hash);
         self.saved = Some(state);
+        note_save(&mut self.saves, (state, hash));
         self.restored = None;
         self.journal
             .append(&Record::Saved { state, hash })
             .and_then(|()| self.journal.sync())
             .map_err(DiskError::Journal)
+    }
+
+    /// Whether the last [`Document::save`] wrote over the file in place,
+    /// because its directory takes no new file.
+    #[must_use]
+    pub fn wrote_in_place(&self) -> bool {
+        self.in_place
+    }
+
+    /// Writes the text to the file at `to` as well, and goes on with the
+    /// file it is. A file that is there is written over only with
+    /// `overwrite`.
+    pub fn write_copy(&self, to: &Path, overwrite: bool) -> Result<(), DiskError> {
+        let to = std::path::absolute(to).map_err(DiskError::Io)?;
+        if !overwrite && to.symlink_metadata().is_ok() {
+            return Err(exists(&to));
+        }
+        let bytes = file_bytes(self.bom, self.crlf, self.buffer.text());
+        disk::write_atomically(&to, &bytes).map_err(DiskError::Io)
+    }
+
+    /// Writes the text to the file at `to` and goes on as that file, with
+    /// the history: Vim's `:saveas`. A file that is there is written over
+    /// only with `overwrite`. The file the text was in stays as it is, and
+    /// so does its journal, at the text that file holds: what was not
+    /// written to it is in the new file, and opening it again brings
+    /// nothing back.
+    pub fn save_as(&mut self, to: &Path, overwrite: bool) -> Result<(), DiskError> {
+        let to = resolved(to).map_err(DiskError::Io)?;
+        if to == self.path {
+            return self.save(overwrite);
+        }
+        if !overwrite && to.symlink_metadata().is_ok() {
+            return Err(exists(&to));
+        }
+        let journal_path = journal_beside(&self.journal_path, &to);
+        let lock = lock_for(&journal_path, &to)?;
+        let bytes = file_bytes(self.bom, self.crlf, self.buffer.text());
+        disk::write_atomically(&to, &bytes).map_err(DiskError::Io)?;
+        let hash = disk::hash(&bytes);
+        let state = self.history.current();
+        let mut saves = self.saves.clone();
+        note_save(&mut saves, (state, hash));
+        let journal = new_journal(
+            &journal_path,
+            &to,
+            &compact(
+                &self.history,
+                self.buffer.text(),
+                &saves,
+                Some((state, hash)),
+            ),
+        )?;
+        if let Some(saved) = self.saved.filter(|saved| *saved != state) {
+            // Never mind if it fails: the old file then brings back, as
+            // unsaved, what is in the new one.
+            let _ = self
+                .journal
+                .append(&Record::Goto { state: saved })
+                .and_then(|()| self.journal.sync());
+        }
+        self.path = to;
+        self.journal = journal;
+        self.journal_path = journal_path;
+        self._lock = lock;
+        self.saved = Some(state);
+        self.saves = saves;
+        self.disk_hash = Some(hash);
+        self.restored = None;
+        self.in_place = false;
+        Ok(())
+    }
+
+    /// Moves the file to `to`, and its journal along: the text, what is not
+    /// written of it and the history are those of the file at `to` from now
+    /// on. Nothing that is at `to` is ever written over. A file that was
+    /// never written moves only its journal.
+    ///
+    /// The file is at both names for a moment, never at none; the journal
+    /// at the new name is complete before the old one goes. If the old
+    /// name cannot be removed then, the file stays there as a copy, and
+    /// why is returned.
+    pub fn rename(&mut self, to: &Path) -> Result<Option<io::Error>, DiskError> {
+        let to = resolved(to).map_err(DiskError::Io)?;
+        if to == self.path {
+            return Ok(None);
+        }
+        if to.symlink_metadata().is_ok() {
+            return Err(exists(&to));
+        }
+        let journal_path = journal_beside(&self.journal_path, &to);
+        let lock = lock_for(&journal_path, &to)?;
+        self.journal.sync().map_err(DiskError::Journal)?;
+        let there = self.path.is_file();
+        if there {
+            disk::link_or_copy(&self.path, &to).map_err(|err| {
+                if err.kind() == io::ErrorKind::AlreadyExists {
+                    exists(&to)
+                } else {
+                    DiskError::Io(err)
+                }
+            })?;
+        }
+        let saved = self.saved.zip(self.disk_hash);
+        let records = compact(&self.history, self.buffer.text(), &self.saves, saved);
+        let journal = match new_journal(&journal_path, &to, &records) {
+            Ok(journal) => journal,
+            Err(err) => {
+                if there {
+                    let _ = std::fs::remove_file(&to);
+                }
+                return Err(err);
+            }
+        };
+        let left = if there {
+            std::fs::remove_file(&self.path).err()
+        } else {
+            None
+        };
+        let _ = std::fs::remove_file(&self.journal_path);
+        let _ = std::fs::remove_file(self.journal_path.with_extension("file"));
+        self.path = to;
+        self.journal = journal;
+        self.journal_path = journal_path;
+        self._lock = lock;
+        Ok(left)
+    }
+
+    /// Puts the buffer `buffer` makes of the one there in its place, if it
+    /// holds the same text: for a buffer that knows the file's name, when
+    /// the file has another. Returns whether it did.
+    pub fn rebuffer(&mut self, buffer: impl FnOnce(&B) -> B) -> bool {
+        let new = buffer(&self.buffer);
+        let same = new.text() == self.buffer.text();
+        if same {
+            self.buffer = new;
+        }
+        same
+    }
+
+    /// Folds the old steps of the history into coarser ones: the newest
+    /// `recent` states stay as they are, and so do every state that was
+    /// ever in the file, the current one, the states where branches part
+    /// and the ends of branches; every text that stays reachable is the
+    /// same. Opening a file does this once its history has grown long.
+    ///
+    /// The journal is written anew first, at once (see [`Journal::create`]):
+    /// a crash leaves it as it was or thinned, never in between. Returns,
+    /// by old id, the new id of each state that stayed.
+    pub fn thin(&mut self, recent: usize) -> Result<Vec<Option<StateId>>, DocumentError> {
+        let (history, map) = thin_history(&self.history, recent, &self.saves);
+        let saves = renumber(&self.saves, &map);
+        let saved = self
+            .saved
+            .and_then(|state| map.get(usize::try_from(state).ok()?).copied()?);
+        let records = compact(
+            &history,
+            self.buffer.text(),
+            &saves,
+            saved.zip(self.disk_hash),
+        );
+        self.journal =
+            Journal::create(&self.journal_path, &records).map_err(DocumentError::Journal)?;
+        self.history = history;
+        self.saves = saves;
+        self.saved = saved;
+        Ok(map)
     }
 
     /// Compares the file with what zetwerk last read or wrote.
@@ -832,8 +1539,10 @@ impl<B: Buffer> Document<B> {
         }
         let state = self.history.current();
         self.bom = file.bom;
+        self.crlf = file.crlf;
         self.disk_hash = Some(file.hash);
         self.saved = Some(state);
+        note_save(&mut self.saves, (state, file.hash));
         self.restored = None;
         self.journal
             .append(&Record::Saved {

@@ -13,8 +13,9 @@ mod history;
 mod journal;
 
 pub use change::{Buffer, Change, Direction, EditError, Replace};
-pub use disk::{Hash, leftovers, write_atomically};
+pub use disk::{Hash, create_private_dir, leftovers, write_atomically};
 pub use document::{
-    DiskError, DiskStatus, Document, DocumentError, OpenError, Opened, has_unsaved_changes,
+    DiskError, DiskStatus, Document, DocumentError, OpenError, Opened, has_unsaved_changes, knock,
+    knock_path,
 };
 pub use history::{History, ROOT, StateId, Step};
