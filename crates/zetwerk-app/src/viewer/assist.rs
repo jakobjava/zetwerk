@@ -52,10 +52,13 @@ pub(super) struct Picker {
     /// items): the command it is handed to, which it is put behind.
     free: Option<String>,
     /// What may be typed for `free`; where nothing says, anything.
-    accepts: Option<Box<dyn Fn(&str) -> bool + Send>>,
+    accepts: Option<Accepts>,
     /// Whether the last item is what was typed, offered as itself.
     offered: bool,
 }
+
+/// What may be typed for a list that takes what is typed.
+type Accepts = Box<dyn Fn(&str) -> bool + Send>;
 
 /// Where an entry of a list leads.
 #[derive(Debug, Clone, PartialEq, Eq)]

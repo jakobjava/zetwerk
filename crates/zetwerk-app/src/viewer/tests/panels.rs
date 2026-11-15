@@ -407,14 +407,14 @@ fn a_source_an_agent_proposes_is_added_only_when_the_user_takes_it() {
     let entry = "@book{lamport1994, author = {Leslie Lamport}, title = {LaTeX}, year = {1994}}";
     let added = viewer.agent_add_sources_checked(entry, false).unwrap();
     let id = added.proposal.unwrap_or_else(|| panic!("proposed"));
-    assert!(added.keys.is_empty());
+    assert_eq!(added.keys, Vec::<String>::new());
     assert_eq!(
         std::fs::read_to_string(folder.join("refs.bib")).unwrap(),
         BIB
     );
     // Withdrawn by the agent as any proposal.
     viewer.withdraw_proposal(id).unwrap();
-    assert!(viewer.proposed_sources().is_empty());
+    assert_eq!(viewer.proposed_sources(), Vec::new());
     // Shown first in the list; Enter, and it is added.
     viewer.agent_add_sources_checked(entry, false).unwrap();
     press(&mut viewer, "gB");
@@ -427,7 +427,7 @@ fn a_source_an_agent_proposes_is_added_only_when_the_user_takes_it() {
     press(&mut viewer, "<CR>");
     let written = std::fs::read_to_string(folder.join("refs.bib")).unwrap();
     assert!(written.contains("lamport1994"), "{written}");
-    assert!(viewer.proposed_sources().is_empty());
+    assert_eq!(viewer.proposed_sources(), Vec::new());
     let _ = std::fs::remove_dir_all(&folder);
 }
 
