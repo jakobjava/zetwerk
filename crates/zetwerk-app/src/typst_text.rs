@@ -554,6 +554,19 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
             .is_some_and(|leaf| leaf.kind() == SyntaxKind::Str && leaf.range().end == at + 1)
     };
     match ground(source, at) {
+        // Between an equation and its label, what is typed goes behind
+        // the label: before it, it would take the label from the
+        // equation, and what refers to the equation would refer to it.
+        Ground::Markup
+            if !c.is_whitespace()
+                && let Some(end) = label_behind(source, at) =>
+        {
+            let (range, with, within) =
+                typed(source, end, c).unwrap_or((end..end, c.to_string(), c.len_utf8()));
+            let label = text.get(at..range.start)?;
+            let within = label.len() + within;
+            return Some((at..range.end, format!("{label}{with}"), within));
+        }
         Ground::Markup => {}
         // Over the quotation mark that ends text in an equation.
         Ground::Str if c == '"' && ends_text() && is_in_equation(source, at) => return None,
@@ -631,6 +644,21 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         '=' | '-' | '+' if goes_on(text, at) => escaped(),
         _ => None,
     }
+}
+
+/// Where the label ends that stands behind the equation that ends at
+/// byte `at` of `source`, with nothing but blanks between: `$ x $ <eq>`.
+fn label_behind(source: &Source, at: usize) -> Option<usize> {
+    let root = LinkedNode::new(source.root());
+    let closing = root.leaf_at(at, Side::Before)?;
+    let equation = closing
+        .parent()
+        .filter(|equation| equation.kind() == SyntaxKind::Equation && equation.range().end == at)?;
+    let label = equation
+        .next_sibling()
+        .filter(|label| label.kind() == SyntaxKind::Label)?;
+    let between = source.text().get(at..label.range().start)?;
+    between.chars().all(|c| c == ' ').then(|| label.range().end)
 }
 
 /// What Ctrl-B and Ctrl-I do while typing at byte `at` of `source`: begin
@@ -2387,6 +2415,20 @@ mod tests {
         assert_eq!(typing("#f[a |]", '*').as_deref(), Some("#f[a \\*|]"));
         assert_eq!(typing("$x$|", '*').as_deref(), Some("$x$\\*|"));
         assert_eq!(typing("see <a|>", '_').as_deref(), Some("see <a_|>"));
+    }
+
+    #[test]
+    fn what_is_typed_behind_an_equation_leaves_it_its_label() {
+        assert_eq!(
+            typing("$ x $| <eq>\n", 'a').as_deref(),
+            Some("$ x $ <eq>a|\n")
+        );
+        assert_eq!(
+            typing("$ x $| <eq>\n", '*').as_deref(),
+            Some("$ x $ <eq>\\*|\n")
+        );
+        assert_eq!(typing("$ x $| <eq>\n", ' '), None);
+        assert_eq!(typing("$ x $|\n\n<eq>\n", 'a'), None);
     }
 
     #[test]

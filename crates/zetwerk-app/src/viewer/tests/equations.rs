@@ -926,3 +926,19 @@ fn a_word_typed_right_behind_an_equation_is_offered_nothing_of_equations() {
     assert!(viewer.completion.is_some());
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn what_is_typed_behind_a_labelled_equation_leaves_it_its_label() {
+    // `$` or Tab out of an equation with a label put the cursor between
+    // the equation and the label; what was typed there took the label,
+    // and what referred to the equation referred to text, which Typst
+    // refuses: the document was not typeset.
+    let text = "#set math.equation(numbering: \"(1)\")\nWords.\n\n$ x $ <eq:a>\n\nSee @eq:a.\n";
+    for keys in ["a<Tab>b<Esc>", "a$b<Esc>"] {
+        let (mut viewer, directory) = typed(text, "x", keys);
+        let left = text.replace("<eq:a>\n", "<eq:a>b\n");
+        assert_eq!(viewer.text(), Some(left.as_str()), "{keys}");
+        settled(&mut viewer);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
