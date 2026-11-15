@@ -256,11 +256,28 @@ fn as_used(text: &str) -> (Viewer, PathBuf) {
     (viewer, directory)
 }
 
+/// A clock in milliseconds: the time this thread has run with
+/// `ZETWERK_CPU` set (which other work on the machine does not change),
+/// else the time that went by.
+fn clock() -> f64 {
+    static STARTED: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+    if std::env::var_os("ZETWERK_CPU").is_some() {
+        let run = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap_or_default();
+        let nanoseconds: f64 = run
+            .split(' ')
+            .next()
+            .and_then(|run| run.parse().ok())
+            .unwrap_or(0.0);
+        return nanoseconds / 1e6;
+    }
+    STARTED.elapsed().as_secs_f64() * 1000.0
+}
+
 /// Draws a frame as the window would: images it has are not made again.
 fn frame(viewer: &mut Viewer, held: &mut HashSet<TextureId>) -> f64 {
-    let started = Instant::now();
+    let started = clock();
     let scene = viewer.scene(&|id| held.contains(&id));
-    let took = started.elapsed().as_secs_f64() * 1000.0;
+    let took = clock() - started;
     held.extend(scene.images.iter().map(|image| image.id));
     took
 }
@@ -283,9 +300,9 @@ fn costs_of_keys(viewer: &mut Viewer, held: &mut HashSet<TextureId>) -> (Vec<(f6
         press(viewer, before);
         let (mut keys, mut frames) = (Vec::new(), Vec::new());
         for key in keys::parse(measured).unwrap() {
-            let started = Instant::now();
+            let started = clock();
             viewer.key(key);
-            keys.push(started.elapsed().as_secs_f64() * 1000.0);
+            keys.push(clock() - started);
             frames.push(frame(viewer, held));
             if std::env::var_os("ZETWERK_KEYS").is_some() {
                 println!(
@@ -308,6 +325,8 @@ fn costs_of_keys(viewer: &mut Viewer, held: &mut HashSet<TextureId>) -> (Vec<(f6
 /// what is drawn over the page switched off in turn:
 /// `ZETWERK_SPEED=60 cargo test --release --workspace what_keys_and_frames_cost -- --ignored --nocapture`
 /// for sixty copies of the article (one without the number);
+/// `ZETWERK_CPU=1` for the time the thread ran rather than the time
+/// that went by, which other builds on the machine do not change;
 /// `ZETWERK_OVERLAYS=spell,numbers` for only some of the rows. Each row
 /// begins anew from the same text and place, so that rows compare.
 #[test]
@@ -680,6 +699,81 @@ fn the_lines_of_a_page_cost_no_more_than_its_map() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// Random edits of `text`, `rounds` of them, as `(bytes, what is put
+/// there)`, each in the text as the edits before it left it: much what
+/// is typed into equations and what parses the rest anew, now and then
+/// a paragraph of the article.
+fn random_edits(text: &str, rounds: usize) -> Vec<(std::ops::Range<usize>, String)> {
+    let typed = [
+        "", "x", " ", "\n\n", "$", "^", "_", "/", "(", ")", ",", ";", "frac(", "$x^$", "#f[", "]",
+        "\"", "vec(1, ", "*", "= ", "alpha", "\n", "sqrt(", "$ a/ $",
+    ];
+    let mut text = text.to_owned();
+    let mut edits = Vec::new();
+    let mut seed = 11_u64;
+    for round in 0..rounds {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        // Mostly near an equation, where what is left empty is.
+        let near = usize::try_from(seed >> 33).unwrap_or(0) % (text.len() + 1);
+        let mut at = text[near..]
+            .find('$')
+            .filter(|_| round % 3 != 0)
+            .map_or(near, |found| {
+                near + found + usize::try_from(seed % 4).unwrap_or(0)
+            });
+        at = at.min(text.len());
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        let most = if round % 7 == 0 { 400 } else { 4 };
+        let mut end = (at + usize::try_from((seed >> 20) % most).unwrap_or(0)).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        let pasted = usize::try_from(seed >> 40).unwrap_or(0) % (ARTICLE.len() - 300);
+        let pasted = (pasted..pasted + 300)
+            .find(|from| ARTICLE.is_char_boundary(*from))
+            .unwrap_or(0);
+        let mut until = pasted + 300;
+        while !ARTICLE.is_char_boundary(until) {
+            until += 1;
+        }
+        let pick = usize::try_from((seed >> 8) % 28).unwrap_or(0);
+        let put = typed.get(pick).copied().unwrap_or(&ARTICLE[pasted..until]);
+        text.replace_range(at..end, put);
+        edits.push((at..end, put.to_owned()));
+    }
+    edits
+}
+
+#[test]
+fn what_is_left_empty_everywhere_is_what_each_equation_lacks() {
+    // What every key looks for, kept from key to key: after any edit it
+    // is what each equation of the text lacks, one by one, but for the
+    // one the cursor is in.
+    use crate::typst_text::{equations, left_empty, left_empty_everywhere};
+    let mut source = Source::detached(long(3));
+    let edits = random_edits(source.text(), 400);
+    for (round, (bytes, put)) in edits.into_iter().enumerate() {
+        source.edit(bytes.clone(), &put);
+        let all = equations(&source);
+        let but = all.get(round % all.len().max(1)).filter(|_| round % 2 == 0);
+        let mut one_by_one: Vec<usize> = all
+            .iter()
+            .filter(|equation| Some(*equation) != but)
+            .flat_map(|equation| left_empty(&source, equation))
+            .collect();
+        one_by_one.sort_unstable();
+        one_by_one.dedup();
+        let everywhere = left_empty_everywhere(&source, but);
+        assert_eq!(everywhere, one_by_one, "round {round}: {bytes:?} {put:?}");
+        // Asked again of the same text, as the next frame does.
+        assert!(left_empty_everywhere(&source, None).len() >= everywhere.len());
+    }
+}
+
 #[test]
 fn a_part_on_two_pages_is_refused_before_it_is_typeset() {
     // A paragraph that runs from one page onto the next: what is typed
@@ -704,4 +798,194 @@ fn a_part_on_two_pages_is_refused_before_it_is_typeset() {
     assert!(declined.contains("two pages"), "{declined}");
     assert_eq!(super::local::PARTS_TYPESET.get(), typeset);
     let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Prints a digest of what tables and stand-ins are found over random
+/// edits, to compare two versions of how they are found by:
+/// `cargo test --workspace what_is_found_digest -- --ignored --nocapture`.
+#[test]
+#[ignore = "a comparison between versions, by hand"]
+fn what_is_found_digest() {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let table = "\n\n#table(columns: 2, table.header([a], [b]), [x $y^2$], [z])\n\n\
+                 - an item #footnote[a note] and\n  more\n\n#figure([x], caption: [it])\n\n";
+    let mut text = long(3);
+    text.insert_str(text.len() / 2, table);
+    let mut source = Source::detached(text.clone());
+    for (bytes, put) in random_edits(&text, 150) {
+        source.edit(bytes, &put);
+        let text = source.text();
+        for at in (0..=text.len()).step_by(3) {
+            format!("{:?}", crate::typst_text::enclosing(&source, at)).hash(&mut hasher);
+            if let Some(table) = crate::typst_text::table_at(&source, at) {
+                (table.whole, table.cells, table.columns, table.header).hash(&mut hasher);
+                table.head.hash(&mut hasher);
+            }
+        }
+        for start in (0..text.len()).step_by(41) {
+            let end = (start + 700).min(text.len());
+            if text.is_char_boundary(start) && text.is_char_boundary(end) {
+                crate::typst_text::stand_ins(&source, &(start..end)).hash(&mut hasher);
+            }
+        }
+    }
+    println!("digest {:x}", hasher.finish());
+}
+
+/// What this process holds in memory, in megabytes.
+fn resident() -> f64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|kb| kb.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
+        .map_or(0.0, |kb| kb / 1024.0)
+}
+
+/// Prints what opening a long document costs, to the first page drawn
+/// and its tiles made, and what scrolling through all of it costs, with
+/// what is held in memory at each step:
+/// `ZETWERK_SPEED=350 cargo test --release --workspace what_opening_costs -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: prints what opening and scrolling cost"]
+fn what_opening_costs() {
+    let copies = std::env::var("ZETWERK_SPEED")
+        .ok()
+        .and_then(|copies| copies.parse().ok())
+        .unwrap_or(60);
+    let text = long(copies);
+    let directory = directory(&text);
+    let path = directory.join("main.typ");
+    let before = resident();
+    let started = Instant::now();
+    let ms = |since: Instant| since.elapsed().as_secs_f64() * 1000.0;
+    let env = Environment::new(FontSet::Embedded);
+    let project = Project::open(Arc::clone(&env), &path).unwrap();
+    let (editor, opened) = Editor::open(&path, &directory.join("state"), project.main()).unwrap();
+    let mut viewer = Viewer::new(env, project, (1920, 1200), 1.25)
+        .unwrap_or_else(|| panic!("viewer sets up"))
+        .editing(editor, &opened);
+    let set_up = ms(started);
+    let at = Instant::now();
+    compile(&mut viewer);
+    let compiled = ms(at);
+    let after_compile = resident();
+    let at = Instant::now();
+    let mut held = HashSet::new();
+    let scene = viewer.scene(&|id| held.contains(&id));
+    held.extend(scene.images.iter().map(|image| image.id));
+    let first_frame = ms(at);
+    let at = Instant::now();
+    let tiles = scene.wanted.len();
+    for tile in &scene.wanted {
+        let _ = tile.render();
+    }
+    let first_tiles = ms(at);
+    println!(
+        "{} pages: set up {set_up:.0} ms, compiled {compiled:.0} ms, first frame \
+         {first_frame:.1} ms, its {tiles} tiles {first_tiles:.0} ms; to the first page \
+         {:.0} ms. Memory: {before:.0} MB before, {after_compile:.0} MB compiled, {:.0} MB \
+         drawn",
+        viewer.state().pages,
+        ms(started),
+        resident()
+    );
+    // Through all of it a screen at a time, as fast as frames come:
+    // what each frame asks to be made.
+    let at = Instant::now();
+    let (mut frames, mut made, mut rendering) = (0, 0, 0.0);
+    let pages = viewer.state().pages;
+    while viewer.state().page < pages && frames < 2000 {
+        press(&mut viewer, "<C-f>");
+        let scene = viewer.scene(&|id| held.contains(&id));
+        held.extend(scene.images.iter().map(|image| image.id));
+        let tiling = Instant::now();
+        for tile in &scene.wanted {
+            let _ = tile.render();
+            made += 1;
+        }
+        rendering += ms(tiling);
+        frames += 1;
+    }
+    println!(
+        "scrolled through in {frames} screens: {:.0} ms, of it {rendering:.0} ms making \
+         {made} tiles ({:.1} ms a tile); memory {:.0} MB",
+        ms(at),
+        rendering / f64::from(made.max(1)),
+        resident()
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Prints what what a key asks of the text costs on a long one, by
+/// itself, each a key after an edit (so that nothing kept for a text is
+/// of that text yet): the place the cursor is in (`ground` twice, as the
+/// shown text asks), the equation there, whether it is in a footnote,
+/// the table there, what typing goes into, the stand-ins of the part,
+/// and the places left empty everywhere. Medians, in milliseconds:
+/// `ZETWERK_SPEED=350 cargo test --release --workspace what_the_text_asks_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: prints what a key asks of the text"]
+fn what_the_text_asks_cost() {
+    use crate::typst_text as text;
+    let copies = std::env::var("ZETWERK_SPEED")
+        .ok()
+        .and_then(|copies| copies.parse().ok())
+        .unwrap_or(60);
+    let mut source = Source::detached(long(copies));
+    let middle = source.text().len() / 2;
+    let at = middle + source.text()[middle..].find("\n\nFor ").unwrap_or(0) + 6;
+    let part = at.saturating_sub(300)..at + 300;
+    let mut times: Vec<Vec<f64>> = vec![Vec::new(); 7];
+    for round in 0..41 {
+        if round % 2 == 0 {
+            source.edit(at..at, "x");
+        } else {
+            source.edit(at..at + 1, "");
+        }
+        let mut time = |which: usize, work: &mut dyn FnMut()| {
+            let started = Instant::now();
+            work();
+            times[which].push(started.elapsed().as_secs_f64() * 1000.0);
+        };
+        time(0, &mut || {
+            let _ = (text::ground(&source, at), text::ground(&source, at + 1));
+        });
+        time(1, &mut || {
+            let _ = (
+                text::equation_at(&source, at),
+                text::is_in_equation(&source, at),
+            );
+        });
+        time(2, &mut || {
+            let _ = text::is_in_call(&source, at, "footnote");
+        });
+        time(3, &mut || {
+            let _ = text::table_at(&source, at);
+        });
+        time(4, &mut || {
+            let _ = text::enclosing(&source, at);
+        });
+        time(5, &mut || {
+            let _ = text::stand_ins(&source, &part);
+        });
+        time(6, &mut || {
+            let _ = text::left_empty_everywhere(&source, None);
+        });
+    }
+    let names = [
+        "ground ×2",
+        "equation ×2",
+        "in a call",
+        "table",
+        "enclosing",
+        "stand-ins",
+        "left empty",
+    ];
+    let mut line = format!("{} bytes:", source.text().len());
+    for (name, times) in names.iter().zip(times) {
+        let _ = write!(line, " {name} {:.3}", median(times));
+    }
+    println!("{line}");
 }
