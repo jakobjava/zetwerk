@@ -40,6 +40,7 @@ mod sources_undo;
 pub mod start;
 mod structure;
 mod styles;
+mod waiting;
 mod written;
 
 use std::cell::{Cell, RefCell};
@@ -917,12 +918,15 @@ pub struct Viewer {
     start: start::Start,
     /// The matches of a search and what keys took (see [`find`]).
     find: find::Find,
+    /// What the window waits for (see [`waiting`]).
+    waiting: waiting::Waiting,
     pub stats: Stats,
 }
 
 impl Viewer {
     /// A viewer for `project` in a window of `window` device pixels.
     #[must_use]
+    #[allow(clippy::too_many_lines, reason = "a line for every field")]
     pub fn new(
         env: Arc<Environment>,
         project: Project,
@@ -1025,6 +1029,7 @@ impl Viewer {
             pointer: pointer::Pointer::default(),
             start: start::Start::default(),
             find: find::Find::default(),
+            waiting: waiting::Waiting::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1553,6 +1558,7 @@ impl Viewer {
         self.compiled_revision = Some(output.revision);
         self.stats.compile_ms = output.duration.as_secs_f64() * 1000.0;
         self.stats.compiles += 1;
+        self.whole_took(output.duration);
         self.problems = if output.compiled.panicked {
             vec!["the Typst compiler crashed on this document".to_owned()]
         } else {
@@ -1732,6 +1738,9 @@ impl Viewer {
     /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
         self.message = None;
+        if self.stop_key(press) {
+            return;
+        }
         if self.grid.is_some() {
             return self.grid_key(press);
         }
@@ -1913,7 +1922,7 @@ impl Viewer {
             }
             // Not a word in a line: then the part that changed is
             // typeset, by itself.
-            Err(why) => match self.typeset_locally() {
+            Err(why) => match self.typeset_locally_in_time() {
                 Ok(()) => {
                     self.declined = None;
                     true
@@ -2831,6 +2840,7 @@ impl Viewer {
     }
 
     fn status_line(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {
+        let said_of_compiling = self.said_of_compiling();
         let state = self.state();
         let editing = state.editing.as_ref();
         let replacing = editing.is_some_and(|editing| editing.replacing);
@@ -2889,6 +2899,7 @@ impl Viewer {
         } else {
             "compiling  "
         };
+        let progress = said_of_compiling.unwrap_or_else(|| progress.to_owned());
         let place = editing.map_or_else(String::new, |editing| {
             let recording = editing
                 .recording
@@ -3218,6 +3229,7 @@ mod tests {
     mod speed;
     mod typing;
     mod typist;
+    mod waits;
 
     /// A viewer in an 800×620 window showing `pages` A4 pages.
     fn viewer(pages: usize) -> Viewer {

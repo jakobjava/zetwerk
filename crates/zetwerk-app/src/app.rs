@@ -304,6 +304,15 @@ impl ApplicationHandler<Event> for App {
             let (revision, world) = session.viewer.snapshot();
             session.compiler.compile(revision, world);
         }
+        // A compile that newer text has waited behind long enough is
+        // given up on, and the status line says what runs long.
+        if session.compiler.overtake(now) {
+            session.window.request_redraw();
+        }
+        let (running, held) = (session.compiler.running(), session.compiler.held_since());
+        if session.viewer.compiling(running, held) {
+            session.window.request_redraw();
+        }
         let mut sync_at = session
             .viewer
             .unsynced_since()
@@ -318,6 +327,8 @@ impl ApplicationHandler<Event> for App {
             session.viewer.autoscroll_at(),
             session.viewer.flash_at(),
             session.viewer.hints_at(),
+            session.compiler.overtake_at(),
+            session.viewer.compiling_at(now),
         ]
         .into_iter()
         .flatten()
@@ -545,6 +556,12 @@ impl Session {
     /// is compiled at once, unless commands come in quick succession (a
     /// held key): those are compiled when they pause, like typing.
     fn after_keys(&mut self) {
+        // Ctrl-C while a compile runs long: given up on, with what waits.
+        if self.viewer.take_stop() {
+            self.scheduler.cancel();
+            let ran = self.compiler.abandon();
+            self.viewer.stopped(ran);
+        }
         let Some(edited) = self.viewer.take_edited() else {
             return;
         };
