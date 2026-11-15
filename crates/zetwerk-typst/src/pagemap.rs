@@ -1048,6 +1048,9 @@ enum Resolved {
 #[derive(Clone, Copy)]
 enum NodeKind {
     Text,
+    /// A link written as it is (`https://…`): shown as written, letter
+    /// by letter, like text; else as one thing.
+    Link,
     Space,
     Math,
     Object(SyntaxKind),
@@ -1154,9 +1157,19 @@ impl Builder<'_> {
                 range: node,
                 kind,
             },
-            NodeKind::Text => {
+            NodeKind::Text | NodeKind::Link => {
+                let whole = Origin::Object {
+                    file,
+                    range: node.clone(),
+                    kind: SyntaxKind::Link,
+                };
+                let link = matches!(kind, NodeKind::Link);
                 let Some(shown) = shown else {
-                    return Origin::Atomic(Atomic::Transformed);
+                    return if link {
+                        whole
+                    } else {
+                        Origin::Atomic(Atomic::Transformed)
+                    };
                 };
                 // The glyph is only editable if the source really holds, at
                 // the position Typst reports, the text the glyph displays.
@@ -1165,6 +1178,8 @@ impl Builder<'_> {
                 let range = start..start + shown.len();
                 if range.end <= node.end && source.text().get(range.clone()) == Some(shown) {
                     Origin::Text { file, range }
+                } else if link {
+                    whole
                 } else {
                     Origin::Atomic(Atomic::Transformed)
                 }
@@ -1190,6 +1205,10 @@ impl Builder<'_> {
             };
             match kind {
                 NodeKind::Object(kind) => origin = Some(Origin::Object { file, range, kind }),
+                NodeKind::Link => {
+                    let kind = SyntaxKind::Link;
+                    origin = Some(Origin::Object { file, range, kind });
+                }
                 NodeKind::Math => origin = Some(Origin::Math { file, range }),
                 NodeKind::Text | NodeKind::Space => continue,
             }
@@ -1222,6 +1241,7 @@ impl Builder<'_> {
             _ if in_equation => NodeKind::Math,
             SyntaxKind::Text => NodeKind::Text,
             SyntaxKind::Space => NodeKind::Space,
+            SyntaxKind::Link => NodeKind::Link,
             // What these put on the page besides their text is a number
             // or a marker; the cursor has no business there.
             other @ (SyntaxKind::Markup

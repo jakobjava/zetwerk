@@ -744,6 +744,32 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         }
         _ => {}
     }
+    // Before strong text, against its first mark, a letter would make
+    // that mark a character like any other: the function says it then.
+    let opened = LinkedNode::new(source.root())
+        .leaf_at(at, Side::After)
+        .filter(|mark| matches!(mark.kind(), SyntaxKind::Star | SyntaxKind::Underscore))
+        .filter(|mark| mark.range().start == at)
+        .and_then(|mark| mark.parent().cloned())
+        .filter(|marked| matches!(marked.kind(), SyntaxKind::Strong | SyntaxKind::Emph))
+        .filter(|marked| marked.range().start == at && marked.range().len() >= 2);
+    if let Some(marked) = opened.filter(|_| c.is_alphanumeric()) {
+        let mark = if marked.kind() == SyntaxKind::Strong {
+            SyntaxKind::Star
+        } else {
+            SyntaxKind::Underscore
+        };
+        if closing(&marked, mark) > 0 {
+            let function = if mark == SyntaxKind::Star {
+                "strong"
+            } else {
+                "emph"
+            };
+            let range = marked.range();
+            let body = text.get(range.start + 1..range.end - 1)?;
+            return Some((range, format!("{c}#{function}[{body}]"), c.len_utf8()));
+        }
+    }
     let line = before.rfind('\n').map_or(0, |found| found + 1);
     let begins_line = before[line..].trim().is_empty();
     match c {

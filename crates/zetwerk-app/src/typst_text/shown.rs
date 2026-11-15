@@ -102,7 +102,8 @@ fn is_read(source: &Source, stop: &Range<usize>, math: bool) -> bool {
     let within = range.start <= stop.start && stop.end <= range.end;
     let whole = range == *stop;
     match leaf.kind() {
-        SyntaxKind::Text | SyntaxKind::Space => within && !math,
+        // A link written as it is shows its letters as written.
+        SyntaxKind::Text | SyntaxKind::Space | SyntaxKind::Link => within && !math,
         SyntaxKind::Escape | SyntaxKind::Shorthand | SyntaxKind::SmartQuote => whole && !math,
         SyntaxKind::MathText => within && math,
         SyntaxKind::MathShorthand => whole && math,
@@ -268,6 +269,11 @@ pub fn join(source: &Source, at: usize, spaced: bool) -> Option<(Range<usize>, S
         return (spaced && !ends_with_line).then(|| (end..to, "\n".to_owned()));
     }
     let with = if spaced { " " } else { "" };
+    // Nor where Typst could not read it then: what follows a line of
+    // code (`#include "a.typ"`) would be read as more of it.
+    if breaks(source, &[(from..to, with)]).is_some() {
+        return None;
+    }
     Some((from..to, with.to_owned()))
 }
 
@@ -625,6 +631,13 @@ fn unpaired(node: &LinkedNode, range: &Range<usize>, kept: &mut Vec<Range<usize>
         keep(first, last);
     }
     // Brackets, parentheses and braces, each with the one it closes.
+    // In running text a bracket is text, but the one that closes it is
+    // read as closing it: without it, Typst cannot read the other.
+    let text_bracket = |child: &LinkedNode, mark: &str| {
+        node.kind() == SyntaxKind::Markup
+            && child.kind() == SyntaxKind::Text
+            && child.leaf_text() == mark
+    };
     let mut open: Vec<&LinkedNode> = Vec::new();
     for child in &children {
         match child.kind() {
@@ -632,6 +645,12 @@ fn unpaired(node: &LinkedNode, range: &Range<usize>, kept: &mut Vec<Range<usize>
                 open.push(child);
             }
             SyntaxKind::RightBracket | SyntaxKind::RightParen | SyntaxKind::RightBrace => {
+                if let Some(opened) = open.pop() {
+                    keep(opened, child);
+                }
+            }
+            _ if text_bracket(child, "[") => open.push(child),
+            _ if text_bracket(child, "]") => {
                 if let Some(opened) = open.pop() {
                     keep(opened, child);
                 }

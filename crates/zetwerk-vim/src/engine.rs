@@ -3538,6 +3538,15 @@ impl Engine {
                 } else {
                     (format!("{body}\n\n"), at)
                 };
+                // Not lines that Typst could not read as paragraphs:
+                // half of a block of raw text, say.
+                let edit = Edit {
+                    range: at..at,
+                    text: put.clone(),
+                };
+                if host.refuses(std::slice::from_ref(&edit)) {
+                    return self.fail();
+                }
                 self.edit(host, at..at, &put);
                 self.took = Some(Took::Put(start..start + body.len()));
                 self.cursor = Text(host.text()).first_non_blank(start);
@@ -4230,7 +4239,8 @@ impl Engine {
                     to = motion::word_backward(text, to, 1, false).0.max(start);
                 }
                 let to = self.stop_at_insert_start(host.text(), to);
-                if host.parted(to..self.cursor) {
+                // Nor, on a page, what would cut what it shows in two.
+                if host.parted(to..self.cursor) || host.cuts(to..self.cursor) {
                     return false;
                 }
                 self.insert_delete(to, host);
@@ -4241,6 +4251,9 @@ impl Engine {
                     return self.insert_backspace(host);
                 }
                 let to = self.stop_at_insert_start(host.text(), start);
+                if host.parted(to..self.cursor) || host.cuts(to..self.cursor) {
+                    return false;
+                }
                 self.insert_delete(to, host);
             }
             (Key::Char(c @ ('b' | 'i')), true) if self.rows_first => {
@@ -4394,6 +4407,18 @@ impl Engine {
                     .stop(self.cursor, Seek::After)
                     .filter(|stop| stop.start < line_end);
                 (self.cursor, end) = match shown {
+                    // Not over what is no text (the number of a figure,
+                    // a reference): over that, it took all the figure.
+                    Some(stop)
+                        if typed.chars().count() == 1
+                            && typed
+                                .chars()
+                                .next()
+                                .is_some_and(|c| host.put_over(stop.clone(), c).is_none()) =>
+                    {
+                        self.failed = true;
+                        return;
+                    }
                     Some(stop) => (stop.start, stop.end.max(stop.start)),
                     None => (self.cursor, self.cursor),
                 };

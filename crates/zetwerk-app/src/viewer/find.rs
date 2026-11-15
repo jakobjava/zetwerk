@@ -203,6 +203,7 @@ fn things(text: &str) -> Vec<(usize, &'static str)> {
             SyntaxKind::Label => Some(7),
             SyntaxKind::SetRule | SyntaxKind::ShowRule => Some(8),
             SyntaxKind::LineComment | SyntaxKind::BlockComment => Some(9),
+            _ if call("quote") => Some(10),
             _ => None,
         };
         if let Some(index) = index
@@ -229,6 +230,7 @@ fn things(text: &str) -> Vec<(usize, &'static str)> {
         (0, "label"),
         (0, "rule of how the document looks"),
         (0, "comment"),
+        (0, "quote"),
     ];
     let source = Source::detached(text);
     gather(&LinkedNode::new(source.root()), &mut counts);

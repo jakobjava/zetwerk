@@ -947,6 +947,11 @@ impl Engine {
             }
         }
         let to = self.stop_at_insert_start(host.text(), to);
+        if to >= self.cursor && word && host.stop(self.cursor, Seek::Before).is_some() {
+            // Nothing shown before the cursor in its line: only marks
+            // (that of a heading, of an item), which stay.
+            return Some(false);
+        }
         if to >= self.cursor || host.stop(to, Seek::After).is_none() {
             return None;
         }
@@ -1017,7 +1022,9 @@ impl Engine {
         host: &mut impl Host,
     ) -> bool {
         let deletes = matches!(operator, Operator::Delete | Operator::Change);
-        if !self.rows_first || !deletes || object.linewise || object.start >= object.end {
+        // Whole lines too: `Vd` on a block of raw text took its first
+        // lines and left the rest unclosed.
+        if !self.rows_first || !deletes || object.start >= object.end {
             return false;
         }
         let whole = object.start..object.end;
