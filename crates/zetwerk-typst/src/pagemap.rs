@@ -902,7 +902,40 @@ struct SpanIndex {
 /// part of an equation.
 type Found = (Range<usize>, SyntaxKind, bool);
 
+/// How many indexes of sources are kept for the next map: those of the
+/// files on the pages shown, as they are now.
+const INDEXES_KEPT: usize = 4;
+
 impl SpanIndex {
+    /// The index of `source`: made once for all the pages mapped of the
+    /// same text, not for each (it goes through all of the root's
+    /// children, which in a long document are many).
+    fn of(source: Source) -> std::rc::Rc<Self> {
+        thread_local! {
+            static KEPT: std::cell::RefCell<Vec<std::rc::Rc<SpanIndex>>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        // An index keeps its source, and with it its bytes where they
+        // are: where those are tells the sources apart (not where there
+        // are none: all empty texts are in the same place).
+        let same = |index: &&std::rc::Rc<Self>| {
+            index.source.id() == source.id()
+                && !source.text().is_empty()
+                && std::ptr::eq(index.source.text(), source.text())
+        };
+        let known = KEPT.with_borrow(|kept| kept.iter().find(same).cloned());
+        known.unwrap_or_else(|| {
+            let index = std::rc::Rc::new(Self::new(source));
+            KEPT.with_borrow_mut(|kept| {
+                if kept.len() >= INDEXES_KEPT {
+                    kept.remove(0);
+                }
+                kept.push(std::rc::Rc::clone(&index));
+            });
+            index
+        })
+    }
+
     fn new(source: Source) -> Self {
         let mut offset = 0;
         let children = source
@@ -980,7 +1013,7 @@ struct Builder<'a> {
     /// The node the previous glyph resolved to. Neighbouring glyphs nearly
     /// always share a span, and finding a node means a tree search.
     resolved: Option<(Span, Resolved)>,
-    indexes: HashMap<FileId, SpanIndex>,
+    indexes: HashMap<FileId, std::rc::Rc<SpanIndex>>,
     /// The elements that have begun and not ended where the walk is, the
     /// innermost last: what the glyphs there are part of.
     open: Vec<(Location, Span)>,
@@ -1179,7 +1212,7 @@ impl Builder<'_> {
                 let Ok(source) = self.world.source(file) else {
                     return Resolved::Unmappable(Atomic::ForeignFile);
                 };
-                entry.insert(SpanIndex::new(source))
+                entry.insert(SpanIndex::of(source))
             }
         };
         let Some((range, kind, in_equation)) = index.find(span) else {
