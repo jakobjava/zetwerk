@@ -412,7 +412,25 @@ pub fn pieces(source: &Source, range: Range<usize>, with: &str) -> Option<Vec<Ra
         .next()
         .is_some_and(|c| !c.is_whitespace());
     let onto_code = breaks && follows && ends_code(source, range.start);
-    (!glued && !onto_code).then_some(pieces)
+    // Nor a paragraph break put into strong or emphasised text: it would
+    // be left open where the paragraph ends.
+    let joined: String = text[..range.start]
+        .chars()
+        .next_back()
+        .into_iter()
+        .chain(with.chars())
+        .chain(text[range.end..].chars().next())
+        .collect();
+    let lines: Vec<&str> = joined.split('\n').collect();
+    let blank = lines.len() > 2
+        && lines[1..lines.len() - 1]
+            .iter()
+            .any(|l| l.trim().is_empty());
+    let in_set_off = containing(source, range.start)
+        .0
+        .iter()
+        .any(|node| matches!(node.kind(), SyntaxKind::Strong | SyntaxKind::Emph));
+    (!glued && !onto_code && !(blank && in_set_off)).then_some(pieces)
 }
 
 /// Whether byte `at` of `source` ends code put into running text with

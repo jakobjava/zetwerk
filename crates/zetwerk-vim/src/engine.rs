@@ -3164,6 +3164,11 @@ impl Engine {
                 _ if after && !text.line_is_empty(self.cursor) => text.next(self.cursor),
                 _ => self.cursor,
             };
+            // Not where it would leave the text other than it shows
+            // (see `Host::pieces`): strong text left open, say.
+            if self.rows_first && host.pieces(at..at, &inserted).is_none() {
+                return self.fail();
+            }
             self.edit(host, at..at, &inserted);
             self.took = Some(Took::Put(at..at + inserted.len()));
             let text = Text(host.text());

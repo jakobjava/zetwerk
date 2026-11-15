@@ -434,6 +434,21 @@ fn deleting_across_cells_or_into_a_call_leaves_what_makes_it_one() {
 }
 
 #[test]
+fn a_paragraph_break_is_not_put_into_strong_text() {
+    // It left the strong text open where the paragraph ended: an error,
+    // and the page stopped changing.
+    let text = "First words.\n\nSecond *bold words* end.\n";
+    let keys = "/words<CR>v/Second<CR>y/bold<CR>p";
+    assert_eq!(typed(text, keys).replace('|', ""), text);
+    // Where it is not strong text, it is put.
+    let keys = "/words<CR>v/Second<CR>y/end<CR>p";
+    assert_eq!(
+        typed(text, keys).replace('|', ""),
+        "First words.\n\nSecond *bold words* ewords.\n\nSnd.\n"
+    );
+}
+
+#[test]
 fn enter_at_the_start_of_a_heading_keeps_it_a_heading() {
     // The mark stayed behind as an empty heading, and the heading's text
     // became a paragraph.
