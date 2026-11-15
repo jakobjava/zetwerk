@@ -472,6 +472,37 @@ fn unpaired(node: &LinkedNode, range: &Range<usize>, kept: &mut Vec<Range<usize>
             _ => {}
         }
     }
+    // Of a call that does not go whole (a table, a footnote, `#strong`)
+    // what makes it one stays, and the `#` before it: its name, the
+    // names of its arguments and the commas between them, the brackets
+    // of what it holds. What that holds goes; cells stay cells.
+    if matches!(
+        node.kind(),
+        SyntaxKind::FuncCall | SyntaxKind::Args | SyntaxKind::Named
+    ) {
+        for child in children.iter().filter(|child| inside(&child.range())) {
+            if child.kind() == SyntaxKind::ContentBlock {
+                let marks: Vec<LinkedNode> = child.children().collect();
+                if let [first, .., last] = marks.as_slice() {
+                    kept.extend([first.range(), last.range()]);
+                }
+            } else {
+                kept.push(child.range());
+            }
+        }
+    }
+    let cut_into = |part: &Range<usize>| {
+        (part.start < range.start && range.start < part.end)
+            || (part.start < range.end && range.end < part.end)
+    };
+    for pair in children.windows(2) {
+        if pair[0].kind() == SyntaxKind::Hash
+            && inside(&pair[0].range())
+            && cut_into(&pair[1].range())
+        {
+            kept.push(pair[0].range());
+        }
+    }
     // Into what is cut, not into what goes whole or stays whole.
     for child in &children {
         let part = child.range();

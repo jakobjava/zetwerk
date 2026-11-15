@@ -397,6 +397,43 @@ fn word_motions_on_the_page_go_past_the_marks_of_strong_text() {
 }
 
 #[test]
+fn deleting_across_cells_or_into_a_call_leaves_what_makes_it_one() {
+    // Across cells the comma between them went: an error, and the page
+    // stopped changing. Into a footnote or strong text from before it,
+    // its name went and its bracket stayed, shown as a bracket.
+    let cases = [
+        (
+            "#table(columns: 2, [alpha one], [beta two])\n",
+            "/pha<CR>v/et<CR>d",
+            "#table(columns: 2, [al], [ta two])\n",
+        ),
+        (
+            "#table(columns: 2, [alpha one], [beta two])\n",
+            "/alpha<CR>d/two<CR>",
+            "#table(columns: 2, [], [two])\n",
+        ),
+        (
+            "#table(columns: 3, [a1], [b1], [c1])\n",
+            "/a1<CR>lv/c1<CR>d",
+            "#table(columns: 3, [a], [], [1])\n",
+        ),
+        (
+            "Word #strong[bold words] end.\n",
+            "/Word<CR>d/words<CR>",
+            "#strong[words] end.\n",
+        ),
+        (
+            "Word#footnote[A note.] and more.\n",
+            "/Word<CR>d/note<CR>",
+            "#footnote[note.] and more.\n",
+        ),
+    ];
+    for (text, keys, expected) in cases {
+        assert_eq!(typed(text, keys).replace('|', ""), expected, "{keys:?}");
+    }
+}
+
+#[test]
 fn enter_at_the_start_of_a_heading_keeps_it_a_heading() {
     // The mark stayed behind as an empty heading, and the heading's text
     // became a paragraph.
