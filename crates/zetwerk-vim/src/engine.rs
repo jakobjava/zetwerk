@@ -2330,8 +2330,22 @@ impl Engine {
         } else {
             first
         };
-        let (start, mut end) = (first.start.min(last.start), first.end.max(last.end));
+        let (mut start, mut end) = (first.start.min(last.start), first.end.max(last.end));
         let text = Text(host.text());
+        // A paragraph the page sets in several lines is one line to
+        // whoever wrote it, as a line Vim wraps is one to `dd`: all of
+        // it, not the row of it the cursor is in. Taken by the row, the
+        // rest would close up and `p` would put the row into a word.
+        if let (Some((above, before, _)), Some((below, after, _))) =
+            (host.open(start, false), host.open(start, true))
+            && before == "\n\n"
+            && after == "\n\n"
+            && above <= start
+            && end <= text.line_end(below)
+        {
+            start = above;
+            end = end.max(text.line_end(below));
+        }
         // Lines that show all there is of the lines of the text they are
         // in (an item of a list, a heading) go with those lines whole:
         // with the marks that made them what they were, which would else

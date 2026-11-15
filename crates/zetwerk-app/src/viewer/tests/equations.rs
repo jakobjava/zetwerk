@@ -991,8 +991,12 @@ fn what_is_put_into_an_equation_keeps_the_symbols_beside_it() {
     }
     // Into an equation emptied, not behind it (between it and its label).
     let text = "#set math.equation(numbering: \"(1)\")\nA b.\n\n$ x + y $ <eq:a>\n\nSee @eq:a.\n";
+    // The equation is a paragraph of its own: `ddp` puts it behind the
+    // next one, with its label.
     let (mut viewer, directory) = typed(text, "x", "ddp");
-    assert_eq!(viewer.text(), Some(text));
+    let swapped =
+        "#set math.equation(numbering: \"(1)\")\nA b.\n\nSee @eq:a.\n\n$ x + y $ <eq:a>\n";
+    assert_eq!(viewer.text(), Some(swapped));
     settled(&mut viewer);
     let _ = std::fs::remove_dir_all(directory);
 }

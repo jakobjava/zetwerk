@@ -5,7 +5,70 @@ the bibliography manager were built. The user judged all of them worth doing.
 Ordered by how much each is expected to change daily use; nothing here is
 started unless it says so.
 
-## Where this stands (2026-11-15)
+## Where this stands (2026-11-15, evening): after the bug hunt
+
+Nine engineers went through the app, one area each, using it through tests
+and in a hidden window; each fix has a test that fails without it. All of it
+is merged, lint is clean and the whole suite passes. In short:
+
+- **Files:** a file changed while it was closed, or with unsaved changes
+  waiting, no longer costs the text zetwerk had (`u` brings it back);
+  unsaved changes brought back say so loudly, with their age, until written
+  or dropped; `:q!` drops them and keeps them in the history; the word list
+  and the `.bib` file are written as their owner left them.
+- **Panels and agents:** an agent exports only into the document's
+  directory, keeps to "propose" across a change of document, is refused a
+  revision of another document, and is put into the window of its own file;
+  `gD` changes the rule that holds; `g?` shows every entry's keys.
+- **Frames:** the cursor, the view, the numbers of the lines, the tags and
+  the notes stay where they are between a key and its pages; a compile of an
+  older text takes nothing back.
+- **Documents Typst refuses:** a panel says what is wrong, where, and gives
+  keys out of it (go there, take it out, make it what was meant, undo, drop
+  unsaved changes); `:why` shows it again; the status line says when the
+  page is behind the text.
+- **Typing:** Backspace and Delete join paragraphs and never reach into a
+  cell, a caption, a footnote, a comment or a labelled heading; deletions
+  keep the marks of strong text, the cells of a table, the name of a call.
+- **Keys:** no key on the page cuts markup in two or takes what is not
+  shown; `dd` and `yy` take the paragraph and `p` puts it back as one;
+  words are the words the page reads; Ctrl-O/Ctrl-I, Ctrl-R, `"+`, `:s`,
+  `cgn`; dead keys; what Tab does where is written at `Viewer::plain_key`.
+- **Equations:** `$` types a pair; letters typed together become a product;
+  what is taken out leaves an empty place or takes its mark along; an
+  equation emptied goes; refused ones are all shown as written, and stay so.
+- **Parts:** see below.
+- **Speed** (312 pages, release, a busy machine): a key in an equation about
+  820 → 18 ms, the frame after a key up to 690 → 2–12 ms, an idle frame
+  161 → 0.4 ms; nothing runs when nothing happens.
+
+Open, as reported (none fixed):
+
+- A compile that runs very long (a huge loop) cannot be stopped; later ones
+  wait behind it.
+- The `#` menu still leaves `#name` or `@word` behind when left; the panel
+  gets one out of it. A letter typed right behind `#sym.alpha` or a
+  reference with a dot joins its name.
+- Keys in code that shows as nothing: `x` on a footnote's mark or a caption,
+  `d0` in a footnote, Ctrl-U in a table cell, `ci(` in a cell take parts of
+  the call. `A` at a line that ends in an equation types into it.
+- `V` takes the row the page shows, `dd` the paragraph. No Shift-Tab, no
+  block selection, insert mappings of one key only (`jk` is refused).
+- No `:w <path>`; a second window on the same file is refused without a
+  word in the window; `:png 1 name.png` replaces a file of that name; lines
+  typed into a file with CRLF line ends get LF; the history is never pruned.
+- `gD`: any name is taken for the paper; a typed value that is like a
+  listed one takes that one.
+- Speed, each with numbers in the report of the day: wrapping the pages as a
+  document after a part (15 ms on 312 pages), the walks from the root of the
+  text in `typst_text` (14–30% of a Backspace there), `left_empty_everywhere`
+  on every part, Typst's `Source::edit`, page maps rebuilt after every part.
+- Parts: lines left out at the foot of a full page do not come back before
+  the pause; the predictor breaks lines of justified text otherwise than
+  Typst until then.
+- Still nothing of this was typed on a real keyboard by its authors.
+
+## Where this stood (2026-11-15, morning)
 
 Built since, on the working tree of `page-surface` (each by an agent on a
 branch of its own, merged and tested together; lint and all tests pass):

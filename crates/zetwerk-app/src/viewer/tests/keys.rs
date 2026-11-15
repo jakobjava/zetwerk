@@ -647,6 +647,21 @@ fn lines_deleted_or_yanked_on_a_page_are_put_back_as_paragraphs() {
             "yapGp",
             "one\n\ntwo\n\nthree\n\ntwo\n",
         ),
+        // A paragraph written over several lines, or set in several by
+        // the page, is one line to `dd`: it took the row the cursor was
+        // in, and `p` put that into the middle of a word.
+        (
+            "one a\none b\n\ntwo\n\nthree\n",
+            "one b",
+            "ddp",
+            "\ntwo\n\none a\none b\n\nthree\n",
+        ),
+        (
+            "one is a paragraph long enough to be set in more lines than one on a page this narrow\n\ntwo\n",
+            "long",
+            "ddp",
+            "\ntwo\n\none is a paragraph long enough to be set in more lines than one on a page this narrow\n",
+        ),
         // In a list, lines are items.
         ("- a\n- b\n", "a", "ddp", "- b\n- a\n"),
         ("- a\n- b\n", "a", "yyp", "- a\n- a\n- b\n"),
@@ -851,5 +866,8 @@ fn what_is_taken_out_of_an_exponent_takes_its_mark_along() {
         ("One $x^2 + alpha$ see.\n", "^", "3x", "One $x$ see.\n"),
         ("One $x^2 + alpha$ see.\n", "2", "d3w", "One $x$ see.\n"),
         ("One $x^2$ see.\n", "2", "x", "One $x$ see.\n"),
+        // Not what follows is raised then.
+        ("One $x^2 + y$ see.\n", "2", "x", "One $x + y$ see.\n"),
+        ("One $x_1 + y$ see.\n", "1 +", "x", "One $x + y$ see.\n"),
     ]);
 }

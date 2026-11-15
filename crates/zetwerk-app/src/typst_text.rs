@@ -1551,6 +1551,11 @@ fn scripts_in(node: &LinkedNode, text: &str, end: usize, found: &mut Vec<Range<u
             found.push(range.start..end - behind.len());
         } else if rest.is_empty() || rest.starts_with([',', ';', ')', '$', ']', '^', '_']) {
             found.push(range.start..if rest.is_empty() { from } else { range.end });
+        } else if node.kind() != SyntaxKind::Slash && text[range.end..end].starts_with(' ') {
+            // A blank behind the mark, where what it raised or lowered
+            // was: left there, it would raise what follows the blank
+            // (the `+` of `x^ + y`). A fraction is written with blanks.
+            found.push(range);
         }
     }
     for child in node.children() {

@@ -5627,14 +5627,18 @@ mod tests {
         assert_eq!(two.start, line.start);
         assert!(two.end > line.end + 20 && two.end < text.find("\n\nSecond").unwrap());
         press(&mut viewer, "<Esc>");
-        // `dd` takes the line shown out of its paragraph, and no more.
+        // `dd` takes the paragraph: that is one line to whoever wrote
+        // it, as a line Vim wraps is one to `dd`. The row shown, taken
+        // out of its paragraph, could be put back nowhere but into a
+        // word.
         press(&mut viewer, "/jumps<CR>dd");
-        let rest = paragraph(&viewer);
+        let rest = viewer.text().unwrap().to_owned();
         assert!(
-            !rest.contains("jumps") && rest.contains("follows here."),
+            !rest.contains("jumps")
+                && !rest.contains("follows here.")
+                && rest.contains("Second paragraph."),
             "{rest}"
         );
-        assert_eq!(viewer.text().unwrap().lines().count(), 6);
         press(&mut viewer, "u");
         compile(&mut viewer);
         // At its end and at its start.
