@@ -2234,7 +2234,21 @@ impl Engine {
             let Some(range) = self.selection(host.text()) else {
                 return;
             };
-            let linewise = self.mode == Mode::VisualLine;
+            let mut linewise = self.mode == Mode::VisualLine;
+            let mut range = range;
+            // Lines a page shows, selected with `V`, that are all there
+            // is of lines of the text: deleted or yanked as lines, as
+            // they are in Vim, for `p` to put back as lines.
+            let text = Text(host.text());
+            let whole = self.line_select
+                && matches!(operator, Operator::Delete | Operator::Yank)
+                && range.start == text.line_start(range.start)
+                && range.end == text.line_end(range.end)
+                && range.start < range.end;
+            if whole {
+                linewise = true;
+                range.end = line_end_inclusive(text, range.end);
+            }
             let landing = self.selection_start(Text(host.text()));
             let (count, _) = self.take_count();
             self.record_selection(Text(host.text()));
@@ -2986,6 +3000,7 @@ impl Engine {
         if linewise {
             start = text.line_start(start);
             end = line_end_inclusive(text, end);
+            (start, end) = self.shown_lines_within(start, end, host);
         }
         self.reset_pending_keep_register();
         let landing = self.cursor.min(moved.to);

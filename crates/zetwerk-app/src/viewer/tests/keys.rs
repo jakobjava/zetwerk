@@ -21,7 +21,10 @@ fn on_page(body: &str, needle: &str, keys: &str) -> String {
     press(&mut viewer, keys);
     let after = viewer.text().unwrap().to_owned();
     let _ = std::fs::remove_dir_all(directory);
-    after.strip_prefix(PAGE).unwrap_or(&after).to_owned()
+    // What took the page's set-up along says so.
+    after
+        .strip_prefix(PAGE)
+        .map_or_else(|| format!("(no set-up) {after}"), str::to_owned)
 }
 
 /// Runs each of `cases` (a text, where the cursor is put, the keys, the
@@ -650,4 +653,46 @@ fn back_a_paragraph_is_to_its_start() {
         ),
         ("one\n\ntwo\n\nthree\n", "one", "}x", "one\n\nwo\n\nthree\n"),
     ]);
+}
+
+#[test]
+fn whole_lines_on_a_page_are_lines_the_page_shows() {
+    check(&[
+        // `V` and an operator: lines, put back as paragraphs. `VGy` and
+        // `p` put the lines into the middle of a word.
+        (
+            "One two.\n\nThree.\n",
+            "One",
+            "VGy<Esc>Gp",
+            "One two.\n\nThree.\n\nOne two.\n\nThree.\n",
+        ),
+        (
+            "One two.\n\nThree.\n",
+            "One",
+            "VdGp",
+            "\nThree.\n\nOne two.\n",
+        ),
+        // `dgg` took the rules that set up the page along (they stay
+        // before what is left).
+        ("One two.\n\nThree.\n\nFour.\n", "Three", "dgg", "\nFour.\n"),
+        // `dj` above a figure took the first line of it and left the
+        // rest as text; it takes the figure, one line of the page.
+        (
+            "Some words.\n#figure(\n  rect(),\n  caption: [A box.],\n)\n\nMore.\n",
+            "words",
+            "dj",
+            "\nMore.\n",
+        ),
+    ]);
+}
+
+#[test]
+fn a_cursor_in_the_middle_of_a_thing_shown_as_one_rests_on_it() {
+    // A search led into a link; `diw` took the blank behind it.
+    check(&[(
+        "One https://example.com three.\n",
+        "example",
+        "diw",
+        "One ://example.com three.\n",
+    )]);
 }

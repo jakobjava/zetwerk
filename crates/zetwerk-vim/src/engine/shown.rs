@@ -14,7 +14,10 @@
 
 use std::ops::Range;
 
-use super::{Awaiting, Column, Edit, Engine, Host, Mode, Operator, Seek, clamp, lower, upper};
+use super::{
+    Awaiting, Column, Edit, Engine, Host, Mode, Operator, Seek, clamp, line_end_inclusive, lower,
+    upper,
+};
 use crate::keys::{Key, KeyPress};
 use crate::object::Object;
 use crate::text::Text;
@@ -28,6 +31,11 @@ const MANY: usize = 4096;
 /// Up to how many characters a place may be written with to be found by
 /// any of them (see [`found_by`]).
 const SHORT: usize = 3;
+
+/// How many lines a whole-lines command looks on for the end of what
+/// it would else cut in two: more than a figure or a table is written
+/// over, as a rule.
+const LOOK_AT: usize = 64;
 
 /// Whether `f` and `t` find what is shown at bytes `stop` of `text` when
 /// they look for `target`.
@@ -555,6 +563,75 @@ impl Engine {
         true
     }
 
+    /// Whole lines `start..end` of the text that a motion took for an
+    /// operator (`dgg`, `dG`, `dj`), where the host shows pages: without
+    /// the lines at either end that show nothing although something is
+    /// written there (the rules that set up the page, a comment). Those
+    /// are not where the motion went on the page; `dgg` took them along.
+    /// Empty lines stay: they part paragraphs. All of it where no line
+    /// shows anything.
+    pub(super) fn shown_lines_within(
+        &self,
+        start: usize,
+        end: usize,
+        host: &impl Host,
+    ) -> (usize, usize) {
+        if !self.rows_first || start >= end {
+            return (start, end);
+        }
+        let text = Text(host.text());
+        let hidden = |line: usize| {
+            let line_end = text.line_end(line);
+            line < line_end
+                && host
+                    .stop(line, Seek::After)
+                    .is_none_or(|stop| stop.start >= line_end)
+        };
+        let (mut from, mut to) = (start, end);
+        while from < to && hidden(from) {
+            from = text.next_line(from).unwrap_or(to).min(to);
+        }
+        while from < to {
+            let last = text.line_start(text.prev(to));
+            if last < from || !hidden(last) {
+                break;
+            }
+            to = last;
+        }
+        if from >= to {
+            return (start, end);
+        }
+        // Lines that end or begin in the middle of something the page
+        // shows as one (a figure written over several lines, a table):
+        // all of it, as it is one line of the page. Else `dj` above a
+        // figure took its first line and left the rest as text.
+        if host.cuts(from..to) {
+            let len = text.0.len();
+            let mut later = to;
+            for _ in 0..LOOK_AT {
+                if later >= len || !host.cuts(from..later) {
+                    break;
+                }
+                later = line_end_inclusive(text, later);
+            }
+            let mut earlier = from;
+            for _ in 0..LOOK_AT {
+                if earlier == 0 || !host.cuts(earlier..to) {
+                    break;
+                }
+                earlier = text.line_start(text.prev(earlier));
+            }
+            if !host.cuts(from..later) {
+                to = later;
+            } else if !host.cuts(earlier..to) {
+                from = earlier;
+            } else if !host.cuts(earlier..later) {
+                (from, to) = (earlier, later);
+            }
+        }
+        (from, to)
+    }
+
     /// After `{` where the host shows pages: the empty line it went to
     /// shows nothing, and coming to rest before it would be on the end
     /// of the paragraph before. To the start of the paragraph instead,
@@ -701,11 +778,17 @@ impl Engine {
         }
         let text = Text(host.text());
         let line = text.line_index(clamp(text, self.cursor, true));
-        // What follows in its line before what is before it.
+        // What the cursor is in the middle of (a link, shown as one,
+        // that a search led into); else what follows in its line before
+        // what is before it.
+        let within = host
+            .stop(self.cursor, Seek::Before)
+            .filter(|stop| stop.end > self.cursor);
         let after = host
             .stop(self.cursor, Seek::After)
             .filter(|stop| text.line_index(stop.start) == line);
-        let stop = after.or_else(|| host.stop(self.cursor, Seek::Before));
+        let stop = within.or(after);
+        let stop = stop.or_else(|| host.stop(self.cursor, Seek::Before));
         let stop = stop.or_else(|| host.stop(self.cursor, Seek::After));
         if let Some(stop) = stop {
             self.cursor = stop.start;
