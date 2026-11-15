@@ -67,10 +67,20 @@ pub fn page_size_px(page: &Page, pixel_per_pt: f64) -> (u32, u32) {
 
 /// A page consisting of just `region` of `page`.
 fn crop_page(page: &Page, region: PixelRegion, pixel_per_pt: f64) -> Page {
+    crop_placed_page(page, &cull::placed(&page.frame), region, pixel_per_pt)
+}
+
+/// [`crop_page`] of `page`, whose items are `placed` (see [`cull::placed`]).
+fn crop_placed_page(
+    page: &Page,
+    placed: &[cull::Placed<'_>],
+    region: PixelRegion,
+    pixel_per_pt: f64,
+) -> Page {
     let to_pt = |px: u32| Abs::pt(f64::from(px) / pixel_per_pt);
     let origin = Point::new(to_pt(region.x), to_pt(region.y));
     let size = Size::new(to_pt(region.width), to_pt(region.height));
-    let frame = cull::crop(&page.frame, Rect::from_pos_size(origin, size));
+    let frame = cull::crop_placed(placed, Rect::from_pos_size(origin, size));
     Page {
         frame,
         ..page.clone()

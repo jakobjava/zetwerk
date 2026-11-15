@@ -143,21 +143,22 @@ impl Viewer {
         let zoom = self.view.zoom;
         for (away, edge, middle) in drawn {
             let markup = chrome::margin_number_markup(away, SIZE);
-            let Some(image) = self.chrome.render(&markup, zoom) else {
+            // Not typeset again while the compositor holds it: there are
+            // more of them than chrome keeps.
+            let Some((id, (width, height), image)) =
+                self.chrome.render_unless_held(&markup, zoom, has)
+            else {
                 continue;
             };
-            let (width, height) = (
-                f64::from(image.pixmap.width()),
-                f64::from(image.pixmap.height()),
-            );
+            let (width, height) = (f64::from(width), f64::from(height));
             scene.quads.push(Quad {
-                texture: image.id,
+                texture: id,
                 x: (origin.0 + (edge - GAP) * zoom - width).round() as f32,
                 y: (origin.1 + middle * zoom - height / 2.0).round() as f32,
                 width: width as f32,
                 height: height as f32,
             });
-            if !has(image.id) {
+            if let Some(image) = image.filter(|_| !has(id)) {
                 scene.images.push(image);
             }
         }

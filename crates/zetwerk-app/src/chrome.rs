@@ -42,6 +42,12 @@ const FONT: &str = "DejaVu Sans Mono";
 /// bounds what chrome leaves behind over a long session.
 const UNUSED_ROUNDS: usize = 2000;
 
+/// How many renders Typst is asked to forget after, at once: looking
+/// through its cache takes as long as the document is large (a third
+/// of a millisecond for fifty pages), and the status line alone is
+/// typeset anew with nearly every key.
+const FORGET_EVERY: usize = 16;
+
 /// How many rendered pieces of chrome are kept. The status line changes
 /// with every page scrolled past; a handful covers flipping back and forth.
 const CACHE_SIZE: usize = 32;
@@ -62,6 +68,11 @@ pub struct Chrome {
     cache: HashMap<TextureId, (u64, Arc<Pixmap>)>,
     /// Counts renders, to find the least recently used cache entry.
     clock: u64,
+    /// Counts what was typeset since Typst last forgot what is unused.
+    unforgotten: usize,
+    /// Counts all that was typeset to be drawn, for tests.
+    #[cfg(test)]
+    rasterized: u64,
     /// The pixel sizes of images rendered without keeping them: enough to
     /// draw one that the compositor still holds.
     sizes: HashMap<TextureId, (u32, u32)>,
@@ -95,6 +106,9 @@ impl Chrome {
             project,
             cache: HashMap::new(),
             clock: 0,
+            unforgotten: 0,
+            #[cfg(test)]
+            rasterized: 0,
             sizes: HashMap::new(),
             cell: None,
             ends: HashMap::new(),
@@ -192,14 +206,34 @@ impl Chrome {
             .collect()
     }
 
+    /// How many pieces have been typeset to be drawn.
+    #[cfg(test)]
+    pub fn rasterized(&self) -> u64 {
+        self.rasterized
+    }
+
     fn rasterize(&mut self, markup: &str, scale: f64) -> Option<Pixmap> {
+        #[cfg(test)]
+        {
+            self.rasterized += 1;
+        }
         self.project.set_main_text(markup);
         let document = zetwerk_typst::compile(&self.project.snapshot()).document;
-        zetwerk_typst::forget_unused(UNUSED_ROUNDS);
+        self.forget_unused();
         Some(zetwerk_render::render_page(
             document?.pages().first()?,
             scale,
         ))
+    }
+
+    /// Has Typst forget what was not used for [`UNUSED_ROUNDS`] renders,
+    /// every [`FORGET_EVERY`] of them.
+    fn forget_unused(&mut self) {
+        self.unforgotten += 1;
+        if self.unforgotten >= FORGET_EVERY {
+            self.unforgotten = 0;
+            zetwerk_typst::forget_unused(UNUSED_ROUNDS / FORGET_EVERY);
+        }
     }
 
     /// The name of the image of a row of the source pane.
@@ -232,7 +266,7 @@ impl Chrome {
         }
         self.project.set_main_text(&markup);
         let document = zetwerk_typst::compile(&self.project.snapshot()).document;
-        zetwerk_typst::forget_unused(UNUSED_ROUNDS);
+        self.forget_unused();
         let Some(document) = document else {
             return Vec::new();
         };
@@ -275,6 +309,33 @@ impl Chrome {
         );
         self.cell = Some((scale.to_bits(), width));
         width
+    }
+
+    /// What [`Chrome::render`] makes of `markup`: its name and its size in
+    /// pixels, and the image itself only where the compositor does not
+    /// hold it already (`has`). For pieces drawn many at a time (the
+    /// numbers beside the lines): more of them in a frame than
+    /// [`CACHE_SIZE`] would otherwise all be typeset again in every
+    /// frame, each pushing the next out of the cache.
+    pub fn render_unless_held(
+        &mut self,
+        markup: &str,
+        scale: f64,
+        has: &dyn Fn(TextureId) -> bool,
+    ) -> Option<(TextureId, (u32, u32), Option<Image>)> {
+        let id = Self::id(markup, scale);
+        if has(id)
+            && let Some(size) = self.sizes.get(&id)
+        {
+            return Some((id, *size, None));
+        }
+        let image = self.render(markup, scale)?;
+        if self.sizes.len() >= SIZES_KEPT {
+            self.sizes.clear();
+        }
+        let size = (image.pixmap.width(), image.pixmap.height());
+        self.sizes.insert(id, size);
+        Some((id, size, Some(image)))
     }
 
     /// Typesets `markup` and rasterizes its first page at `scale` pixels per

@@ -319,6 +319,11 @@ fn same(wanted: char, found: char, fold: bool, loose: bool) -> bool {
 
 /// `c` in lower case, as far as that is one character.
 fn lower(c: char) -> char {
+    // Most of a text is ASCII, and this is asked of every character of
+    // it while matches are shown: without the general tables.
+    if c.is_ascii() {
+        return c.to_ascii_lowercase();
+    }
     let mut lower = c.to_lowercase();
     match (lower.next(), lower.next()) {
         (Some(one), None) => one,

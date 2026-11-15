@@ -360,8 +360,11 @@ impl PageMap {
             while across.len() > 1 && across.last().is_some_and(|glyph| glyph.blank) {
                 across.pop();
             }
+            // Only those of this line can be the same: looking through
+            // all of the page's took as long as the square of its glyphs.
+            let first = stops.len();
             for glyph in across {
-                let known = stops.iter().any(|stop| {
+                let known = stops[first..].iter().any(|stop| {
                     stop.line == index && (stop.file, stop.start, stop.end) == glyph.place()
                 });
                 if !known {
