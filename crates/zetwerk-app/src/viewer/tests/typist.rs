@@ -250,7 +250,7 @@ fn compare_with_whole(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
     let Some(shown_world) = viewer.compiled_world.clone() else {
         return;
     };
-    let (_, world) = viewer.snapshot();
+    let (_, world) = snapshot_aside(viewer);
     let compiled = zetwerk_typst::compile(&world);
     let Some(whole) = compiled.document else {
         // A part shows a reference to what it does not hold by its name;
@@ -274,7 +274,30 @@ fn compare_with_whole(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
         if untouched.is_some_and(|old| hash128(&old.frame) == hash128(&page.frame)) {
             continue;
         }
-        let kind = if local.len() == right.len() {
+        // The places of the text the pages beside this one show.
+        let beside = |pages: &[typst_layout::Page], world: &ProjectWorld| {
+            [index.checked_sub(1), Some(index + 1)]
+                .into_iter()
+                .flatten()
+                .filter_map(|at| pages.get(at))
+                .flat_map(|page| placed(world, &page.frame))
+                .filter_map(|(_, _, byte)| byte)
+                .collect::<std::collections::BTreeSet<usize>>()
+        };
+        let (shown_beside, whole_beside) = (
+            beside(shown.pages(), &shown_world),
+            beside(whole.pages(), &world),
+        );
+        let near = local.len() == right.len()
+            && local
+                .iter()
+                .zip(&right)
+                .all(|(a, b)| (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1 && a.2 == b.2);
+        let kind = if near {
+            "glyphs stand a tenth of a point apart".to_owned()
+        } else if breaks_elsewhere(&local, &right, &shown_beside, &whole_beside) {
+            "the page breaks elsewhere".to_owned()
+        } else if local.len() == right.len() {
             let moved = local.iter().zip(&right).filter(|(a, b)| a != b).count();
             let numbers = local
                 .iter()
@@ -307,6 +330,132 @@ fn compare_with_whole(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
         };
         Tally::note(&mut tally.differs, kind, detail);
     }
+}
+
+/// Whether the glyphs `here` (as [`placed`]) differ from those `there`
+/// only as a page that breaks elsewhere does, which the whole puts right:
+/// what is on one and not the other is on a page beside the other (the
+/// places of the text they show: `shown_beside` beside `here`,
+/// `whole_beside` beside `there`),
+/// and all that both show is the same, moved up or down by as much.
+fn breaks_elsewhere(
+    here: &[(i64, i64, Option<usize>)],
+    there: &[(i64, i64, Option<usize>)],
+    shown_beside: &std::collections::BTreeSet<usize>,
+    whole_beside: &std::collections::BTreeSet<usize>,
+) -> bool {
+    use std::collections::{BTreeSet, HashMap};
+    let mut shifts: HashMap<i64, usize> = HashMap::new();
+    let wheres: HashMap<usize, i64> = there
+        .iter()
+        .filter_map(|(_, y, byte)| Some(((*byte)?, *y)))
+        .collect();
+    for (_, y, byte) in here {
+        if let Some(there) = byte.and_then(|byte| wheres.get(&byte)) {
+            *shifts.entry(y - there).or_default() += 1;
+        }
+    }
+    let Some((&shift, _)) = shifts
+        .iter()
+        .max_by_key(|(shift, count)| (**count, -shift.abs()))
+    else {
+        return false;
+    };
+    let moved: BTreeSet<(i64, i64, Option<usize>)> = there
+        .iter()
+        .map(|(x, y, byte)| (*x, y + shift, *byte))
+        .collect();
+    let here_set: BTreeSet<(i64, i64, Option<usize>)> = here.iter().copied().collect();
+    let elsewhere = |glyphs: BTreeSet<_>, beside: &BTreeSet<usize>| {
+        glyphs
+            .iter()
+            .filter_map(|glyph: &&(i64, i64, Option<usize>)| glyph.2)
+            .all(|byte| beside.contains(&byte))
+    };
+    here_set.intersection(&moved).next().is_some()
+        && elsewhere(here_set.difference(&moved).collect(), whole_beside)
+        && elsewhere(moved.difference(&here_set).collect(), shown_beside)
+}
+
+/// A snapshot of the text as it is, to compare with: what the pages on
+/// screen were made with is left as it was.
+fn snapshot_aside(viewer: &mut Viewer) -> (u64, ProjectWorld) {
+    let shown = viewer.shown_put.clone();
+    let snapshot = viewer.snapshot();
+    viewer.shown_put = shown;
+    snapshot
+}
+
+/// The page worked out from what was typed, if one is shown, compared
+/// with what all of the text typeset at once makes of it: where every
+/// glyph stands, to a tenth of a point.
+fn compare_prediction(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() -> String) {
+    let Some((index, page)) =
+        (viewer.predicted.as_ref()).map(|shown| (shown.index, shown.page.clone()))
+    else {
+        return;
+    };
+    let Some(shown_world) = viewer.compiled_world.clone() else {
+        return;
+    };
+    let (_, world) = snapshot_aside(viewer);
+    let Some(whole) = zetwerk_typst::compile(&world).document else {
+        return;
+    };
+    let Some(full) = whole.pages().get(index) else {
+        return;
+    };
+    // By lines, then along them.
+    let places = |world: &ProjectWorld, frame| {
+        let mut all: Vec<(i64, i64)> = placed(world, frame)
+            .into_iter()
+            .map(|(x, y, _)| (y, x))
+            .collect();
+        all.sort_unstable();
+        all
+    };
+    let (here, there) = (
+        places(&shown_world, &page.frame),
+        places(&world, &full.frame),
+    );
+    if here == there {
+        return;
+    }
+    let kind = if here.len() == there.len() {
+        let worst = here
+            .iter()
+            .zip(&there)
+            .map(|(a, b)| (a.0 - b.0).abs().max((a.1 - b.1).abs()))
+            .max()
+            .unwrap_or(0);
+        format!(
+            "predicted glyphs stand elsewhere (by {} tenths of a point or less)",
+            if worst <= 5 {
+                5
+            } else {
+                worst.min(1000) / 10 * 10 + 10
+            }
+        )
+    } else {
+        "the prediction shows a different number of glyphs".to_owned()
+    };
+    let detail = || {
+        let first = here
+            .iter()
+            .zip(&there)
+            .position(|(a, b)| a != b)
+            .unwrap_or(here.len().min(there.len()));
+        format!(
+            "{} on page {index}: {} glyphs here, {} in the whole; first difference at {first}: \
+             {:?} against {:?}",
+            case(),
+            here.len(),
+            there.len(),
+            here.get(first),
+            there.get(first)
+        )
+    };
+    Tally::note(&mut tally.differs, kind, detail);
 }
 
 /// Typesets all of it, as when typing pauses, and counts what failed.
@@ -496,11 +645,14 @@ fn walk(files: &[(&str, &str)], seed: u64, steps: usize, tally: &mut Tally) {
                     case,
                 );
             }
+            let case = case();
             if viewer.stats.local > local {
                 tally.local += 1;
                 tally.local_ms += viewer.stats.local_ms;
-                let case = case();
                 compare_with_whole(&mut viewer, tally, &|| case.clone());
+            }
+            if viewer.is_predicted() {
+                compare_prediction(&mut viewer, tally, &|| case.clone());
             }
         }
         if dice.chance(15) {
@@ -631,9 +783,9 @@ fn number_from_env(name: &str, default: usize) -> usize {
 
 /// Walks every document with `seeds` seeds of `steps` actions, and
 /// asks what holds of every walk: undoing gives back what was there;
-/// where nothing is numbered and no page breaks, a part shows what the
-/// whole shows, glyph for glyph; and nowhere are pages a part was put
-/// into said to be all of it typeset.
+/// in the documents of one file, a part shows what the whole shows,
+/// glyph for glyph; and nowhere are pages a part was put into said to
+/// be all of it typeset.
 fn walks(seeds: usize, steps: usize) {
     let documents: [(&str, &[(&str, &str)]); 5] = [
         ("empty", &[("main.typ", "")]),
@@ -657,7 +809,14 @@ fn walks(seeds: usize, steps: usize) {
                 .map(|failure| format!("{name}: {failure}")),
         );
         for (kind, (count, case)) in &tally.differs {
-            if name == "plain" || kind.starts_with("said to be") {
+            // What a part shows has to be what the whole shows; what is
+            // worked out on a line, and where pages break, is only told
+            // of (see `report`).
+            let part = !kind.contains("predict")
+                && !kind.contains("breaks elsewhere")
+                && !kind.contains("a tenth of a point apart");
+            let strict = name != "chapters" && part;
+            if strict || kind.starts_with("said to be") {
                 wrong.push(format!("{name}: {count}× {kind}; first: {case}"));
             }
         }

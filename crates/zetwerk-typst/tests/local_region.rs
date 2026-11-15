@@ -2,11 +2,10 @@
 //! finds holds all that changed, and what is cut down to it keeps the
 //! numbers its nodes have in the whole.
 //!
-//! The second does not always hold (see
-//! `the_cut_keeps_the_numbers_of_the_region`): a mark that sets text off
-//! typed and not closed, or a list marker typed on the line of a rule,
-//! is parsed otherwise in what is cut down than in the whole. That is
-//! for `local` to put right; until then it is shown, not asked for.
+//! The second does not hold of itself: a mark that sets text off typed
+//! and not closed, or a list marker typed on the line of a rule, is read
+//! otherwise in what is cut down than in the whole (27 of 2000 edits
+//! once). `cut_down` finds that and refuses; what it gives keeps them.
 
 #![allow(clippy::unwrap_used, reason = "a failed step should fail the test")]
 
@@ -106,7 +105,7 @@ fn place(dice: &mut Dice, text: &str) -> usize {
 /// Random edits of random documents, each asked about; the cases in
 /// which what was cut down lost numbers of the region.
 fn regions() -> Vec<String> {
-    let (mut found, mut refused) = (0, 0);
+    let (mut found, mut refused, mut read_otherwise) = (0, 0, 0);
     let mut losses = Vec::new();
     for seed in 0..2000 {
         let mut dice = Dice(seed);
@@ -162,7 +161,11 @@ fn regions() -> Vec<String> {
         // in the region.
         for region in [region.clone(), region.clone().alone(&new)] {
             let lead = "#set page(height: auto)\n";
-            let cut = cut_down(&new, &region, lead);
+            // What would be read otherwise by itself is not typeset so.
+            let Ok(cut) = cut_down(&new, &region, lead) else {
+                read_otherwise += 1;
+                continue;
+            };
             assert!(
                 cut.text().ends_with(&now[region.kept.clone()]),
                 "{}: cut down to {:?}",
@@ -187,26 +190,29 @@ fn regions() -> Vec<String> {
         }
     }
     println!(
-        "{found} regions found, {refused} refused, {} cuts lost numbers",
+        "{found} regions found, {refused} refused, {read_otherwise} cuts read otherwise, {} \
+         cuts lost numbers",
         losses.len()
     );
     assert!(found > 500, "{found} regions found, {refused} refused");
+    assert!(
+        read_otherwise <= 60,
+        "{read_otherwise} cuts read otherwise: more than is to be expected"
+    );
     losses
 }
 
 #[test]
 fn the_region_holds_the_change() {
-    // Of 2000 edits, 27 cuts lost numbers when this was written: more is
-    // a new way of losing them.
     let losses = regions();
     assert!(losses.len() <= 40, "{losses:#?}");
 }
 
 #[test]
-#[ignore = "shows a fault of `local`: an unclosed `*` or `_`, or `- ` on the line of a rule, is parsed otherwise when cut down"]
 fn the_cut_keeps_the_numbers_of_the_region() {
-    // The first two: seed 21, `*` typed behind `*strong*`; seed 174,
-    // `- ` typed at the end of the line of a `#set` rule.
+    // Once lost: seed 21, `*` typed behind `*strong*`; seed 174, `- `
+    // typed at the end of the line of a `#set` rule; seed 1084, `]` in a
+    // caption.
     let losses = regions();
     assert!(losses.is_empty(), "{} cuts: {losses:#?}", losses.len());
 }

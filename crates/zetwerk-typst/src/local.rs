@@ -22,12 +22,31 @@
 //! text that did not change is found in the changed text by the same
 //! numbers, and what was typeset by itself fits among it.
 
+use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use typst::layout::{Abs, Frame, FrameItem, Point};
+use typst::foundations::Label;
+use typst::introspection::{Introspector, Location, Tag};
+use typst::layout::{Abs, Frame, FrameItem, GroupItem, Point};
 use typst::syntax::{FileId, Source, Span, SyntaxKind};
+use typst::utils::PicoStr;
 use typst::visualize::Geometry;
-use typst_layout::Page;
+use typst_layout::{Page, PagedDocument};
+
+/// What a lead puts in to find where the text of a page ends: placed at
+/// the foot of the text, it takes no room and shows nothing.
+pub const FOOT_MARK: &str = "#place(bottom)[#metadata(none) <zetwerk-foot>]\n";
+
+/// How far down its page the text of `typeset` (a part with
+/// [`FOOT_MARK`] in its lead) may reach.
+#[must_use]
+pub fn foot_of_text(typeset: &PagedDocument) -> Option<Abs> {
+    let label = Label::new(PicoStr::intern("zetwerk-foot"))?;
+    let introspector = typeset.introspector();
+    let mark = introspector.query_label(label).ok()?.location()?;
+    Some(introspector.position(mark)?.point.y)
+}
 
 /// The numbers of the nodes of a stretch of text: from the first on,
 /// before the second.
@@ -72,6 +91,15 @@ pub enum Refusal {
     /// Other things stand among the part on the page (a figure that
     /// floats, a footnote), or it was typeset onto several pages.
     NotInOnePiece,
+    /// The part would reach into the margin below the text of the page:
+    /// some of it goes to the next page, which is for all of it typeset
+    /// at once to show.
+    BreaksOtherwise,
+    /// Cut away from the rest, the part is read otherwise than among it
+    /// (a `*` not closed, a list marker on the line of a rule), or Typst
+    /// read it anew and numbered its nodes otherwise: what is typeset of
+    /// it cannot be told apart.
+    ReadOtherwise,
 }
 
 /// A span's number within its file.
@@ -230,7 +258,8 @@ impl Region {
     /// in the rules or the lead.
     #[must_use]
     pub fn in_whole(&self, at: usize, lead: usize) -> Option<usize> {
-        let kept = at.checked_sub(self.rules + lead)?;
+        // The lead is a paragraph of its own (see `cut_down`).
+        let kept = at.checked_sub(self.rules + 2 + lead)?;
         Some(self.kept.start.max(self.rules) + kept)
     }
 
@@ -240,7 +269,9 @@ impl Region {
             return None;
         }
         let number = number(span);
-        if span.id() == Some(self.file) && number < self.floor {
+        // What stood there before may be numbered below what is kept now:
+        // Typst numbers what it reads anew between what it did not.
+        if span.id() == Some(self.file) && number < self.floor.min(numbers.0) {
             return None;
         }
         Some(span.id() == Some(self.file) && numbers.0 <= number && number < numbers.1)
@@ -291,18 +322,65 @@ impl Region {
     fn run(&self, numbers: Numbers, frame: &Frame) -> Result<Option<Run>, Refusal> {
         let mut run: Option<Run> = None;
         let mut others = 0;
+        // The elements begun and not yet ended, innermost last, and
+        // whether each is of the nodes: what shows nothing of the text
+        // (the number of an item of a list, of a heading) is of the
+        // element it is in.
+        let mut open: Vec<(Location, bool)> = Vec::new();
+        // The marks of the elements of the nodes that begin right before
+        // the first item and end right behind the last go with them:
+        // where the first of them is, how far the last reaches, and which
+        // elements they are.
+        let (mut lead, mut tail, mut ending) = (None, None, false);
+        let mut inside: HashSet<Location> = HashSet::new();
         for (index, (position, item)) in frame.items().enumerate() {
             // What is below the line above the footnotes is not looked
             // at: the notes stay as they are.
             if is_rule_across(item) {
                 break;
             }
-            match self.shows(numbers, item) {
+            let shows = match item {
+                FrameItem::Tag(_) => None,
+                _ => self
+                    .shows(numbers, item)
+                    .or_else(|| open.last().is_some_and(|(_, of)| *of).then_some(true)),
+            };
+            let before = open.len();
+            self.follow(numbers, item, &mut open);
+            match item {
+                FrameItem::Tag(Tag::Start(element, _)) if open.len() > before => {
+                    let of = open.last().is_some_and(|(_, of)| *of);
+                    if of {
+                        inside.extend(element.location());
+                        if run.is_none() {
+                            lead.get_or_insert(index);
+                        }
+                    } else if run.is_none() {
+                        (lead, inside) = (None, HashSet::new());
+                    }
+                }
+                FrameItem::Tag(Tag::End(location, ..)) => {
+                    if run.is_some() && ending && inside.contains(location) {
+                        tail = Some(index + 1);
+                    } else if run.is_none() && !inside.contains(location) {
+                        (lead, inside) = (None, HashSet::new());
+                    }
+                }
+                FrameItem::Tag(_) => {}
+                _ if shows == Some(true) => ending = true,
+                _ => {
+                    ending = false;
+                    if run.is_none() {
+                        (lead, inside) = (None, HashSet::new());
+                    }
+                }
+            }
+            match shows {
                 Some(true) => {
                     let (top, bottom) = extent(*position, item);
                     run = Some(match run {
                         None => Run {
-                            items: index..index + 1,
+                            items: lead.unwrap_or(index)..index + 1,
                             top,
                             bottom,
                         },
@@ -313,12 +391,45 @@ impl Region {
                             bottom: run.bottom.max(bottom),
                         },
                     });
+                    tail = None;
                 }
                 Some(false) if run.is_some() => others += 1,
                 _ => {}
             }
         }
+        if let (Some(run), Some(tail)) = (run.as_mut(), tail) {
+            run.items.end = tail;
+        }
         Ok(run)
+    }
+
+    /// `open` (the elements begun and not ended, and whether each is of
+    /// the nodes with `numbers`) after `item`, at any depth: an equation
+    /// may begin on one line and end in the group of the next.
+    fn follow(&self, numbers: Numbers, item: &FrameItem, open: &mut Vec<(Location, bool)>) {
+        match item {
+            FrameItem::Tag(Tag::Start(element, _)) => {
+                if let Some(location) = element.location() {
+                    // One of no place in the text (a mark for PDF readers)
+                    // is of the element it is in.
+                    let of = self
+                        .has(numbers, element.span())
+                        .unwrap_or_else(|| open.last().is_some_and(|(_, of)| *of));
+                    open.push((location, of));
+                }
+            }
+            FrameItem::Tag(Tag::End(location, ..)) => {
+                if let Some(at) = open.iter().rposition(|(open, _)| open == location) {
+                    open.remove(at);
+                }
+            }
+            FrameItem::Group(group) => {
+                for (_, inner) in group.frame.items() {
+                    self.follow(numbers, inner, open);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Whether `frame` shows anything of what stood where the region is
@@ -361,15 +472,57 @@ struct Run {
 /// `new` cut down to its rules and what is kept of `region`, with `lead`
 /// (more rules, for this purpose) between them. The nodes that are kept
 /// keep their numbers.
-#[must_use]
-pub fn cut_down(new: &Source, region: &Region, lead: &str) -> Source {
+///
+/// # Errors
+///
+/// If what is kept is not read as it is in `new`, node for node and
+/// number for number: Typst reads a stretch anew where something in it
+/// is not closed, and numbers it anew; or it is read otherwise by itself.
+pub fn cut_down(new: &Source, region: &Region, lead: &str) -> Result<Source, Refusal> {
     let mut cut = new.clone();
     let length = cut.text().len();
     if region.kept.end < length {
         cut.edit(region.kept.end..length, "");
     }
-    cut.edit(region.rules..region.kept.start.max(region.rules), lead);
-    cut
+    // The lead begins a line of its own: so its first node is never
+    // taken by Typst for the first of what is kept, which would then be
+    // numbered anew. And it ends a paragraph: what is kept begins one, as
+    // it does behind the rules, and not behind a blank of the lead's.
+    cut.edit(
+        region.rules..region.kept.start.max(region.rules),
+        &format!("\n{lead}\n"),
+    );
+    // The children of the root that are kept, from the first that is
+    // not a break (the break before them joins the lead's last line).
+    let mut kept = Vec::new();
+    let mut at = 0;
+    for child in new.root().children() {
+        let end = at + child.len();
+        if at >= region.kept.start.max(region.rules) && end <= region.kept.end {
+            let blank = matches!(child.kind(), SyntaxKind::Parbreak | SyntaxKind::Space);
+            if !(kept.is_empty() && blank) {
+                kept.push((at, child));
+            }
+        }
+        at = end;
+    }
+    let Some(&(first, _)) = kept.first() else {
+        return Ok(cut);
+    };
+    // They end the cut, the same and at the same places.
+    let from = cut.text().len() - (region.kept.end - first);
+    let mut at = 0;
+    let mut tail = Vec::with_capacity(kept.len());
+    for child in cut.root().children() {
+        if at >= from {
+            tail.push((at - from + first, child));
+        }
+        at += child.len();
+    }
+    if tail != kept {
+        return Err(Refusal::ReadOtherwise);
+    }
+    Ok(cut)
 }
 
 /// From where to where the box of `item` at `position` reaches down the
@@ -393,6 +546,117 @@ fn extent(position: Point, item: &FrameItem) -> (f64, f64) {
     }
 }
 
+/// How far right of `item` the first text in it begins, at any depth.
+fn first_text(item: &FrameItem) -> Option<Abs> {
+    match item {
+        FrameItem::Text(_) => Some(Abs::zero()),
+        FrameItem::Group(group) => group
+            .frame
+            .items()
+            .find_map(|(at, inner)| Some(at.x + first_text(inner)?)),
+        _ => None,
+    }
+}
+
+/// The element whose beginning or end `item` marks, if it marks one.
+fn tagged(item: &FrameItem) -> Option<Location> {
+    match item {
+        FrameItem::Tag(Tag::Start(element, _)) => element.location(),
+        FrameItem::Tag(Tag::End(location, ..)) => Some(*location),
+        _ => None,
+    }
+}
+
+/// `item` with the places of the elements it marks the beginning or the
+/// end of (at any depth) told apart by `salt`, and without the marks of
+/// those that are not `closed`; `None` if it is such a mark.
+fn relocated(item: &FrameItem, salt: u128, closed: &HashSet<Location>) -> Option<FrameItem> {
+    let moved = |location: Location| Location::new(location.hash() ^ salt);
+    if tagged(item).is_some_and(|element| !closed.contains(&element)) {
+        return None;
+    }
+    Some(match item {
+        FrameItem::Tag(Tag::Start(element, flags)) => {
+            let mut element = element.clone();
+            if let Some(location) = element.location() {
+                element.set_location(moved(location));
+            }
+            FrameItem::Tag(Tag::Start(element, *flags))
+        }
+        FrameItem::Tag(Tag::End(location, key, flags)) => {
+            FrameItem::Tag(Tag::End(moved(*location), *key, *flags))
+        }
+        FrameItem::Group(group) => {
+            let mut frame = Frame::new(group.frame.size(), group.frame.kind());
+            if group.frame.has_baseline() {
+                frame.set_baseline(group.frame.baseline());
+            }
+            for (position, inner) in group.frame.items() {
+                if let Some(inner) = relocated(inner, salt, closed) {
+                    frame.push(*position, inner);
+                }
+            }
+            FrameItem::Group(GroupItem {
+                frame,
+                ..group.clone()
+            })
+        }
+        other => other.clone(),
+    })
+}
+
+/// The elements that begin and end among `items`, at any depth: an
+/// equation may begin on one line and end in the group of the next.
+fn closed_among<'a>(items: impl Iterator<Item = &'a FrameItem>) -> HashSet<Location> {
+    fn walk(item: &FrameItem, begun: &mut HashSet<Location>, closed: &mut HashSet<Location>) {
+        match item {
+            FrameItem::Tag(Tag::Start(element, _)) => {
+                begun.extend(element.location());
+            }
+            FrameItem::Tag(Tag::End(location, ..)) if begun.contains(location) => {
+                closed.insert(*location);
+            }
+            FrameItem::Group(group) => {
+                for (_, inner) in group.frame.items() {
+                    walk(inner, begun, closed);
+                }
+            }
+            _ => {}
+        }
+    }
+    let (mut begun, mut closed) = (HashSet::new(), HashSet::new());
+    for item in items {
+        walk(item, &mut begun, &mut closed);
+    }
+    closed
+}
+
+/// The marks among `item` at `position` (at any depth) of the elements
+/// that are not `closed`, where they are on the page.
+fn open_marks(
+    position: Point,
+    item: &FrameItem,
+    closed: &HashSet<Location>,
+    out: &mut Vec<(Point, FrameItem)>,
+) {
+    match item {
+        FrameItem::Tag(_) if tagged(item).is_some_and(|element| !closed.contains(&element)) => {
+            out.push((position, item.clone()));
+        }
+        FrameItem::Group(group) if group.transform.is_identity() => {
+            for (inner, item) in group.frame.items() {
+                open_marks(position + *inner, item, closed, out);
+            }
+        }
+        FrameItem::Group(group) => {
+            for (_, item) in group.frame.items() {
+                open_marks(position, item, closed, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Whether `item` is a line across the page: what Typst draws above the
 /// footnotes, which stay where they are.
 fn is_rule_across(item: &FrameItem) -> bool {
@@ -407,20 +671,27 @@ fn is_rule_across(item: &FrameItem) -> bool {
 /// to count as below it, in points: lines of a page overlap a little.
 const BELOW: f64 = 1.0;
 
+/// How many parts have been put into pages: what tells the places of the
+/// elements of each apart.
+static SPLICES: AtomicU64 = AtomicU64::new(1);
+
 /// `page` with what it shows of `region` replaced by what `typeset`
 /// (the pages made of the text cut down to the region) shows of it. What
 /// is below it on the page moves by as much as Typst set it further
 /// down or up; `stays(index)` says of an item of the page that it does
-/// not move (the page number, a running head).
+/// not move (the page number, a running head). What is pushed below
+/// `foot`, where the text of the page ends, is left out: it goes to the
+/// next page.
 ///
 /// # Errors
 ///
 /// If the page shows nothing of the region, or it is not in one piece
-/// there or in `typeset`.
+/// there or in `typeset`; or if it would reach below `foot` itself.
 pub fn splice(
     page: &Frame,
     typeset: &[Page],
     region: &Region,
+    foot: Abs,
     stays: &dyn Fn(usize) -> bool,
 ) -> Result<Frame, Refusal> {
     let old = region
@@ -454,6 +725,18 @@ pub fn splice(
     let behind = region
         .beside(page, old.items.end..count, true)
         .zip(region.beside(from, new.items.end..usize::MAX, true));
+    // The paragraph behind begins where it did: what it follows may
+    // change how it is set (indented behind a paragraph, not behind a
+    // list), and it is not put in.
+    if let Some(((on_page, _), (typeset, _))) = behind {
+        let x = |frame: &Frame, index: usize| {
+            let (at, item) = frame.items().nth(index)?;
+            Some(at.x + first_text(item)?)
+        };
+        if x(page, on_page) != x(from, typeset) {
+            return Err(Refusal::ReadOtherwise);
+        }
+    }
     let (moved_from, moved_by) = if let Some(((index, on_page), (_, typeset))) = behind {
         (Some(index), typeset + down - on_page)
     } else {
@@ -466,15 +749,38 @@ pub fn splice(
     if page.has_baseline() {
         out.set_baseline(page.baseline());
     }
+    // The marks of where elements begin and end that are put in or
+    // taken out are those of elements that begin and end among them:
+    // one left open would hold all that follows on the page. Those put
+    // in are told apart from those of the page: Typst gave them their
+    // places in another document, and so the same ones.
+    let salt = u128::from(SPLICES.fetch_add(1, Ordering::Relaxed))
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835);
+    let made = from.items().skip(new.items.start).take(new.items.len());
+    let made_closed = closed_among(made.clone().map(|(_, item)| item));
+    let gone = page.items().skip(old.items.start).take(old.items.len());
+    let gone_closed = closed_among(gone.map(|(_, item)| item));
+    let lowest = foot.to_pt() + BELOW;
+    // The part itself does not go below it: the line typed in may be the
+    // one that goes to the next page.
+    if new.bottom + down.to_pt() > lowest {
+        return Err(Refusal::BreaksOtherwise);
+    }
     let mut moving = true;
     for (index, (position, item)) in page.items().enumerate() {
         if index == old.items.start {
-            let made = from.items().skip(new.items.start).take(new.items.len());
-            for (position, item) in made {
-                out.push(Point::new(position.x, position.y + down), item.clone());
+            for (position, item) in made.clone() {
+                if let Some(item) = relocated(item, salt, &made_closed) {
+                    out.push(Point::new(position.x, position.y + down), item);
+                }
             }
         }
         if old.items.contains(&index) {
+            let mut open = Vec::new();
+            open_marks(*position, item, &gone_closed, &mut open);
+            for (position, mark) in open {
+                out.push(position, mark);
+            }
             continue;
         }
         let mut position = *position;
@@ -486,7 +792,20 @@ pub fn splice(
                 None => extent(position, item).0 >= old.bottom - BELOW,
             };
             if moving && below && !stays(index) && !matches!(item, FrameItem::Tag(_)) {
+                // What is pushed below the text goes to the next page
+                // when all of it is typeset (and maybe more with it: a
+                // heading keeps to what follows it): until then it is not
+                // shown, rather than over the foot of the page. Where
+                // elements begin and end in it stays.
                 position.y += moved_by;
+                if extent(position, item).1 > lowest {
+                    let mut marks = Vec::new();
+                    open_marks(position, item, &HashSet::new(), &mut marks);
+                    for (position, mark) in marks {
+                        out.push(position, mark);
+                    }
+                    continue;
+                }
             }
         }
         out.push(position, item.clone());
@@ -565,12 +884,13 @@ mod tests {
         let at = TEXT.find("^2").unwrap_or(0);
         let (new, region) = region(TEXT, at, "_i").unwrap_or_else(|why| panic!("{why:?}"));
         let alone = region.clone().alone(&new);
-        let cut = cut_down(&new, &alone, "#set par(justify: true)\n");
+        let cut = cut_down(&new, &alone, "#set par(justify: true)\n")
+            .unwrap_or_else(|why| panic!("{why:?}"));
         assert_eq!(
             cut.text(),
-            "#set text(size: 11pt)\n\n#set par(justify: true)\n\n\nSecond $x_i^2$ one."
+            "#set text(size: 11pt)\n\n\n#set par(justify: true)\n\n\n\nSecond $x_i^2$ one."
         );
-        let with_both = cut_down(&new, &region, "");
+        let with_both = cut_down(&new, &region, "").unwrap_or_else(|why| panic!("{why:?}"));
         assert!(
             with_both
                 .text()

@@ -3197,6 +3197,7 @@ mod tests {
     mod keyboard;
     mod left_behind;
     mod panels;
+    mod parts;
     mod speed;
     mod typing;
     mod typist;
