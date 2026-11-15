@@ -143,6 +143,7 @@ const REGISTERS: &[(&str, &str)] = &[
     ("1–9", "lines deleted, the last first"),
     ("-", "what was last deleted in a line"),
     ("_", "nowhere: nothing is kept"),
+    ("+", "the system clipboard, where the host has one"),
 ];
 
 /// The keys after `m`, after `` ` `` or `'`, after `q` and after `@`.

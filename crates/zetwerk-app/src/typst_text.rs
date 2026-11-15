@@ -15,7 +15,7 @@ use zetwerk_vim::Format;
 mod shown;
 mod slots;
 
-pub use shown::{join, letters, put_over, raw_blank};
+pub use shown::{breaks, cuts, join, letters, put_over, raw_blank};
 pub use slots::{Around, Enclosure, enclosing, has_rules, slot_name, spot_name};
 
 /// The innermost node at byte `at` of `source` and its ancestors, from

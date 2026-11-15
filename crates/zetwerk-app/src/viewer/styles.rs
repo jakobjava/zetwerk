@@ -37,7 +37,8 @@ pub(super) fn manager_row(source: &Source) -> (String, Target) {
         many => format!("{many} chosen"),
     };
     let label = format!("styles: headings, links, code, theorems, …\t{now}");
-    (label, Target::Command("styles".to_owned()))
+    // With a row: from here, Escape leads back here.
+    (label, Target::Command("styles 0".to_owned()))
 }
 
 impl Viewer {
@@ -52,7 +53,12 @@ impl Viewer {
         let row = words.next().and_then(|row| row.parse::<usize>().ok());
         let rest = words.next().unwrap_or("");
         match (what, row) {
-            ("", _) => self.open_styles(0),
+            // Put up by itself (`:styles`), Escape takes it away: it
+            // came from no list to lead back to.
+            ("", _) => {
+                self.open_styles(0);
+                self.picker_by_itself();
+            }
             ("open", Some(row)) => self.open_style(row),
             ("choose", Some(row)) => {
                 let choices = self.style_choices(row);

@@ -340,8 +340,11 @@ impl Viewer {
                 self.go_to_blank(cursor + next)
             }
             Key::Tab if plain && typing && self.start.filling => {
-                // A snippet's name becomes the snippet, as always.
-                if crate::typst_text::snippet(editor.source(), cursor).is_some() {
+                // A snippet's name becomes the snippet, as always; and the
+                // rest of a word shown behind the cursor is what Tab
+                // takes (see `Viewer::plain_key`).
+                let snippet = crate::typst_text::snippet(editor.source(), cursor).is_some();
+                if snippet || self.shows_word_rest() {
                     return false;
                 }
                 let from = blank.map_or(cursor, |blank| blank.end);

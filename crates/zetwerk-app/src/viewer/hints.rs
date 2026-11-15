@@ -471,6 +471,12 @@ impl Viewer {
         })
     }
 
+    /// Whether the rest of a word shows behind the cursor, for Tab to
+    /// take.
+    pub(super) fn shows_word_rest(&self) -> bool {
+        self.word_rest().is_some()
+    }
+
     /// The rest of the word being typed in running text, as found after
     /// the last key, while it holds.
     fn word_rest(&self) -> Option<Rest> {

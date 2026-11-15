@@ -14,10 +14,11 @@
 
 use std::ops::Range;
 
-use super::{Column, Engine, Host, Mode, Operator, Seek, clamp, lower, upper};
+use super::{Awaiting, Column, Edit, Engine, Host, Mode, Operator, Seek, clamp, lower, upper};
 use crate::keys::{Key, KeyPress};
 use crate::object::Object;
 use crate::text::Text;
+use crate::took::Took;
 
 /// How many places a command looks at in one line, or in one selection,
 /// before it gives up: more than any line has, and few enough to be gone
@@ -69,7 +70,7 @@ fn all_of(stop: &Range<usize>, stops: &[Range<usize>]) -> Range<usize> {
 impl Engine {
     /// The place the host shows under the cursor, outside insert mode
     /// and where it shows places of its own at all.
-    fn shown_here(&self, host: &impl Host) -> Option<Range<usize>> {
+    pub(super) fn shown_here(&self, host: &impl Host) -> Option<Range<usize>> {
         if !self.rows_first || self.mode == Mode::Insert {
             return None;
         }
@@ -341,7 +342,14 @@ impl Engine {
         let in_text = puts.iter().all(|(range, ..)| {
             range.start <= range.end && host.text().get(range.clone()).is_some()
         });
-        if !apart || !in_text {
+        let edits: Vec<Edit> = puts
+            .iter()
+            .map(|(range, text, _)| Edit {
+                range: range.clone(),
+                text: text.clone(),
+            })
+            .collect();
+        if !apart || !in_text || host.refuses(&edits) {
             self.fail();
             return true;
         }
@@ -545,6 +553,219 @@ impl Engine {
         self.cursor = clamp(Text(host.text()), self.cursor, false);
         self.wanted_column = None;
         true
+    }
+
+    /// What `operator` (a delete, a change or a yank, not of whole lines)
+    /// takes of `object` where taking all of it would cut what the host
+    /// shows in two (see [`Host::cuts`]): the places shown in it, each
+    /// run of them that can go together as one, in the order of the
+    /// text. So `3x` from before an equation into it takes what is shown,
+    /// and the dollar sign between stays. `None` where all of it may go.
+    pub(super) fn shown_parts(
+        &self,
+        operator: Operator,
+        object: &Object,
+        host: &impl Host,
+    ) -> Option<Vec<Range<usize>>> {
+        let range = object.start..object.end;
+        let deletes = matches!(
+            operator,
+            Operator::Delete | Operator::Change | Operator::Yank
+        );
+        if !self.rows_first || !deletes || object.linewise || range.is_empty() {
+            return None;
+        }
+        if !host.cuts(range.clone()) {
+            return None;
+        }
+        Some(Self::parts_within(host, &range))
+    }
+
+    /// The places the host shows in bytes `range` (see
+    /// [`Engine::shown_parts`]), each run of them that can be taken out
+    /// together as one.
+    fn parts_within(host: &impl Host, range: &Range<usize>) -> Vec<Range<usize>> {
+        let stops = Self::shown_within(host, range).unwrap_or_default();
+        let mut parts: Vec<Range<usize>> = Vec::new();
+        for stop in stops.into_iter().filter(|stop| !stop.is_empty()) {
+            match parts.last_mut() {
+                Some(last) if stop.start <= last.end => last.end = last.end.max(stop.end),
+                Some(last) if !host.cuts(last.start..stop.end) => last.end = stop.end,
+                _ => parts.push(stop),
+            }
+        }
+        parts
+    }
+
+    /// Before a key in normal mode that changes what is at the cursor
+    /// (`x`, `d`, `r`, `p` and their like) where the host shows places
+    /// of its own: a cursor that was put where nothing is shown, from
+    /// outside the keys (to the mark of a heading a list of headings led
+    /// to, to a label), comes to rest on what is shown nearest, as it
+    /// does after every key. Else `x` or `dw` there would take marks
+    /// nobody sees. Other keys go from where it is: typing there goes
+    /// into what that place is in.
+    pub(super) fn rest_before_key(&mut self, press: KeyPress, host: &impl Host) {
+        let changes = !press.ctrl
+            && match press.key {
+                Key::Delete => true,
+                Key::Char(c) => "xXsSrR~dcDCpPJ".contains(c),
+                _ => false,
+            };
+        let begun = self.pending.operator.is_some() || self.pending.awaiting != Awaiting::Nothing;
+        if !self.rows_first || !changes || self.mode != Mode::Normal || begun {
+            return;
+        }
+        if host.stop(self.cursor, Seek::At).is_some() {
+            return;
+        }
+        let text = Text(host.text());
+        let line = text.line_index(clamp(text, self.cursor, true));
+        // What follows in its line before what is before it.
+        let after = host
+            .stop(self.cursor, Seek::After)
+            .filter(|stop| text.line_index(stop.start) == line);
+        let stop = after.or_else(|| host.stop(self.cursor, Seek::Before));
+        let stop = stop.or_else(|| host.stop(self.cursor, Seek::After));
+        if let Some(stop) = stop {
+            self.cursor = stop.start;
+            self.wanted_column = None;
+        }
+    }
+
+    /// Ctrl-W (`word`) and Ctrl-U while typing, where the host shows the
+    /// text as pages: back over what is shown, never into the marks it
+    /// is made with. Ctrl-W goes back over the blanks before the cursor
+    /// and then over the letters of a word, or the signs that are no
+    /// letters, as shown; Ctrl-U to where typing began, or to the start
+    /// of the paragraph. Where that would take a mark without what it
+    /// marks (the star that ends strong text), only what is shown goes.
+    ///
+    /// `None` where the host does not show places of its own here: then
+    /// these go by the characters of the text. Else whether anything went.
+    pub(super) fn shown_erase(&mut self, word: bool, host: &mut impl Host) -> Option<bool> {
+        if !self.rows_first || self.replacing {
+            return None;
+        }
+        let text = Text(host.text());
+        let start = text.line_start(self.cursor);
+        let mut to = self.cursor;
+        if word {
+            let mut class = None;
+            while to > start {
+                let Some(stop) = host.stop(text.prev(to), Seek::Before) else {
+                    break;
+                };
+                if stop.start >= to || stop.end > self.cursor || stop.start < start {
+                    break;
+                }
+                let shown = text.0.get(stop.clone()).unwrap_or("");
+                let blank = shown.chars().all(char::is_whitespace);
+                let letters = shown.chars().all(|c| c.is_alphanumeric() || c == '_');
+                match class {
+                    None if blank => {}
+                    None => class = Some(letters),
+                    Some(_) if blank => break,
+                    Some(was) if was != letters => break,
+                    Some(_) => {}
+                }
+                to = stop.start;
+            }
+        } else {
+            to = start;
+        }
+        let to = self.stop_at_insert_start(host.text(), to);
+        if to >= self.cursor || host.stop(to, Seek::After).is_none() {
+            return None;
+        }
+        let range = to..self.cursor;
+        if !host.cuts(range.clone()) {
+            self.insert_delete(to, host);
+            return Some(true);
+        }
+        let parts = Self::parts_within(host, &range);
+        let Some(first) = parts.first().map(|part| part.start) else {
+            return Some(false);
+        };
+        for part in parts.iter().rev() {
+            self.edit(host, part.clone(), "");
+        }
+        self.cursor = first;
+        Some(true)
+    }
+
+    /// Whether the host refuses what `operator` would take of `object`
+    /// (`parts` of it, where only those go): see [`Host::refuses`]. Then
+    /// the command fails and nothing changes.
+    pub(super) fn shown_refused(
+        &mut self,
+        operator: Operator,
+        object: &Object,
+        parts: Option<&[Range<usize>]>,
+        host: &mut impl Host,
+    ) -> bool {
+        let deletes = matches!(operator, Operator::Delete | Operator::Change);
+        if !self.rows_first || !deletes || object.linewise || object.start >= object.end {
+            return false;
+        }
+        let whole = object.start..object.end;
+        let taken: Vec<Edit> = parts
+            .unwrap_or(std::slice::from_ref(&whole))
+            .iter()
+            .map(|range| Edit {
+                range: range.clone(),
+                text: String::new(),
+            })
+            .collect();
+        if !host.refuses(&taken) {
+            return false;
+        }
+        self.fail();
+        self.changed = false;
+        self.undo_block = None;
+        self.undo_cursor = None;
+        self.column_before = None;
+        self.wanted_column = None;
+        self.cursor = clamp(Text(host.text()), self.cursor, false);
+        true
+    }
+
+    /// Takes `parts` (see [`Engine::shown_parts`]) out of the text for
+    /// `operator`, as one change: what they held goes into the register
+    /// together, and the cursor to where the first of them was, to type
+    /// there after a change. Where nothing is shown in them, nothing is
+    /// taken, and the command fails.
+    pub(super) fn delete_parts(
+        &mut self,
+        operator: Operator,
+        parts: &[Range<usize>],
+        host: &mut impl Host,
+    ) {
+        let Some(first) = parts.first().map(|part| part.start) else {
+            self.cursor = clamp(Text(host.text()), self.cursor, false);
+            return self.fail();
+        };
+        let text = host.text();
+        let taken: String = parts
+            .iter()
+            .filter_map(|part| text.get(part.clone()))
+            .collect();
+        self.took = Some(Took::Deleted {
+            text: taken.clone(),
+            at: first,
+            linewise: false,
+        });
+        self.store(taken, false, true);
+        // From the last: the parts before it stay where they are.
+        for part in parts.iter().rev() {
+            self.edit(host, part.clone(), "");
+        }
+        if operator == Operator::Change {
+            self.cursor = first;
+            self.enter_insert(1, host.text());
+        } else {
+            self.cursor = clamp(Text(host.text()), first, false);
+        }
     }
 
     /// `x` and `s` on a place that shows no bytes, at byte `at`: a part

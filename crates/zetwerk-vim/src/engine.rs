@@ -179,6 +179,27 @@ pub trait Host {
         None
     }
 
+    /// Whether taking bytes `range` out of the text would take a mark
+    /// that what the host shows is made with, and leave what it marks:
+    /// one of the dollar signs of an equation, say. An operator then
+    /// takes only what is shown there (see [`Host::stop`]). `false`
+    /// where the host shows the text as it is.
+    fn cuts(&self, range: Range<usize>) -> bool {
+        let _ = range;
+        false
+    }
+
+    /// Whether the host refuses `edits` (of the text as it is, in its
+    /// order and apart), where it shows the text as something else:
+    /// what it shows would not be read at all then (a word that comes to
+    /// stand against the star of strong text leaves that unclosed). The
+    /// host says why, as it says why an edit was not made; the command
+    /// then changes nothing.
+    fn refuses(&mut self, edits: &[Edit]) -> bool {
+        let _ = edits;
+        false
+    }
+
     /// What joining the paragraph byte `at` is in with what follows it
     /// does to the text: the bytes that part the two, and what stands
     /// in their place (a blank if `spaced`, nothing for `gJ`). Bytes
@@ -478,6 +499,9 @@ pub struct Engine {
     /// `None` where it was added to the text. Backspace brings those back.
     replacing: bool,
     replaced: Vec<Option<String>>,
+    /// Whether Ctrl-R was typed in this insert and waits for the name of
+    /// the register to put in.
+    insert_register: bool,
     /// Whether the cursor was moved in this insert and nothing typed since.
     /// That ends the insert as far as undo, count and `.` are concerned;
     /// typing on begins a new one.
@@ -597,6 +621,7 @@ impl Engine {
             insert_keys: Vec::new(),
             insert_opened: false,
             replacing: false,
+            insert_register: false,
             replaced: Vec::new(),
             insert_moved: false,
             marks: HashMap::new(),
@@ -659,6 +684,15 @@ impl Engine {
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.pending.is_idle()
+    }
+
+    /// Whether the next key is part of a command begun: what an operator
+    /// goes over, the character `f` looks for, the name of a register.
+    /// A count or a register named before a command begins none: the
+    /// command is yet to come.
+    #[must_use]
+    pub fn awaits_part(&self) -> bool {
+        self.pending.operator.is_some() || self.pending.awaiting != Awaiting::Nothing
     }
 
     /// Whether an operator is waiting for its motion.
@@ -790,6 +824,17 @@ impl Engine {
             .map(|register| (register.text.as_str(), register.linewise))
     }
 
+    /// Makes register `name` hold `text`, as what another program put
+    /// there does (the system clipboard): whole lines if it ends with a
+    /// line break.
+    pub fn set_register(&mut self, name: char, text: &str) {
+        let register = Register {
+            text: text.to_owned(),
+            linewise: text.ends_with('\n'),
+        };
+        self.registers.insert(name, register);
+    }
+
     /// What the last search was for, if there was one.
     #[must_use]
     pub fn last_search(&self) -> Option<Query> {
@@ -814,6 +859,7 @@ impl Engine {
 
     /// Handles one key press.
     pub fn key(&mut self, press: KeyPress, host: &mut impl Host) -> Vec<Effect> {
+        self.rest_before_key(press, host);
         let before = self.cursor;
         self.took = None;
         let effects = self.key_as_typed(press, host);
@@ -880,6 +926,9 @@ impl Engine {
             press.key == Key::Delete && !matches!(self.mode, Mode::Insert | Mode::Command);
         let press = if deletes {
             KeyPress::plain(Key::Char('x'))
+        } else if press.ctrl && press.key == Key::Char('h') {
+            // Ctrl-H is Backspace, as it is in Vim: in every mode.
+            KeyPress::plain(Key::Backspace)
         } else {
             press
         };
@@ -2094,9 +2143,25 @@ impl Engine {
             first
         };
         let (start, mut end) = (first.start.min(last.start), first.end.max(last.end));
+        let text = Text(host.text());
+        // Lines that show all there is of the lines of the text they are
+        // in (an item of a list, a heading) go with those lines whole:
+        // with the marks that made them what they were, which would else
+        // make something of what follows.
+        let (from, to) = (text.line_start(start), text.line_end(end));
+        let shown = |at: usize, until: usize| {
+            host.stop(at, Seek::After)
+                .is_some_and(|stop| stop.start < until && !stop.is_empty())
+        };
+        if operator == Operator::Delete && !shown(from, start) && !shown(end, to) {
+            return Some(Object {
+                start: from,
+                end: text.next_line(to).unwrap_or(to),
+                linewise: false,
+            });
+        }
         // With the blank that parts them from what follows, unless the
         // lines are to be written anew.
-        let text = Text(host.text());
         let follows = (text.char_at(end), text.char_at(text.next(end)));
         let blank = matches!(follows, (Some(' '), _))
             || matches!(follows, (Some('\n'), next) if next != Some('\n'));
@@ -2839,7 +2904,30 @@ impl Engine {
         let column = self
             .wanted_column
             .unwrap_or_else(|| Text(host.text()).column(self.cursor));
+        // On a page, what would cut what it shows in two is taken as the
+        // places shown in it, and the marks between them stay.
+        let parts = self.shown_parts(operator, &object, host);
+        if self.shown_refused(operator, &object, parts.as_deref(), host) {
+            return;
+        }
         match operator {
+            Operator::Delete | Operator::Change if parts.is_some() => {
+                self.delete_parts(operator, parts.as_deref().unwrap_or_default(), host);
+            }
+            Operator::Yank if parts.is_some() => {
+                // What is shown, and not half of the marks around it:
+                // put elsewhere, it would make something else of what
+                // follows there.
+                let text = host.text();
+                let shown: String = parts
+                    .iter()
+                    .flatten()
+                    .filter_map(|part| text.get(part.clone()))
+                    .collect();
+                self.store(shown, false, false);
+                self.took = Some(Took::Yanked(start..end));
+                self.cursor = clamp(Text(host.text()), landing, false);
+            }
             Operator::Yank => {
                 let mut yanked = selected;
                 if linewise && !yanked.ends_with('\n') {
@@ -3056,7 +3144,10 @@ impl Engine {
         } else {
             let text = Text(host.text());
             let at = if after && !text.line_is_empty(self.cursor) {
-                text.next(self.cursor)
+                // Behind all that is shown there: a reference, a symbol
+                // written by its name, are not to be put into.
+                let shown = self.shown_here(host).map(|stop| stop.end);
+                shown.unwrap_or(0).max(text.next(self.cursor))
             } else {
                 self.cursor
             };
@@ -3391,6 +3482,7 @@ impl Engine {
         self.insert_opened = false;
         self.insert_moved = false;
         self.replacing = false;
+        self.insert_register = false;
         self.replaced.clear();
         self.wanted_column = None;
         self.changed = true;
@@ -3663,6 +3755,9 @@ impl Engine {
     /// What a key other than Escape and the cursor keys does in insert
     /// mode. Returns whether it did anything.
     fn insert_apply(&mut self, press: KeyPress, host: &mut impl Host) -> bool {
+        if let Some(done) = self.insert_aside(press, host) {
+            return done;
+        }
         let text = Text(host.text());
         match (press.key, press.ctrl) {
             (Key::Char('w'), true) => {
@@ -3770,6 +3865,39 @@ impl Engine {
             _ => return false,
         }
         true
+    }
+
+    /// Keys while typing that are not typed: Ctrl-R and the name of a
+    /// register, which puts in what that holds, as typed; and Ctrl-W and
+    /// Ctrl-U where the host shows the text as pages (see
+    /// [`Engine::shown_erase`]). Whether the key did anything, if it was
+    /// one of these.
+    fn insert_aside(&mut self, press: KeyPress, host: &mut impl Host) -> Option<bool> {
+        if std::mem::take(&mut self.insert_register) {
+            let Key::Char(name) = press.key else {
+                return Some(false);
+            };
+            let held = self.registers.get(&name.to_ascii_lowercase());
+            let Some(held) = held.map(|register| register.text.clone()) else {
+                return Some(false);
+            };
+            self.insert_text(&held, host);
+            return Some(true);
+        }
+        match (press.key, press.ctrl) {
+            (Key::Char('r'), true) => {
+                self.insert_register = true;
+                Some(true)
+            }
+            (Key::Char(c @ ('w' | 'u')), true) => {
+                let text = Text(host.text());
+                if self.cursor == text.line_start(self.cursor) {
+                    return None;
+                }
+                self.shown_erase(c == 'w', host)
+            }
+            _ => None,
+        }
     }
 
     fn insert_text(&mut self, typed: &str, host: &mut impl Host) {
