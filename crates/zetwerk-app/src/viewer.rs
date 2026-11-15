@@ -2004,14 +2004,17 @@ impl Viewer {
             "" => {}
             "q" | "quit" if modified => {
                 self.alert(format!(
-                    "unsaved changes in {}: :wq saves them, :q! leaves them unsaved \
-                     (they are back when the file is opened again)",
+                    "unsaved changes in {}: :wq saves them, :q! drops them \
+                     (undo brings them back when the file is opened again)",
                     unwritten.join(", ")
                 ));
             }
-            // Unsaved changes stay in the journal: they are back the next
-            // time the file is opened, and can be undone then.
-            "q" | "quit" | "q!" | "quit!" => self.quit = true,
+            "q" | "quit" => self.quit = true,
+            // What is not written is dropped, as whoever says `:q!`
+            // means it: the files are as they were written last when
+            // they are opened again. The history keeps what was dropped,
+            // and undo brings it back then.
+            "q!" | "quit!" => self.leave_dropping(),
             "w" | "write" => {
                 self.save(false);
             }
@@ -3343,8 +3346,9 @@ mod tests {
     #[test]
     fn unsaved_changes_come_back() {
         let (mut viewer, directory) = editing("one\n");
-        press(&mut viewer, "otwo<Esc>:q!<CR>");
-        assert!(viewer.wants_quit());
+        // The window is closed, or the machine goes down: nobody said
+        // that the changes were to go.
+        press(&mut viewer, "otwo<Esc>");
         drop(viewer);
         assert_eq!(
             std::fs::read_to_string(directory.join("main.typ")).unwrap(),

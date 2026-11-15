@@ -82,8 +82,8 @@ impl Viewer {
     }
 
     /// Says which files of the document that are not open hold changes
-    /// left unsaved in an earlier session (the window was closed, or
-    /// `:q!`): the pages show those files as the disk has them, and the
+    /// left unsaved in an earlier session (the window was closed with
+    /// them): the pages show those files as the disk has them, and the
     /// changes come back only when the file is opened.
     pub(super) fn announce_unsaved_elsewhere(&mut self) {
         let Some(state_dir) = self.state_dir.clone() else {
@@ -267,6 +267,23 @@ impl Viewer {
         }
         self.notice(format!("{written} file(s) written"));
         true
+    }
+
+    /// `:q!`: leaves, and before that every open file with changes that
+    /// are not written is as its file is again, as one step that undo
+    /// takes back. So the next
+    /// time it is opened it is what was written last, with nothing
+    /// brought back, and the history still holds what was dropped.
+    ///
+    /// A file that cannot be read stays as it is: its changes are kept,
+    /// and are back when it is opened, as after a window closed.
+    pub(super) fn leave_dropping(&mut self) {
+        for editor in self.editor.iter_mut().chain(&mut self.others) {
+            if editor.is_modified() {
+                let _ = editor.reload();
+            }
+        }
+        self.quit = true;
     }
 
     /// A file that is open but not being edited changed on disk, perhaps.

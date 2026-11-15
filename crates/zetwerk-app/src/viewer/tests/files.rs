@@ -139,7 +139,7 @@ fn unsaved_changes_brought_back_say_how_old_they_are_until_dropped() {
     // A stray edit left three days ago came back nearly silently: a
     // quiet notice gone at the first key, without its age.
     let (mut viewer, directory) = editing("= Paper\n\nGood text.\n");
-    press(&mut viewer, "Gdd:q!<CR>");
+    press(&mut viewer, "Gdd");
     drop(viewer);
     let three_days_ago = std::time::SystemTime::now() - Duration::from_mins(72 * 60 + 1);
     std::fs::File::options()
@@ -173,11 +173,39 @@ fn unsaved_changes_brought_back_say_how_old_they_are_until_dropped() {
 }
 
 #[test]
+fn leaving_without_saving_drops_the_changes_and_keeps_the_history() {
+    // `:q!` kept what was not written in the journal: a stray edit came
+    // back days later and broke the document it was left in.
+    let (mut viewer, directory) = editing("= Paper\n\nGood text.\n");
+    press(&mut viewer, "Gdd:q<CR>");
+    assert!(!viewer.wants_quit(), "there are unsaved changes");
+    let (text, alert) = said(&viewer);
+    assert!(alert && text.contains(":q! drops them"), "{text}");
+    press(&mut viewer, ":q!<CR>");
+    assert!(viewer.wants_quit());
+    drop(viewer);
+    // The file is as it was written last, and so is the text when it is
+    // opened again: nothing is brought back, nothing is announced.
+    let (mut viewer, opened) = open(&directory);
+    assert_eq!(opened, Opened::Clean, "{:?}", said(&viewer));
+    assert_eq!(viewer.text(), Some("= Paper\n\nGood text.\n"));
+    assert_eq!(viewer.file_label(false), "main.typ");
+    assert_eq!(
+        read(&directory.join("main.typ")).as_deref(),
+        Some("= Paper\n\nGood text.\n")
+    );
+    // What was dropped is in the history still.
+    press(&mut viewer, "u");
+    assert_eq!(viewer.text(), Some("= Paper\n\n"));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn a_file_changed_while_unsaved_changes_waited_keeps_both() {
     // The unsaved text was handed over and dropped: only a journal no
     // one can read was left of it.
     let (mut viewer, directory) = editing("Base.\n");
-    press(&mut viewer, "AMine.<Esc>:q!<CR>");
+    press(&mut viewer, "AMine.<Esc>");
     drop(viewer);
     std::fs::write(directory.join("main.typ"), "Base. Theirs.\n").unwrap();
     let (mut viewer, opened) = open(&directory);
