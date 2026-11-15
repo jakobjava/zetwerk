@@ -5612,20 +5612,24 @@ mod tests {
         assert_eq!(cursor(&viewer), line.last);
         press(&mut viewer, "0");
         assert_eq!(cursor(&viewer), line.start);
-        // `V` takes that line, `j` the next one with it.
+        // `V` takes the paragraph: the lines the page sets it in are one
+        // line of the text to whoever wrote it, as a line Vim wraps is
+        // one to `V`. `j` takes the next paragraph with it.
         press(&mut viewer, "/jumps<CR>V");
         assert_eq!(
             viewer.editor.as_ref().unwrap().mode(),
             editor::Mode::VisualLine
         );
-        assert_eq!(
-            viewer.editor.as_ref().unwrap().selection(),
-            Some(line.start..line.end)
+        let whole = viewer.editor.as_ref().unwrap().selection().unwrap();
+        assert_eq!(whole.start, line.start);
+        assert!(
+            whole.end > line.end + 20 && whole.end <= text.find("\n\nSecond").unwrap(),
+            "{whole:?}"
         );
         press(&mut viewer, "j");
         let two = viewer.editor.as_ref().unwrap().selection().unwrap();
-        assert_eq!(two.start, line.start);
-        assert!(two.end > line.end + 20 && two.end < text.find("\n\nSecond").unwrap());
+        assert_eq!(two.start, whole.start);
+        assert!(two.end > text.find("Second paragraph").unwrap(), "{two:?}");
         press(&mut viewer, "<Esc>");
         // `dd` takes the paragraph: that is one line to whoever wrote
         // it, as a line Vim wraps is one to `dd`. The row shown, taken

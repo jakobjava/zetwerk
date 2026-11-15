@@ -52,8 +52,8 @@ Open, as reported (none fixed):
 - Keys in code that shows as nothing: `x` on a footnote's mark or a caption,
   `d0` in a footnote, Ctrl-U in a table cell, `ci(` in a cell take parts of
   the call. `A` at a line that ends in an equation types into it.
-- `V` takes the row the page shows, `dd` the paragraph. No Shift-Tab, no
-  block selection, insert mappings of one key only (`jk` is refused).
+- No Shift-Tab, no block selection, insert mappings of one key only (`jk`
+  is refused).
 - No `:w <path>`; a second window on the same file is refused without a
   word in the window; `:png 1 name.png` replaces a file of that name; lines
   typed into a file with CRLF line ends get LF; the history is never pruned.

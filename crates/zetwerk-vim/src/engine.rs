@@ -1022,6 +1022,10 @@ impl Engine {
             // Both ends at the ends of their lines, the lines between
             // and the two themselves taken whole.
             let lines = (host.shown_line(self.anchor), host.shown_line(self.cursor));
+            let lines = (
+                lines.0.map(|row| Self::rows_of_paragraph(row, host)),
+                lines.1.map(|row| Self::rows_of_paragraph(row, host)),
+            );
             if let (Some(anchor), Some(cursor)) = lines {
                 if self.cursor >= self.anchor {
                     (self.anchor, self.cursor) = (anchor.start, cursor.last);
@@ -1039,6 +1043,42 @@ impl Engine {
             None
         };
         self.extent = end(self.cursor).zip(anchor.or(Some(0)));
+    }
+
+    /// All the rows of the paragraph that `row` (a line the host shows)
+    /// is one of, as one line: a paragraph the page sets in several
+    /// lines is one line to `V`, as it is to `dd` (see
+    /// [`Engine::shown_lines`]) and as a line Vim wraps is one to both.
+    /// `row` itself where it is no paragraph of running text (a heading,
+    /// an item of a list), or where the host cannot say.
+    fn rows_of_paragraph(row: Shown, host: &impl Host) -> Shown {
+        let (Some((above, before, _)), Some((below, after, _))) =
+            (host.open(row.start, false), host.open(row.start, true))
+        else {
+            return row;
+        };
+        if before != "\n\n" || after != "\n\n" {
+            return row;
+        }
+        let text = Text(host.text());
+        let end = text.line_end(below);
+        if above > row.start || end < row.end || end <= above {
+            return row;
+        }
+        let first = host
+            .shown_line(above)
+            .filter(|first| first.start <= row.start);
+        let last = host
+            .shown_line(text.prev(end))
+            .filter(|last| last.last >= row.last);
+        match (first, last) {
+            (Some(first), Some(last)) => Shown {
+                start: first.start.max(above),
+                last: last.last,
+                end: last.end,
+            },
+            _ => row,
+        }
     }
 
     fn key_as_typed(&mut self, press: KeyPress, host: &mut impl Host) -> Vec<Effect> {
