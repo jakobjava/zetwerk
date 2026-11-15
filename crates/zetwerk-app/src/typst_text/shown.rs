@@ -206,8 +206,13 @@ pub fn join(source: &Source, at: usize, spaced: bool) -> Option<(Range<usize>, S
         return None;
     }
     let from = text[..end].trim_end_matches([' ', '\t']).len();
+    // A label at the end would come to stand in the middle, and no
+    // longer name what it named.
+    let labelled = LinkedNode::new(source.root())
+        .leaf_at(from, Side::Before)
+        .is_some_and(|leaf| leaf.kind() == SyntaxKind::Label);
     let behind = text[end..].trim_start();
-    if behind.is_empty() {
+    if behind.is_empty() || labelled {
         return None;
     }
     let mut to = text.len() - behind.len();
@@ -330,17 +335,17 @@ pub fn pieces(source: &Source, range: Range<usize>, with: &str) -> Option<Vec<Ra
     let mut shown = left;
     // What is put in goes where the first piece was.
     let put = pieces.first().map_or(range.start, |piece| piece.start);
-    let mut with = Some(with);
+    let mut put_in = Some(with);
     for mark in &kept {
         if mark.start > put
-            && let Some(with) = with.take()
+            && let Some(with) = put_in.take()
         {
             shown.extend(with.chars().map(|c| (c, false)));
         }
         let is_set_off = set_off(mark.start, Side::After).is_some_and(|it| it == *mark);
         shown.extend(text[mark.clone()].chars().map(|c| (c, is_set_off)));
     }
-    if let Some(with) = with {
+    if let Some(with) = put_in {
         shown.extend(with.chars().map(|c| (c, false)));
     }
     for (index, c) in text[range.end..].chars().take(2).enumerate() {
@@ -354,7 +359,34 @@ pub fn pieces(source: &Source, range: Range<usize>, with: &str) -> Option<Vec<Ra
     };
     let glued =
         (0..shown.len()).any(|at| shown[at].1 && letter(at.checked_sub(1)) && letter(Some(at + 1)));
-    (!glued).then_some(pieces)
+    // Nor is what follows a line of code (a rule, a `#let`) to come to
+    // stand right behind it: it would be read as part of the code.
+    let breaks = text[range.clone()].contains('\n');
+    let follows = with
+        .chars()
+        .chain(text[range.end..].chars())
+        .next()
+        .is_some_and(|c| !c.is_whitespace());
+    let onto_code = breaks && follows && ends_code(source, range.start);
+    (!glued && !onto_code).then_some(pieces)
+}
+
+/// Whether byte `at` of `source` ends code put into running text with
+/// `#`, or is in it.
+fn ends_code(source: &Source, at: usize) -> bool {
+    let Some(mut node) = LinkedNode::new(source.root()).leaf_at(at, Side::Before) else {
+        return false;
+    };
+    while let Some(parent) = node.parent().cloned() {
+        if parent.kind() == SyntaxKind::Markup {
+            return node
+                .prev_sibling()
+                .is_some_and(|before| before.kind() == SyntaxKind::Hash)
+                || node.kind() == SyntaxKind::Hash;
+        }
+        node = parent;
+    }
+    false
 }
 
 /// Collects into `kept` the marks of `node` and of what is in it that

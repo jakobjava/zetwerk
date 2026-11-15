@@ -4065,8 +4065,11 @@ impl Engine {
         let text = host.text();
         let between = text.get(end..next)?;
         let quiet = |from: usize, to: usize| {
+            // Not out of an equation or a string either.
             let shows_nothing = text.get(from..to).is_some_and(|between| {
-                !between.contains('\n') && !between.contains("//") && !between.contains("/*")
+                !between.contains(['\n', '$', '"'])
+                    && !between.contains("//")
+                    && !between.contains("/*")
             });
             from <= to && shows_nothing && !host.parted(from..to)
         };

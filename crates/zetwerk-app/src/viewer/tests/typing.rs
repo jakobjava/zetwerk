@@ -298,6 +298,30 @@ fn enter_in_strong_text_closes_it_and_begins_it_again() {
 }
 
 #[test]
+fn backspace_leaves_labels_and_code_before_a_paragraph_alone() {
+    // The heading's label in the middle of a heading names nothing that
+    // can be referred to; text behind `#let x = 1` is read as part of it.
+    let cases = [
+        "#set heading(numbering: \"1.\")\n= Intro <intro>\n\nText after @intro.\n",
+        "#let x = 1\n\nText after.\n",
+        "#let x = 1\nText after.\n",
+    ];
+    for text in cases {
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "gsgs");
+        compile(&mut viewer);
+        paced(&mut viewer, "/Text<CR>i<BS><BS><BS>");
+        assert!(viewer.state().problems.is_empty(), "{:?}", viewer.text());
+        assert!(
+            viewer.text().unwrap().contains("Text after"),
+            "{:?}",
+            viewer.text()
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 #[ignore = "probe"]
 fn probe() {
     let cases: Vec<(String, String)> =
