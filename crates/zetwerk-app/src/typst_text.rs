@@ -707,6 +707,11 @@ pub fn set_off(
         };
     }
     match ground {
+        // Apart from a letter before it: one name with it, it would be
+        // none Typst knows.
+        Ground::Math if text[..at].ends_with(char::is_alphanumeric) => {
+            Some((at..at, format!(" {in_math}()"), in_math.len() + 2))
+        }
         Ground::Math => Some((at..at, format!("{in_math}()"), in_math.len() + 1)),
         Ground::Markup => {
             let letter = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
@@ -2473,6 +2478,9 @@ mod tests {
             set("$bold(x|)$", Format::Strong).as_deref(),
             Some("$bold(x)|$")
         );
+        // Not one name with the letter before.
+        assert_eq!(set("$x|$", Format::Strong).as_deref(), Some("$x bold(|)$"));
+        assert_eq!(set("$x|$", Format::Emph).as_deref(), Some("$x italic(|)$"));
         assert_eq!(set("#image(\"|\")", Format::Strong), None);
     }
 

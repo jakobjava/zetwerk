@@ -1009,3 +1009,13 @@ fn an_equation_selected_whole_is_all_that_goes() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn bold_begun_right_behind_a_letter_stays_bold() {
+    // Ctrl-B behind `x` in an equation made `xbold()`, one name Typst does
+    // not know, which was spelled out letter by letter: `x b o l d()`.
+    let (mut viewer, directory) = typed("A $x$ b.\n", "x", "a<C-b>y<Esc>");
+    assert_eq!(viewer.text(), Some("A $x bold(y)$ b.\n"));
+    settled(&mut viewer);
+    let _ = std::fs::remove_dir_all(directory);
+}
