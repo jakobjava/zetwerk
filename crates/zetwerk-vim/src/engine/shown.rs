@@ -761,12 +761,22 @@ impl Engine {
     /// to, to a label), comes to rest on what is shown nearest, as it
     /// does after every key. Else `x` or `dw` there would take marks
     /// nobody sees, and `i` would type before the mark of a heading,
-    /// which makes it none. Other keys go from where it is.
+    /// which makes it none. Other keys go from where it is: typing there
+    /// goes into what that place is in.
     pub(super) fn rest_before_key(&mut self, press: KeyPress, host: &impl Host) {
+        // Typing goes into what the place is in (at the dollar sign
+        // that closes an equation: into it), but not before the mark
+        // that begins a line: a heading, an item.
+        let line_starts = || {
+            let text = Text(host.text());
+            let before = text.0.get(text.line_start(self.cursor)..self.cursor);
+            before.is_some_and(|before| before.trim().is_empty())
+        };
         let changes = !press.ctrl
             && match press.key {
                 Key::Delete => true,
-                Key::Char(c) => "xXsSrR~dcDCpPJ.ia".contains(c),
+                Key::Char('i' | 'a') => line_starts(),
+                Key::Char(c) => "xXsSrR~dcDCpPJ.".contains(c),
                 _ => false,
             };
         let begun = self.pending.operator.is_some() || self.pending.awaiting != Awaiting::Nothing;

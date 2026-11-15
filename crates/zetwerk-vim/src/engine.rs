@@ -2543,6 +2543,17 @@ impl Engine {
         if matches!(c, 'j' | 'k') && self.rows_first && self.pending.operator.is_none() {
             return self.row_key(c == 'j', host);
         }
+        // `+` (Enter) and `-` likewise, to the start of that row: by the
+        // lines of the text, `-` went to the empty line between two
+        // paragraphs and came to rest on the end of the one before.
+        if matches!(c, '+' | '-') && self.rows_first && self.pending.operator.is_none() {
+            self.row_key(c == '+', host);
+            if let Some(line) = host.shown_line(self.cursor) {
+                self.cursor = line.start;
+                self.wanted_column = None;
+            }
+            return;
+        }
         // Sideways, and to what was last looked for in the line: by
         // what the host shows, where that is not the text.
         if matches!(c, 'h' | 'l' | ' ' | '\u{8}') && self.shown_sideways(c, host) {

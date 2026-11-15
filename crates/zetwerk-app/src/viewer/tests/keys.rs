@@ -652,6 +652,14 @@ fn back_a_paragraph_is_to_its_start() {
             "one\n\nwo\n\nthree\n",
         ),
         ("one\n\ntwo\n\nthree\n", "one", "}x", "one\n\nwo\n\nthree\n"),
+        // `-` and `+` by the lines the page shows, to their start.
+        (
+            "one\n\ntwo\n\nthree\n",
+            "hree",
+            "-x",
+            "one\n\nwo\n\nthree\n",
+        ),
+        ("one\n\ntwo\n\nthree\n", "ne", "+x", "one\n\nwo\n\nthree\n"),
     ]);
 }
 
@@ -695,4 +703,51 @@ fn a_cursor_in_the_middle_of_a_thing_shown_as_one_rests_on_it() {
         "diw",
         "One ://example.com three.\n",
     )]);
+}
+
+#[test]
+fn tab_does_what_is_written_in_plain_key_where_it_is() {
+    // The order is written down at `Viewer::plain_key`; here each place
+    // Tab means something different, one by one.
+    check(&[
+        // A list is up: the chosen entry.
+        (
+            "= Head <head>\n\nOne two.\n",
+            "two",
+            "A @he<Tab><Esc>",
+            "= Head <head>\n\nOne two. @head\n",
+        ),
+        // The short name of a snippet.
+        (
+            "One two.\n",
+            "two",
+            "A fn<Tab>X<Esc>",
+            "One two. #footnote[X]\n",
+        ),
+        // In an equation, the next place to fill in.
+        (
+            "One $x$ two.\n",
+            "x$",
+            "a + ff<Tab>1<Tab>2<Esc>",
+            "One $x + frac(1, 2)$ two.\n",
+        ),
+        // In a table, the next cell; behind the last one, a new row.
+        (
+            "Text.\n\n#table(columns: 2, [a], [b])\n",
+            "a]",
+            "a<Tab>X<Esc>",
+            "Text.\n\n#table(columns: 2, [a], [Xb])\n",
+        ),
+        (
+            "Text.\n\n#table(columns: 2, [a], [b])\n",
+            "b]",
+            "a<Tab>X<Esc>",
+            "Text.\n\n#table(columns: 2, [a], [b],\n[X], [])\n",
+        ),
+        // Elsewhere on a page, nothing: a tab shows as nothing.
+        ("One two.\n", "two", "A<Tab>X<Esc>", "One two.X\n"),
+        // In normal mode with no place to fill in: Ctrl-I, on through
+        // the places jumped from, and nowhere where there is none.
+        ("One two.\n", "two", "<Tab>x", "One wo.\n"),
+    ]);
 }
