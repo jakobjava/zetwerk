@@ -11,6 +11,15 @@ concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
 
+# Without what a debugger needs, and without what makes the next build
+# of the same tree faster: with them a build of Typst and of the tests
+# fills the runner's disk (the first run ended in "No space left on
+# device").
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+
 jobs:
   check:
     runs-on: ubuntu-latest
