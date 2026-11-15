@@ -62,18 +62,27 @@ struct Version {
     text: String,
     what: String,
     after: Option<u64>,
+    /// Whether there was no file: the change made it.
+    absent: bool,
 }
 
 /// Keeps `text` in `folder` as `name`, with `what` was done to it, which
 /// made it `after`.
-fn keep(folder: &Path, name: &str, text: &str, what: &str, after: &str) -> std::io::Result<()> {
+fn keep(
+    folder: &Path,
+    name: &str,
+    (text, absent): (&str, bool),
+    what: &str,
+    after: &str,
+) -> std::io::Result<()> {
     private_folder(folder)?;
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
     zetwerk_core::write_atomically(&folder.join(format!("{name}.text")), text.as_bytes())?;
     let after = lasting_hash(after.as_bytes());
-    let told = format!("{seconds}\n{what}\n{after:016x}\n");
+    let absent = if absent { "absent\n" } else { "" };
+    let told = format!("{seconds}\n{what}\n{after:016x}\n{absent}");
     zetwerk_core::write_atomically(&folder.join(format!("{name}.what")), told.as_bytes())
 }
 
@@ -86,7 +95,13 @@ fn kept(folder: &Path, name: &str) -> Option<Version> {
     let after = lines
         .next()
         .and_then(|hash| u64::from_str_radix(hash, 16).ok());
-    Some(Version { text, what, after })
+    let absent = lines.next() == Some("absent");
+    Some(Version {
+        text,
+        what,
+        after,
+        absent,
+    })
 }
 
 /// Refuses to put a version back over `now` where the file is not what
@@ -157,7 +172,15 @@ impl Viewer {
         };
         let had = numbers(&folder);
         let next = had.last().map_or(1, |last| last + 1);
-        keep(&folder, &format!("{next:08}"), before, what, after).map_err(|err| {
+        let absent = path.symlink_metadata().is_err();
+        keep(
+            &folder,
+            &format!("{next:08}"),
+            (before, absent),
+            what,
+            after,
+        )
+        .map_err(|err| {
             format!("nothing is changed: the file as it is could not be kept to go back to ({err})")
         })?;
         forget(&folder, REDO);
@@ -190,10 +213,17 @@ impl Viewer {
         let name = format!("{last:08}");
         let version = kept(&folder, &name).ok_or("the version kept cannot be read")?;
         unchanged_since(&version, &sources.text, &file_name(&sources.path), anyway)?;
-        keep(&folder, REDO, &sources.text, &version.what, &version.text).map_err(|err| {
+        let now = (sources.text.as_str(), false);
+        keep(&folder, REDO, now, &version.what, &version.text).map_err(|err| {
             format!("nothing is taken back: the file as it is could not be kept ({err})")
         })?;
-        write_whole(&sources.path, &version.text)?;
+        if version.absent {
+            // The change made the file: taking it back takes the file.
+            std::fs::remove_file(&sources.path)
+                .map_err(|err| format!("cannot remove {}: {err}", sources.path.display()))?;
+        } else {
+            write_whole(&sources.path, &version.text)?;
+        }
         forget(&folder, &name);
         self.sources_written(&sources.path);
         let what = version.what;

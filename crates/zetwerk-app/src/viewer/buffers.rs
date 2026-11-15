@@ -20,7 +20,7 @@ const MAX_FILES: usize = 3000;
 const MAX_DEPTH: usize = 6;
 
 /// Whether `a` and `b` name the same file.
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(super) fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
@@ -42,7 +42,7 @@ impl Viewer {
     }
 
     /// The name a file goes by: its path from the project directory.
-    fn name_of(&self, path: &Path) -> String {
+    pub(super) fn name_of(&self, path: &Path) -> String {
         let root = self.project.root_dir();
         let shown = path.strip_prefix(root).unwrap_or(path);
         shown.to_string_lossy().into_owned()
@@ -78,6 +78,23 @@ impl Viewer {
                 "the journal could not be read and was set aside as {}",
                 journal.display()
             )),
+        }
+    }
+
+    /// Says what else opening a file found (see [`Editor::remarks`]):
+    /// a history taken over from where the file was before, a journal
+    /// that was damaged. Loud, after whatever else is said.
+    pub(super) fn announce_remarks(&mut self, remarks: &[String]) {
+        if remarks.is_empty() {
+            return;
+        }
+        let said = remarks.join("; ");
+        match &self.message {
+            Some(message) if message.alert => {
+                let both = format!("{}; {said}", message.text);
+                self.alert(both);
+            }
+            _ => self.alert(said),
         }
     }
 
@@ -178,6 +195,7 @@ impl Viewer {
             match opened {
                 Ok((editor, opened)) => {
                     self.announce(&opened, editor.restored());
+                    self.announce_remarks(editor.remarks());
                     restored = !matches!(opened, Opened::Clean);
                     self.opened.push(file);
                     editor
@@ -337,6 +355,9 @@ impl Viewer {
             Some((name, argument)) => (name, argument.trim()),
             None => (command, ""),
         };
+        if self.saving_command(name, argument) {
+            return true;
+        }
         match (name, argument) {
             ("e" | "edit" | "e!" | "edit!", path) if !path.is_empty() => {
                 let path = self.beside_current(path);
@@ -392,7 +413,12 @@ impl Viewer {
                 self.save_all();
             }
             ("file", "") => self.open_file_under_cursor(),
-            ("pdf" | "png" | "svg", argument) => self.export_command(name, argument),
+            ("pdf" | "png" | "svg" | "pdf!" | "png!" | "svg!", argument) => {
+                self.export_command(name, argument);
+            }
+            ("figure!", argument) if !argument.is_empty() => {
+                self.export_command(name, argument);
+            }
             // `:figure` alone is for the figure's card (see `figures`).
             ("figure", argument) if !argument.is_empty() => {
                 self.export_command(name, argument);
