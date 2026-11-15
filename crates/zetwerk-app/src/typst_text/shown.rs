@@ -131,11 +131,23 @@ fn is_read(source: &Source, stop: &Range<usize>, math: bool) -> bool {
 /// they are written with, in the order of the text: running text, raw
 /// text, and in equations what is no name. The case of these can be
 /// switched; a name in another case is another name, or none.
+///
+/// Not the text of a footnote that `range` reaches over: the page shows
+/// that elsewhere, at the foot of the page, and `gUU` on a line with
+/// the footnote's mark changed it unseen. Within the footnote, its own.
 #[must_use]
 pub fn letters(source: &Source, range: &Range<usize>) -> Vec<Range<usize>> {
     fn gather(node: &LinkedNode, range: &Range<usize>, found: &mut Vec<Range<usize>>) {
         let here = node.range();
         if here.end <= range.start || here.start >= range.end {
+            return;
+        }
+        let note = node.kind() == SyntaxKind::FuncCall
+            && node
+                .children()
+                .next()
+                .is_some_and(|callee| callee.leaf_text() == "footnote");
+        if note && !(here.start < range.start && range.end < here.end) {
             return;
         }
         if matches!(node.kind(), SyntaxKind::Text | SyntaxKind::MathText) {
@@ -355,12 +367,18 @@ pub fn parted(source: &Source, range: Range<usize>) -> bool {
 /// without it all that follows would be something else. `None` where
 /// what is left would turn the mark of strong or emphasised text into
 /// a character, standing in a word.
+///
+/// What shows as nothing and goes with what `range` takes all of goes
+/// too, though it is not in `range` (see [`taken_along`]): the `#` before
+/// a call, the call an equation is given to. The first piece then begins
+/// before `range`.
 #[must_use]
 pub fn pieces(source: &Source, range: Range<usize>, with: &str) -> Option<Vec<Range<usize>>> {
     let text = source.text();
     if text.get(range.clone()).is_none() {
         return Some(vec![range]);
     }
+    let range = taken_along(source, &range).unwrap_or(range);
     let mut kept = Vec::new();
     unpaired(&LinkedNode::new(source.root()), &range, &mut kept);
     kept.sort_by_key(|mark| mark.start);
@@ -453,6 +471,115 @@ pub fn pieces(source: &Source, range: Range<usize>, with: &str) -> Option<Vec<Ra
         .any(|node| matches!(node.kind(), SyntaxKind::Strong | SyntaxKind::Emph));
     let left_open = blank && in_set_off;
     (!glued && !onto_code && !left_open).then_some(pieces)
+}
+
+/// What deleting bytes `range` of `source` takes along that is not in
+/// them, where the page shows it as nothing and it would be left alone:
+/// the bytes to take instead. `None` where that is nothing.
+///
+/// - The `#` before code that `range` takes all of: a footnote's mark,
+///   a symbol written by its name, a box. Left behind, it would make
+///   code of what follows.
+/// - The call an equation that `range` takes all of is given to, with
+///   its `#`, where that call shows nothing else (a numbered equation, a
+///   figure with no caption): the writer deletes the equation, and the
+///   call would lack it. A figure with a caption is no such call.
+///
+/// A label right behind such a call goes with it: it would label what
+/// stands before it then.
+#[must_use]
+pub fn taken_along(source: &Source, range: &Range<usize>) -> Option<Range<usize>> {
+    let text = source.text();
+    let taken = text.get(range.clone())?;
+    if taken.trim().is_empty() {
+        return None;
+    }
+    let root = LinkedNode::new(source.root());
+    let start = range.start + (taken.len() - taken.trim_start().len());
+    let end = range.end - (taken.len() - taken.trim_end().len());
+    // The call an equation that is all of what is taken is given to.
+    let given = root
+        .leaf_at(start, Side::After)
+        .and_then(|leaf| leaf.parent().cloned())
+        .filter(|equation| equation.kind() == SyntaxKind::Equation)
+        .filter(|equation| equation.range() == (start..end))
+        .and_then(|equation| equation.parent().cloned())
+        .filter(|args| args.kind() == SyntaxKind::Args)
+        .filter(|args| {
+            // Nothing else of it shows: no content given to it besides,
+            // no caption, no text.
+            let shows = |node: &LinkedNode| {
+                matches!(
+                    node.kind(),
+                    SyntaxKind::ContentBlock | SyntaxKind::Equation | SyntaxKind::Str
+                )
+            };
+            args.children().all(|arg| match arg.kind() {
+                SyntaxKind::Named => {
+                    let name = arg.children().next();
+                    let caption = name.is_some_and(|name| {
+                        matches!(name.leaf_text().as_str(), "caption" | "body" | "supplement")
+                    });
+                    !caption
+                        && arg
+                            .children()
+                            .skip(1)
+                            .all(|value| !shows(&value) || value.kind() == SyntaxKind::Str)
+                }
+                _ => arg.range() == (start..end) || !shows(&arg),
+            })
+        })
+        .and_then(|args| args.parent().cloned())
+        .filter(|call| call.kind() == SyntaxKind::FuncCall);
+    let (code, mut whole) = match given {
+        Some(call) => (call.range(), true),
+        None => (start..end, false),
+    };
+    // The `#` before code taken whole.
+    let hash = root
+        .leaf_at(code.start, Side::Before)
+        .filter(|hash| hash.kind() == SyntaxKind::Hash && hash.range().end == code.start)
+        .filter(|hash| {
+            hash.next_sibling().is_some_and(|after| {
+                after.range().start == code.start && after.range().end <= code.end
+            })
+        });
+    let from = match hash {
+        Some(hash) => {
+            whole = true;
+            hash.range().start
+        }
+        None => code.start,
+    };
+    if !whole {
+        return None;
+    }
+    // And its label.
+    let behind = &text[code.end..];
+    let blanks = behind.len() - behind.trim_start_matches([' ', '\t']).len();
+    let to = root
+        .leaf_at(code.end + blanks, Side::After)
+        .filter(|label| {
+            label.kind() == SyntaxKind::Label && label.range().start == code.end + blanks
+        })
+        .map_or(code.end, |label| label.range().end);
+    let along = from.min(range.start)..to.max(range.end);
+    (along != *range).then_some(along)
+}
+
+/// Where what goes in before the place a page shows at bytes `stop` of
+/// `source` goes: before the `#` that begins the code the place is
+/// written with (a footnote's mark, a figure, a box), else at its start.
+#[must_use]
+pub fn front(source: &Source, stop: &Range<usize>) -> usize {
+    LinkedNode::new(source.root())
+        .leaf_at(stop.start, Side::Before)
+        .filter(|hash| hash.kind() == SyntaxKind::Hash && hash.range().end == stop.start)
+        .filter(|hash| {
+            hash.next_sibling()
+                .is_some_and(|code| code.range().start == stop.start)
+        })
+        .map_or(stop.start, |hash| hash.range().start)
 }
 
 /// Whether byte `at` of `source` ends code put into running text with

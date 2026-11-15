@@ -262,7 +262,14 @@ fn told(text: &str, linewise: bool) -> Option<String> {
         } else {
             format!("{} and {last}", named.join(", "))
         };
-        return Some(format!("{all} deleted"));
+        // The text of a footnote is elsewhere on the page: it went too.
+        let notes = found.iter().find(|(_, name)| *name == "footnote");
+        let along = match notes.map(|(count, _)| *count) {
+            None => "",
+            Some(1) => ", with its text",
+            Some(_) => ", with their text",
+        };
+        return Some(format!("{all} deleted{along}"));
     }
     let read = crate::reading::reading(&Source::detached(text));
     let read = read.text();
@@ -280,6 +287,26 @@ fn told(text: &str, linewise: bool) -> Option<String> {
     } else {
         None
     }
+}
+
+/// How many references in `source` lead to the labels that `deleted`
+/// had, now that it is gone from it: `None` if none do.
+fn lost_references(deleted: &str, source: &Source) -> Option<usize> {
+    if !deleted.contains('<') {
+        return None;
+    }
+    let gone = crate::ref_text::read(&Source::detached(deleted)).defined;
+    if gone.is_empty() {
+        return None;
+    }
+    let left = crate::ref_text::read(source);
+    let lost = left
+        .used
+        .iter()
+        .filter(|(name, _)| gone.iter().any(|(label, _)| label == name))
+        .filter(|(name, _)| !left.defined.iter().any(|(label, _)| label == name))
+        .count();
+    (lost > 0).then_some(lost)
 }
 
 impl Viewer {
@@ -363,18 +390,37 @@ impl Viewer {
     /// Notes what a key yanked, deleted or put: the first two to be
     /// marked until the next key, the last to be told of.
     fn took(&mut self, took: Took) {
-        if !self.find.feedback {
-            return;
-        }
         let Some(editor) = &self.editor else {
             return;
         };
+        // What leads nowhere now is said whatever else is: the whole
+        // document stops for it.
+        if let Took::Deleted { text, linewise, .. } = &took
+            && let Some(lost) = lost_references(text, editor.source())
+        {
+            let said = told(text, *linewise).unwrap_or_else(|| "a label deleted".to_owned());
+            let lost = match lost {
+                1 => "a reference to it leads".to_owned(),
+                lost => format!("{lost} references to it lead"),
+            };
+            self.alert(format!("{said}: {lost} nowhere now (u brings it back)"));
+            return;
+        }
+        if !self.find.feedback {
+            return;
+        }
         match took {
             Took::Yanked(range) | Took::Put(range) => {
                 let until = Instant::now() + FLASH;
                 self.find.took = Some((editor.revision(), range, until));
             }
             Took::Deleted { text, linewise, .. } => {
+                // While typing, only what went unseen with a key that
+                // takes what is shown: a footnote, with its text.
+                let typing = editor.mode() == editor::Mode::Insert;
+                if typing && things(&text).is_empty() {
+                    return;
+                }
                 if let Some(said) = told(&text, linewise) {
                     self.notice(said);
                 }

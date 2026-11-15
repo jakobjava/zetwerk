@@ -3193,6 +3193,7 @@ mod tests {
     mod errors;
     mod files;
     mod frames;
+    mod hidden;
     #[path = "keys.rs"]
     mod keyboard;
     mod left_behind;

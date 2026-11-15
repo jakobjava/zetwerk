@@ -1191,6 +1191,13 @@ impl Host for DocumentHost<'_> {
         crate::typst_text::pieces(&self.document.buffer().0, range, with)
     }
 
+    fn front(&self, stop: Range<usize>) -> usize {
+        if !matches!(self.rows, RowsOf::Pages(_)) {
+            return stop.start;
+        }
+        crate::typst_text::front(&self.document.buffer().0, &stop)
+    }
+
     fn next_field(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
         matches!(self.rows, RowsOf::Pages(_))
             .then(|| crate::typst_text::tab_key(&self.document.buffer().0, at))?
