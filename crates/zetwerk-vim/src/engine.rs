@@ -2564,6 +2564,21 @@ impl Engine {
         {
             return;
         }
+        // Words as the page reads them: the star of strong text is no
+        // word there, and `b` came to rest on the blank before it.
+        // Behind an operator `b` and `e` too (`db`); `w` there has rules
+        // of its own (`cw`, the end of a line).
+        let words = if self.pending.operator.is_none() {
+            "wWbBeE"
+        } else {
+            "bBeE"
+        };
+        if words.contains(c)
+            && self.rows_first
+            && let Some(moved) = self.shown_word(c, host)
+        {
+            return self.finish_motion(Some(moved), host);
+        }
         let back = c == '{' && self.rows_first && self.mode == Mode::Normal;
         let back = back && self.pending.operator.is_none();
         let before = self.cursor;

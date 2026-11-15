@@ -15,10 +15,11 @@
 use std::ops::Range;
 
 use super::{
-    Awaiting, Column, Edit, Engine, Host, Mode, Operator, Seek, clamp, line_end_inclusive, lower,
-    upper,
+    Awaiting, Column, Edit, Engine, Host, Mode, Moved, Operator, Seek, clamp, line_end_inclusive,
+    lower, upper,
 };
 use crate::keys::{Key, KeyPress};
+use crate::motion::{self, Kind};
 use crate::object::Object;
 use crate::text::Text;
 use crate::took::Took;
@@ -561,6 +562,48 @@ impl Engine {
         self.cursor = clamp(Text(host.text()), self.cursor, false);
         self.wanted_column = None;
         true
+    }
+
+    /// `w`, `b`, `e` and their WORD kin (behind an operator only `b`
+    /// and `e`), where the
+    /// host reads the text as something else than it is written (see
+    /// [`Host::reading`]): over the words as read, so that the marks
+    /// strong text and equations are written with are no words of their
+    /// own. `None` where there is no reading, or the motion gets nowhere
+    /// in it: then the text's own words count.
+    pub(super) fn shown_word(&mut self, c: char, host: &impl Host) -> Option<Moved> {
+        let reading = host.reading()?;
+        let read = Text(reading.text());
+        let at = reading.read_at(self.cursor);
+        if at >= read.len() {
+            return None;
+        }
+        let count = self.pending.count.unwrap_or(1).max(1)
+            * self.pending.operator_count.unwrap_or(1).max(1);
+        let big = c.is_ascii_uppercase();
+        let (to, ok) = match c.to_ascii_lowercase() {
+            'w' => motion::word_forward(read, at, count, big, false),
+            'b' => motion::word_backward(read, at, count, big),
+            _ => motion::word_end(read, at, count, big, false),
+        };
+        if !ok || to == at || to >= read.len() {
+            return None;
+        }
+        let written = reading.written(to..read.next(to)).start;
+        if written == self.cursor {
+            return None;
+        }
+        self.take_count();
+        let kind = if c.eq_ignore_ascii_case(&'e') {
+            Kind::Inclusive
+        } else {
+            Kind::Exclusive
+        };
+        Some(Moved {
+            to: written,
+            kind,
+            column: Column::Reset,
+        })
     }
 
     /// Whole lines `start..end` of the text that a motion took for an

@@ -751,3 +751,21 @@ fn tab_does_what_is_written_in_plain_key_where_it_is() {
         ("One two.\n", "two", "<Tab>x", "One wo.\n"),
     ]);
 }
+
+#[test]
+fn words_are_the_words_the_page_reads() {
+    // The stars of strong text were words of their own: `b` came to
+    // rest on the blank before them, `w` behind them.
+    let body = "Third line *with bold* here.\n";
+    check(&[
+        (body, "with", "bx", "Third ine *with bold* here.\n"),
+        (body, "here", "bx", "Third line *with old* here.\n"),
+        (body, "line", "eex", "Third line *wit bold* here.\n"),
+        (body, "bold", "wx", "Third line *with bold* ere.\n"),
+        (body, "Third", "3wx", "Third line *with old* here.\n"),
+        (body, "here", "2Bx", "Third line *ith bold* here.\n"),
+        // Behind an operator: what is shown goes, the stars stay.
+        (body, "here", "db", "Third line *with *here.\n"),
+        (body, "line", "de", "Third  *with bold* here.\n"),
+    ]);
+}
