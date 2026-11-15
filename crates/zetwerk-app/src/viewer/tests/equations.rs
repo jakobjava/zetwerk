@@ -863,3 +863,24 @@ fn a_deletion_over_two_equations_leaves_neither() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn an_equation_shown_as_written_stays_so_when_the_cursor_leaves_it() {
+    // `$` typed in an equation Typst refuses (here a fraction without
+    // what it divides by) took the cursor out of it, the text as it was:
+    // the pages were taken for those of that text, and as the equation
+    // was tried again and refused, it was not shown as written again.
+    // Typesetting stopped there, with a complaint and nothing changing.
+    let (mut viewer, directory) = typed("A $x$ b.\n", "x$", "a frac(a");
+    settle(&mut viewer);
+    assert!(viewer.written.is_some());
+    for keys in ["$", " c"] {
+        press(&mut viewer, keys);
+        settle(&mut viewer);
+        assert_eq!(viewer.state().problems, Vec::<String>::new(), "{keys}");
+        assert!(viewer.written.is_some(), "{keys}");
+        assert_eq!(viewer.document_revision, Some(viewer.revision), "{keys}");
+    }
+    assert_eq!(viewer.text(), Some("A $x frac(a)$ c b.\n"));
+    let _ = std::fs::remove_dir_all(directory);
+}

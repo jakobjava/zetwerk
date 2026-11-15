@@ -1572,14 +1572,16 @@ impl Viewer {
         }
         self.refer_problems();
         // An equation Typst refuses is shown as it is written, and the
-        // pages are made again with it so.
+        // pages are made again with it so: also where the pages were
+        // carried over to this text without Typst (the text came back to
+        // what they show, or a part was typeset alone), which refused it.
         let file = self.editor.as_ref().map(crate::editor::Editor::file);
         let refused = self
             .diagnostics
             .iter()
             .find(|(of, _, is_error, _)| *is_error && Some(*of) == file)
             .map(|(_, range, _, message)| (range.start, message.clone()));
-        if self.document_revision != Some(self.revision)
+        if output.revision == self.revision
             && let Some((at, why)) = refused
             && self.show_as_written(at, &why)
         {
