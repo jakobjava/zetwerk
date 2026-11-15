@@ -194,6 +194,11 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("diagnostic next"),
     ),
     (
+        "why the page is behind the text, and the ways out",
+        ":why",
+        Does::Run("why"),
+    ),
+    (
         "spelling: next and previous thing found",
         "]s  [s",
         Does::Run("issue next"),
