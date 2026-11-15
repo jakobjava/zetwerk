@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=zetwerk
+GenericName=Typesetting editor
+Comment=Write Typst documents on the page
+Exec=zetwerk %f
+Icon=zetwerk
+Terminal=false
+MimeType=text/vnd.typst;
+Categories=Office;WordProcessor;
+StartupWMClass=zetwerk

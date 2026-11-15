@@ -1,0 +1,30 @@
+# Everything a change has to pass: formatting, lints, all tests.
+# The same as ./scripts/check.sh on a developer's machine.
+name: check
+
+on:
+  push:
+    branches: [main, page-surface]
+  pull_request:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain the lints are kept clean with: a newer one may
+      # bring lints of its own.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # No window is opened and no system library is needed: the tests
+      # drive the viewer without one, with the fonts Typst ships. The
+      # comparisons with Neovim are skipped where it is not installed.
+      - run: ./scripts/check.sh

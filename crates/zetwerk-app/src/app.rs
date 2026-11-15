@@ -320,6 +320,13 @@ impl Session {
         let attributes = Window::default_attributes()
             .with_title(switch::title(&options.path))
             .with_inner_size(LogicalSize::new(900.0, 1000.0));
+        // The name a desktop knows the window by: its entry in the list
+        // of applications and its icon go by it.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attributes = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attributes.with_name("zetwerk", "zetwerk")
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attributes)

@@ -1,0 +1,50 @@
+# An Arch package of zetwerk built from the repository: `makepkg -si`
+# in this directory.
+pkgname=zetwerk-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A keyboard-driven editor that typesets Typst documents on the page"
+arch=('x86_64')
+url="https://github.com/jakobjava/zetwerk"
+license=('MIT OR Apache-2.0')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo' 'git')
+optdepends=(
+    'hunspell-en_gb: spelling of British English'
+    'hunspell-en_us: spelling of American English'
+    'hunspell-de: spelling of German'
+    'hunspell-nl: spelling of Dutch'
+    'wl-clipboard: the system clipboard on Wayland'
+    'xclip: the system clipboard on X11'
+)
+provides=('zetwerk')
+conflicts=('zetwerk')
+source=("git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd zetwerk
+    printf '0.1.0.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd zetwerk
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd zetwerk
+    cargo build --frozen --release --workspace
+}
+
+check() {
+    cd zetwerk
+    cargo test --frozen --release --workspace
+}
+
+package() {
+    cd zetwerk
+    install -Dm755 target/release/zetwerk "$pkgdir/usr/bin/zetwerk"
+    install -Dm644 packaging/zetwerk.desktop "$pkgdir/usr/share/applications/zetwerk.desktop"
+    install -Dm644 packaging/zetwerk.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/zetwerk.svg"
+}
