@@ -1035,3 +1035,18 @@ fn text_begun_in_an_equation_and_left_empty_goes() {
     assert_eq!(viewer.text(), Some("A $x \"if\"$ b.\n"));
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn a_name_typst_refuses_once_typing_is_over_is_shown_as_written() {
+    // While it was typed, `alpha.alt` was shown as text, and the pages
+    // were of that same text: when Escape made it a name Typst refuses,
+    // the pages were taken for those of the text, and the equation was
+    // not shown as written. A complaint, and a page that did not say it.
+    let (mut viewer, directory) = typed("A $x$ b.\n", "x", "a alpha.alt");
+    settle(&mut viewer);
+    press(&mut viewer, "<Esc>");
+    settle(&mut viewer);
+    assert_eq!(viewer.state().problems, Vec::<String>::new());
+    assert!(viewer.written.is_some());
+    let _ = std::fs::remove_dir_all(directory);
+}
