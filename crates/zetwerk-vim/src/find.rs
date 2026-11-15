@@ -15,7 +15,8 @@
 //! exactly, also on a page.
 //!
 //! In what is read, a pattern without capitals finds words with them too
-//! (Vim's 'smartcase'), a blank finds any blank between words, and
+//! (Vim's 'smartcase'), a blank finds any blank between words (and
+//! beside a sign also none: an equation is read without its blanks), and
 //! straight quotation marks find the curly ones the page shows. In the
 //! text as written, case counts unless `\c` says otherwise, as it does
 //! in Vim by default.
@@ -283,9 +284,22 @@ fn occurrences(
 /// Where a match of `needle` that begins at byte `start` of `hay` ends,
 /// if one does.
 fn match_at(hay: &str, start: usize, needle: &str, fold: bool, loose: bool) -> Option<usize> {
-    let mut read = hay.get(start..)?.char_indices();
+    let mut read = hay.get(start..)?.char_indices().peekable();
     let mut end = start;
-    for wanted in needle.chars() {
+    let mut wanted_chars = needle.chars().peekable();
+    let mut before = None;
+    while let Some(wanted) = wanted_chars.next() {
+        // An equation is read without its blanks: `a + b` is "a+b". A
+        // blank beside a sign may be missing, then.
+        let sign = |c: Option<&char>| c.is_some_and(|c| !c.is_whitespace() && !is_word(*c));
+        let optional = loose
+            && wanted == ' '
+            && (sign(before.as_ref()) || sign(wanted_chars.peek()))
+            && !read.peek().is_some_and(|(_, c)| c.is_whitespace());
+        before = Some(wanted);
+        if optional {
+            continue;
+        }
         let (offset, c) = read.next()?;
         if !same(wanted, c, fold, loose) {
             return None;

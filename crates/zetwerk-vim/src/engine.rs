@@ -3892,8 +3892,12 @@ impl Engine {
             );
             let from = text.prev(self.cursor);
             if pair && from >= self.stop_at_insert_start(host.text(), from) {
+                // Both in one: a host may keep one of a pair taken alone
+                // (the dollar sign that closes an equation).
                 let to = text.next(self.cursor);
-                self.edit(host, self.cursor..to, "");
+                self.edit(host, from..to, "");
+                self.cursor = from;
+                return true;
             }
         }
         if self.replacing {

@@ -127,6 +127,13 @@ impl Editor {
         let before = self.document.revision();
         let typing = self.engine.mode() == Mode::Insert;
         let history = (self.document.state(), self.document.history().len());
+        let here = matches!(shown, Shown::Pages(_))
+            .then(|| self.equation_here())
+            .flatten();
+        let inside = matches!(shown, Shown::Pages(_))
+            .then(|| self.equation_inside())
+            .flatten();
+        let cursor = self.engine.cursor();
         // Only pages take the place of lines for `j` and `k`: in the
         // source, a line of the text is what they have always gone by.
         self.engine.set_rows_first(matches!(shown, Shown::Pages(_)));
@@ -146,6 +153,7 @@ impl Editor {
             rows,
             shown_revision: before,
             read: &self.read,
+            on_page: matches!(shown, Shown::Pages(_)),
         };
         let length = host.document.text().len();
         let effects = self.engine.key(press, &mut host);
@@ -162,9 +170,23 @@ impl Editor {
             if self.document.text().len() < length {
                 self.tidy_equation();
             }
-            if self.document.revision() != before || typing != (self.engine.mode() == Mode::Insert)
+            let left = typing && self.engine.mode() != Mode::Insert;
+            if self.document.text().len() < length || left {
+                self.clear_empty_equation(here);
+            }
+            // The equation typing took the cursor out of: what was typed
+            // last in it is over.
+            let out = inside.filter(|start| typing && self.equation_inside() != Some(*start));
+            if let Some(start) = out {
+                self.spell_out_names(Some(start));
+            }
+            // So is a word the cursor moved off while typing.
+            let moved = typing && inside.is_some() && self.engine.cursor() != cursor;
+            if self.document.revision() != before
+                || typing != (self.engine.mode() == Mode::Insert)
+                || moved
             {
-                self.spell_out_names();
+                self.spell_out_names(None);
             }
         }
         Typed {
@@ -177,12 +199,15 @@ impl Editor {
     /// cursor is in that name nothing become the letters they are, each
     /// by itself (`xy` becomes `x y`). Typst reads them as one name and
     /// refuses the equation for it; whoever types them means a product.
-    /// The word still being typed is left: it may become `alpha`.
-    fn spell_out_names(&mut self) {
-        let typing = self.engine.mode() == Mode::Insert;
+    /// The word still being typed is left: it may become `alpha`. With
+    /// `left`, in the equation that begins there, which the cursor left.
+    fn spell_out_names(&mut self, left: Option<usize>) {
+        let typing = left.is_none() && self.engine.mode() == Mode::Insert;
         let source = &self.document.buffer().0;
         let mut cursor = self.engine.cursor();
-        let Some(equation) = crate::typst_text::equation_at(source, cursor.saturating_sub(1))
+        let at = left.map_or(cursor.saturating_sub(1), |start| start + 1);
+        let Some(equation) = crate::typst_text::equation_at(source, at)
+            .filter(|equation| left.is_none_or(|start| equation.start == start))
         else {
             return;
         };
@@ -207,7 +232,10 @@ impl Editor {
             if name.end <= cursor {
                 cursor += spelled.len() - word.len();
             } else if name.start < cursor {
-                cursor = name.start;
+                // Before the same letter as before.
+                let letters = word[..cursor - name.start].chars().count();
+                let mut shown = spelled.char_indices().filter(|(_, c)| *c != ' ');
+                cursor = name.start + shown.nth(letters).map_or(0, |(at, _)| at);
             }
             replaces.push(Replace::new(name, spelled.as_str()));
         }
@@ -258,6 +286,93 @@ impl Editor {
         }
     }
 
+    /// Where the equation the cursor is in begins, if it is in one.
+    fn equation_inside(&self) -> Option<usize> {
+        let source = &self.document.buffer().0;
+        let cursor = self.engine.cursor();
+        crate::typst_text::equation_at(source, cursor)
+            .filter(|equation| equation.start < cursor)
+            .map(|equation| equation.start)
+    }
+
+    /// Where the equation the cursor is in (or is just behind) begins,
+    /// and whether it stands in its line: with no blank on one side of
+    /// what is in it.
+    fn equation_here(&self) -> Option<(usize, bool)> {
+        let source = &self.document.buffer().0;
+        let cursor = self.engine.cursor();
+        let equation = crate::typst_text::equation_at(source, cursor)
+            .or_else(|| crate::typst_text::equation_at(source, cursor.saturating_sub(1)))?;
+        let body = source
+            .text()
+            .get(equation.start + 1..equation.end.saturating_sub(1))?;
+        let alone = body.starts_with(char::is_whitespace) && body.ends_with(char::is_whitespace);
+        Some((equation.start, !alone))
+    }
+
+    /// After a deletion on a page, or when typing is over: the equation
+    /// the cursor is in (or the one it was in before the key, `here`, see
+    /// [`Editor::equation_here`]), with nothing left in it but blanks.
+    /// While it is typed into, one that stood in its line is kept there
+    /// (with blanks on both sides it would stand by itself). Else it
+    /// goes, dollar signs and all: they show as nothing, and would stay
+    /// in the text unseen. One with a label stays, for what refers to it.
+    fn clear_empty_equation(&mut self, here: Option<(usize, bool)>) {
+        let typing = self.engine.mode() == Mode::Insert;
+        let source = &self.document.buffer().0;
+        let text = source.text();
+        let blank = |equation: &Range<usize>| {
+            text.get(equation.start + 1..equation.end.saturating_sub(1))
+                .is_some_and(|body| body.trim().is_empty())
+        };
+        // After Escape the cursor rests on what is shown, which an empty
+        // equation is not: the one it was in is looked for too.
+        let was = here.and_then(|(start, _)| {
+            crate::typst_text::equation_at(source, start + 1).filter(|found| found.start == start)
+        });
+        let Some(equation) = crate::typst_text::equation_at(source, self.engine.cursor())
+            .into_iter()
+            .chain(was)
+            .find(blank)
+        else {
+            return;
+        };
+        if !crate::typst_text::is_whole_equation(source, &equation) {
+            return;
+        }
+        let inside = equation.start + 1..equation.end.saturating_sub(1);
+        let in_line = here.is_some_and(|(start, in_line)| start == equation.start && in_line);
+        let labelled = text[equation.end..]
+            .trim_start_matches(' ')
+            .starts_with('<');
+        let (range, cursor) = if typing {
+            (inside, equation.start + 1)
+        } else if labelled {
+            return;
+        } else {
+            // With what set it apart: the line breaks of a line it stood
+            // on alone (a paragraph's end once), or a blank beside it.
+            let (before, after) = (&text[..equation.start], &text[equation.end..]);
+            let breaks = after.len() - after.trim_start_matches('\n').len();
+            let apart = if before.is_empty() || before.ends_with("\n\n") {
+                breaks
+            } else if before.ends_with('\n') {
+                breaks.min(1)
+            } else {
+                usize::from(before.ends_with(' ') && after.starts_with(' '))
+            };
+            (equation.start..equation.end + apart, equation.start)
+        };
+        if range.is_empty() || (typing && !in_line) {
+            return;
+        }
+        if let Err(err) = self.document.edit(&[Replace::new(range, "")], true) {
+            self.failure = Some(err.to_string());
+            return;
+        }
+        self.engine.set_cursor(cursor, self.document.text());
+    }
+
     /// Changes the text without keys, as an agent does: each of `edits`
     /// replaces a range of bytes by a text, the ranges referring to the
     /// text as the edits before them left it. All of them are one undo
@@ -291,6 +406,7 @@ impl Editor {
             rows: RowsOf::Pages(None),
             shown_revision: before,
             read: &self.read,
+            on_page: false,
         };
         self.engine.replace(&mut host, edits);
         match self.failure.take() {
@@ -482,6 +598,7 @@ impl Editor {
             rows,
             shown_revision,
             read: &self.read,
+            on_page: false,
         };
         ask(&mut self.engine, &host)
     }
@@ -721,6 +838,7 @@ impl Editor {
             rows: RowsOf::Pages(None),
             shown_revision,
             read: &self.read,
+            on_page: false,
         };
         for key in keys.chain([press]) {
             self.engine.key(key, &mut host);
@@ -772,6 +890,8 @@ struct DocumentHost<'a> {
     shown_revision: u64,
     /// What the text is read as, kept between keys.
     read: &'a crate::reading::Cache,
+    /// Whether the edits are made by keys on a page, not by an agent.
+    on_page: bool,
 }
 
 /// How often what a deletion left in an equation is cleared away: what
@@ -790,10 +910,27 @@ impl Host for DocumentHost<'_> {
     }
 
     fn edit(&mut self, edits: &[Edit], join: bool) {
-        let replaces: Vec<Replace> = edits
+        let mut replaces: Vec<Replace> = edits
             .iter()
             .map(|edit| Replace::new(edit.range.clone(), edit.text.as_str()))
             .collect();
+        // On a page, a deletion keeps the dollar signs of an equation it
+        // takes only a part of: they show as nothing.
+        if self.on_page
+            && let [edit] = edits
+            && edit.text.is_empty()
+        {
+            let source = &self.document.buffer().0;
+            let parts = crate::typst_text::deleted_on_page(source, &edit.range);
+            if parts.is_empty() {
+                *self.failure = Some("the marks of an equation stay".to_owned());
+                return;
+            }
+            replaces = parts
+                .into_iter()
+                .map(|part| Replace::new(part, ""))
+                .collect();
+        }
         if let Err(err) = self.document.edit(&replaces, join) {
             *self.failure = Some(err.to_string());
         }

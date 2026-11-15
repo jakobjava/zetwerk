@@ -48,10 +48,12 @@ impl Viewer {
     /// text at byte `at`, saying `why`. Returns whether that is news:
     /// whether it was not shown so already.
     ///
-    /// It is the equation the cursor is in, if it is in one: what Typst
-    /// complains of may be far from what is wrong (an equation that is
-    /// not closed makes text of the equations behind it, and equations
-    /// of the text between them). Else the one at `at`.
+    /// It is the one at `at` if that is an equation by itself (with its
+    /// dollar signs where they belong). Else the equation the cursor is
+    /// in, if it is in one: what Typst complains of may be far from what
+    /// is wrong (an equation that is not closed makes text of the
+    /// equations behind it, and equations of the text between them).
+    /// Else the one at `at`.
     ///
     /// This is tried once for each state of the text. Tried again, one
     /// refusal could lead to the next and back, without end.
@@ -64,7 +66,11 @@ impl Viewer {
         };
         let (source, cursor) = (editor.source(), editor.cursor());
         let own = typst_text::equation_at(source, cursor).filter(|own| own.start < cursor);
-        let Some(equation) = own.or_else(|| typst_text::equation_at(source, at)) else {
+        let there = typst_text::equation_at(source, at);
+        let whole = there
+            .clone()
+            .filter(|there| typst_text::is_whole_equation(source, there));
+        let Some(equation) = whole.or(own).or(there) else {
             return false;
         };
         if self.written.as_ref().map(|written| written.start) == Some(equation.start) {

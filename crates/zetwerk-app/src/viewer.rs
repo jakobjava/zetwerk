@@ -1166,16 +1166,22 @@ impl Viewer {
         };
         let places = empty_places(source, &equation);
         put.extend(places.into_iter().map(|place| (place, EMPTY)));
-        // The word that ends at the cursor.
+        // The word the cursor is typing: up to it, and what letters
+        // stand right behind it (it was typed before them).
         let text = source.text();
         let typing = editor.mode() == editor::Mode::Insert;
         let before = text.get(..cursor).unwrap_or("");
         let named = before
-            .trim_end_matches(|c: char| c.is_alphabetic() || c == '.')
+            .trim_end_matches(|c: char| c.is_alphanumeric() || c == '.')
             .len();
-        let word = cursor - before[named..].trim_start_matches('.').len()..cursor;
+        let behind = text[cursor..].len()
+            - text[cursor..]
+                .trim_start_matches(char::is_alphanumeric)
+                .len();
+        let begun = before[named..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+        let word = cursor - begun.len()..cursor + behind;
         let begins = text[..word.start].chars().next_back();
-        let goes_on = text[cursor..].chars().next();
+        let goes_on = text[word.end..].chars().next();
         let alone = !begins.is_some_and(|c| c.is_alphanumeric() || matches!(c, '#' | '"' | '.'))
             && !goes_on.is_some_and(char::is_alphanumeric);
         let in_math = crate::typst_text::ground(source, word.start + 1) == Ground::Math
@@ -3025,6 +3031,7 @@ mod tests {
     use crate::keys;
 
     mod cursor;
+    mod equations;
     mod files;
     mod left_behind;
     mod speed;

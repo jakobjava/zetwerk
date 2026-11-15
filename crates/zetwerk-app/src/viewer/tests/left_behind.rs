@@ -28,30 +28,33 @@ fn typed(text: &str, at: &str, keys: &str) -> (Viewer, PathBuf) {
 }
 
 #[test]
-#[ignore = "shows a fault: a word typed into an equation that names nothing stops the document"]
 fn a_word_typed_into_an_equation_keeps_the_document() {
     // While the cursor is behind it, the word is shown as text (put
     // between quotes for Typst). Once a blank follows it, or the cursor
-    // leaves, it is a name Typst does not know: an error, and the page
-    // stays as it was before the word, with nothing to say why.
+    // leaves, it was a name Typst does not know: an error, and the page
+    // stayed as it was before the word. Letters typed together are a
+    // product now (`x y`), as soon as typing them is over.
     let (mut viewer, directory) = typed("Some $x$ here.\n", "x$", "a + ab <Esc>");
     let text = viewer.text().unwrap_or_default().to_owned();
     let problems = problems(&mut viewer);
     assert!(problems.is_empty(), "{text:?}: {problems:?}");
+    // Typeset as what it means, not shown as it is written.
+    assert!(viewer.written.is_none(), "{text:?}");
     let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
-#[ignore = "shows a fault: a dollar sign typed and left alone takes the paragraph into an equation"]
 fn a_dollar_sign_typed_and_left_keeps_the_document() {
-    // `$` begins an equation; before a word it comes alone (it could be
-    // a price), and one left unclosed runs to where the paragraph ends:
-    // all that text is read as mathematics.
+    // `$` begins an equation; before a word it came alone, and one left
+    // unclosed runs to where the paragraph ends: all that text was read
+    // as mathematics. It comes with the one that closes it now.
     let (mut viewer, directory) =
         typed("Some words here and more.\n\nNext.\n", "here", "i$x <Esc>");
     let text = viewer.text().unwrap_or_default().to_owned();
     let problems = problems(&mut viewer);
     assert!(problems.is_empty(), "{text:?}: {problems:?}");
+    // Typeset as what it means, not shown as it is written.
+    assert!(viewer.written.is_none(), "{text:?}");
     let _ = std::fs::remove_dir_all(directory);
 }
 
