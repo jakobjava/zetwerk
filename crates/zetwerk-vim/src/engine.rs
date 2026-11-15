@@ -2335,12 +2335,9 @@ impl Engine {
             'w' if self.pending.is_idle() => {
                 self.effects.push(Effect::Command("jump".to_owned()));
             }
-            // The change list, back and on.
+            // The change list, back and on; and `:s` again on all lines.
             ';' | ',' if self.pending.operator.is_none() => self.change_list(c == ';', host),
-            // `:s` again, on all lines, with its flags.
-            '&' if self.pending.is_idle() && !self.selecting() => {
-                self.effects.push(Effect::Command("%&&".to_owned()));
-            }
+            '&' if self.pending.is_idle() && !self.selecting() => self.substitute_all(),
             _ => self.fail(),
         }
     }

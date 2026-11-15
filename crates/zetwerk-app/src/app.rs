@@ -727,9 +727,9 @@ fn shifted(key: Key, shift: bool) -> Key {
 }
 
 /// Whether a key counts as pressed with Alt. On a Mac, Option (which is
-/// Alt) is how many characters are typed, as AltGr is elsewhere: a
+/// Alt) is how many characters are typed, as `AltGr` is elsewhere: a
 /// character it typed (`text`, without Ctrl) is that character, not
-/// Alt and a key. Elsewhere Alt is Alt (AltGr is not reported as it).
+/// Alt and a key. Elsewhere Alt is Alt (`AltGr` is not reported as it).
 fn alt_held(text: Option<&str>, ctrl: bool, alt: bool, mac: bool) -> bool {
     let typed = text.is_some_and(|text| {
         let mut chars = text.chars();

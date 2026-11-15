@@ -334,6 +334,11 @@ impl Engine {
         true
     }
 
+    /// `g&`: the last `:s` again, on all lines, with its flags.
+    pub(super) fn substitute_all(&mut self) {
+        self.effects.push(Effect::Command("%&&".to_owned()));
+    }
+
     /// `g;` (`back`) and `g,`: to the place of an older change, `count`
     /// of them, or of a newer one.
     pub(super) fn change_list(&mut self, back: bool, host: &impl Host) {
@@ -475,9 +480,8 @@ impl Engine {
         let Some((pattern, command)) = split_pattern(argument) else {
             return self.fail();
         };
-        let pattern = match self.pattern(&pattern) {
-            Ok(pattern) => pattern,
-            Err(_) => return self.fail(),
+        let Ok(pattern) = self.pattern(&pattern) else {
+            return self.fail();
         };
         let text = Text(host.text());
         let matching = |line: usize| {

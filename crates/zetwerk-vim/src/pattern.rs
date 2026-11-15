@@ -83,7 +83,9 @@ impl Replacement {
             match c {
                 '\\' => match chars.next() {
                     Some(digit @ '0'..='9') => {
-                        template.push_str(&format!("${{{digit}}}"));
+                        template.push_str("${");
+                        template.push(digit);
+                        template.push('}');
                     }
                     Some('r' | 'n') => template.push('\n'),
                     Some('t') => template.push('\t'),
@@ -122,6 +124,10 @@ fn first_line(text: &str) -> &str {
 
 /// `written` as Rust's regular expression, and whether `\c` (`Some(true)`)
 /// or `\C` asked for case to be ignored or not.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm for each mark of Vim's patterns"
+)]
 fn translate(written: &str) -> Result<(String, Option<bool>), String> {
     let mut out = String::new();
     let mut case = None;

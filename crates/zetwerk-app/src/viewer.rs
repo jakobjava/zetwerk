@@ -926,6 +926,7 @@ pub struct Viewer {
 impl Viewer {
     /// A viewer for `project` in a window of `window` device pixels.
     #[must_use]
+    #[allow(clippy::too_many_lines, reason = "one line for each field")]
     pub fn new(
         env: Arc<Environment>,
         project: Project,
@@ -2467,8 +2468,7 @@ impl Viewer {
         let Some(change) = self.places() else {
             return;
         };
-        let agent_marks = self.agent_marks();
-        let cells = self.cell_marks();
+        let (agent_marks, cells) = (self.agent_marks(), self.cell_marks());
         let (Some(editor), Some(document), Some(world)) =
             (&self.editor, &self.document, &self.compiled_world)
         else {
@@ -2500,13 +2500,8 @@ impl Viewer {
             };
             marked.push((range, colour));
         }
-        marked.extend(
-            editor
-                .selections()
-                .into_iter()
-                .map(|range| (range, PAGE_SELECTION)),
-        );
-        marked.extend(cells.into_iter().map(|range| (range, PAGE_SELECTION)));
+        let selected = editor.selections().into_iter().chain(cells);
+        marked.extend(selected.map(|range| (range, PAGE_SELECTION)));
         for (range, colour) in marked {
             let mut range = change.back_or_edge(range.start)..change.back_or_edge(range.end);
             if range.is_empty() {
