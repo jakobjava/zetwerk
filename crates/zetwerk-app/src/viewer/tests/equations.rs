@@ -847,3 +847,19 @@ fn a_mark_whose_base_is_deleted_shows_an_empty_place() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn a_deletion_over_two_equations_leaves_neither() {
+    // `dfy` from the first equation into the second kept the dollar
+    // sign of each that it took only a part of; one of the two equations
+    // left empty stayed, unseen, as `$$`.
+    for (text, keys, left) in [
+        ("A $x$ b. $y$ c.\n", "dfy", "A c.\n"),
+        ("A $x$ b. $y$ c. $z$ d.\n", "dfz", "A d.\n"),
+    ] {
+        let (mut viewer, directory) = typed(text, "x", keys);
+        assert_eq!(viewer.text(), Some(left), "{keys}");
+        settled(&mut viewer);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

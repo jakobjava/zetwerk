@@ -173,6 +173,9 @@ impl Editor {
             let left = typing && self.engine.mode() != Mode::Insert;
             if self.document.text().len() < length || left {
                 self.clear_empty_equation(here);
+                // A deletion from one equation into the next empties
+                // both: the second is where the first was.
+                self.clear_empty_equation(here);
             }
             // The equation typing took the cursor out of: what was typed
             // last in it is over.
