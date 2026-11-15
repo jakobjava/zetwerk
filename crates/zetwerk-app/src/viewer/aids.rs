@@ -9,6 +9,8 @@
 //! from the cursor line by line, so what a number says is where the key
 //! leads, across columns, tables and pages.
 
+use zetwerk_typst::PageMap;
+
 use super::{PageRows, Place, Quad, Scene, TextureId, Viewer, chrome};
 
 /// How many lines up and down from the cursor are numbered.
@@ -103,10 +105,20 @@ impl Viewer {
             let Some((_, numbered)) = &self.numbered else {
                 return;
             };
-            let all = self.page_lines.borrow();
-            let Some(lines) = all.get(&index) else {
+            let (Some(document), Some(world)) = (&self.document, &self.compiled_world) else {
                 return;
             };
+            let page = document.pages().get(index);
+            let Some(page) = page.filter(|_| numbered.iter().any(|(on, ..)| *on == index)) else {
+                return;
+            };
+            // The lines of pages made while what was typed since is
+            // worked into them (a compile of an older text) are not
+            // counted: the numbers kept stand beside them.
+            let mut all = self.page_lines.borrow_mut();
+            let lines = all
+                .entry(index)
+                .or_insert_with(|| PageMap::build(world, &page.frame).lines());
             // The numbers stand in a column of their own: left of where
             // the lines of the page (or of its column) begin.
             let edges: Vec<f64> = (0..lines.len())

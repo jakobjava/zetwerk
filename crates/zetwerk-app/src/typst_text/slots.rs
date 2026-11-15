@@ -97,6 +97,9 @@ fn holds_paragraphs(block: &LinkedNode) -> bool {
 /// The innermost item of a list that byte `at` of `source` is in or at
 /// the end of: what is typed at the end of an item goes on it.
 fn item_at(source: &Source, at: usize) -> Option<Range<usize>> {
+    // Blanks at the end of an item are not its own: what is typed
+    // behind them goes on it all the same.
+    let at = source.text().get(..at)?.trim_end_matches(' ').len();
     let mut node = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
     loop {
         let item = matches!(
