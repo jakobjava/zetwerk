@@ -676,6 +676,22 @@ fn is_rule_across(item: &FrameItem) -> bool {
             && matches!(shape.geometry, Geometry::Line(to) if to.y.to_pt().abs() < 0.01))
 }
 
+/// Whether text of `page` (not what `stays` around the text, nor the
+/// footnotes) reaches further down than `lowest`, in points: then that is
+/// not where its text ends.
+fn reaches_below(page: &Frame, lowest: f64, stays: &dyn Fn(usize) -> bool) -> bool {
+    for (index, (position, item)) in page.items().enumerate() {
+        if is_rule_across(item) {
+            break;
+        }
+        if !stays(index) && !matches!(item, FrameItem::Tag(_)) && extent(*position, item).1 > lowest
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// How near the top of something has to be to the bottom of the part
 /// to count as below it, in points: lines of a page overlap a little.
 const BELOW: f64 = 1.0;
@@ -774,15 +790,8 @@ pub fn splice(
     let gone = page.items().skip(old.items.start).take(old.items.len());
     let gone_closed = closed_among(gone.map(|(_, item)| item));
     let lowest = foot.to_pt() + BELOW;
-    // Nothing of the text of the page stands below the foot of its text.
-    for (index, (position, item)) in page.items().enumerate() {
-        if is_rule_across(item) {
-            break;
-        }
-        if !stays(index) && !matches!(item, FrameItem::Tag(_)) && extent(*position, item).1 > lowest
-        {
-            return Err(Refusal::FootElsewhere);
-        }
+    if reaches_below(page, lowest, stays) {
+        return Err(Refusal::FootElsewhere);
     }
     // The part itself does not go below it: the line typed in may be the
     // one that goes to the next page.
