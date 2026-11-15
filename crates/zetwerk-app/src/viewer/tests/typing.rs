@@ -353,6 +353,42 @@ fn backspace_and_delete_take_nothing_into_a_comment() {
 }
 
 #[test]
+fn enter_at_the_start_of_a_heading_keeps_it_a_heading() {
+    // The mark stayed behind as an empty heading, and the heading's text
+    // became a paragraph.
+    let text = "Before.\n\n= Head one\n\nText.\n";
+    assert_eq!(
+        typed(text, "/Head<CR>i<CR>"),
+        "Before.\n\n\n\n= |Head one\n\nText.\n"
+    );
+    assert_eq!(
+        typed(text, "/Head<CR>i<CR>x"),
+        "Before.\n\n\n\n= x|Head one\n\nText.\n"
+    );
+}
+
+#[test]
+fn a_parenthesis_typed_behind_a_footnote_or_a_table_is_one() {
+    // It called what the footnote or the table gives: an error, and the
+    // page stopped changing.
+    let cases = [
+        ("Word#footnote[Note.] after.\n", "/after<CR>hi(x)"),
+        (
+            "#table(columns: 2, [a1], [b1])\n\nAfter.\n",
+            "/b1<CR>A<CR>(see)",
+        ),
+    ];
+    for (text, keys) in cases {
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "gsgs");
+        compile(&mut viewer);
+        paced(&mut viewer, keys);
+        assert!(viewer.state().problems.is_empty(), "{:?}", viewer.text());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
 #[ignore = "probe"]
 fn probe() {
     let cases: Vec<(String, String)> =

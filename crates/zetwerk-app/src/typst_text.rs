@@ -435,6 +435,16 @@ pub fn line_break(source: &Source, at: usize) -> (Range<usize>, String) {
     // Text set off ends with its paragraph: it is closed before the
     // break and begun again behind it.
     let (chain, _) = containing(source, at);
+    // At the start of a heading the heading stays one, and moves down:
+    // the break goes before its mark, not between it and its text.
+    let line = text[..at].rfind('\n').map_or(0, |found| found + 1);
+    let mark = text[line..at].trim();
+    if chain.iter().any(|node| node.kind() == SyntaxKind::Heading)
+        && !mark.is_empty()
+        && mark.bytes().all(|b| b == b'=')
+    {
+        return (line..at, format!("\n\n{}", &text[line..at]));
+    }
     let marks: String = chain
         .iter()
         .filter_map(|node| match node.kind() {
@@ -581,6 +591,13 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         // The names of code and of what is referred to go on.
         Some(SyntaxKind::Ident) if matches!(c, '_' | '[' | '(') => return None,
         Some(SyntaxKind::RefMarker) if c == '_' => return None,
+        // Behind a call (a footnote, a table), `(` would call what it
+        // gives.
+        Some(SyntaxKind::RightParen | SyntaxKind::RightBracket | SyntaxKind::RightBrace)
+            if c == '(' =>
+        {
+            return escaped();
+        }
         // Behind strong text a letter would make its last mark a
         // character like any other: the function says it, then.
         Some(SyntaxKind::Star | SyntaxKind::Underscore) if c.is_alphanumeric() => {
