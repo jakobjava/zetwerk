@@ -555,6 +555,86 @@ impl Engine {
         true
     }
 
+    /// After `{` where the host shows pages: the empty line it went to
+    /// shows nothing, and coming to rest before it would be on the end
+    /// of the paragraph before. To the start of the paragraph instead,
+    /// that is, behind that line; or, where the cursor was there
+    /// already (at `before`), to the start of the one before.
+    pub(super) fn shown_paragraph_start(&mut self, before: usize, host: &impl Host) {
+        let start_behind = |at: usize| {
+            let text = Text(host.text());
+            if !text.line_is_empty(at) {
+                return None;
+            }
+            host.stop(at, Seek::After).map(|stop| stop.start)
+        };
+        let Some(start) = start_behind(self.cursor) else {
+            return;
+        };
+        if start < before {
+            self.cursor = start;
+            return;
+        }
+        // At the start already: one more paragraph back.
+        let text = Text(host.text());
+        let mut line = Some(self.cursor);
+        while let Some(at) = line.and_then(|at| text.prev_line(at)) {
+            if text.line_is_empty(at) {
+                line = Some(at);
+                continue;
+            }
+            // Up to the empty line before this paragraph, or the start.
+            let mut first = at;
+            while let Some(above) = text
+                .prev_line(first)
+                .filter(|above| !text.line_is_empty(*above))
+            {
+                first = above;
+            }
+            let found = text
+                .prev_line(first)
+                .and_then(start_behind)
+                .or_else(|| host.stop(first, Seek::After).map(|stop| stop.start));
+            if let Some(found) = found.filter(|found| *found < before) {
+                self.cursor = found;
+            }
+            return;
+        }
+    }
+
+    /// `ip` and `ap` where the host shows pages: `found`, the paragraph
+    /// of the text around byte `at`, without the lines next to it that
+    /// the host shows as things of their own (see [`Host::open`]): the
+    /// rules that set up the page, a heading, that stand against it with
+    /// no empty line between. Else `dap` would take those, unseen.
+    pub(super) fn shown_paragraph(&self, found: Object, at: usize, host: &impl Host) -> Object {
+        if !self.rows_first {
+            return found;
+        }
+        let (Some((start, above, _)), Some((end, below, _))) =
+            (host.open(at, false), host.open(at, true))
+        else {
+            return found;
+        };
+        if above != "\n\n" || below != "\n\n" {
+            return found;
+        }
+        let text = Text(host.text());
+        let filled = |range: Range<usize>| {
+            text.0
+                .get(range)
+                .is_some_and(|between| !between.trim().is_empty())
+        };
+        let mut shown = found;
+        if found.start < start && filled(found.start..start) {
+            shown.start = start;
+        }
+        if end < found.end && filled(end..found.end) {
+            shown.end = text.next_line(end).unwrap_or(text.0.len());
+        }
+        shown
+    }
+
     /// What `operator` (a delete, a change or a yank, not of whole lines)
     /// takes of `object` where taking all of it would cut what the host
     /// shows in two (see [`Host::cuts`]): the places shown in it, each
@@ -603,13 +683,13 @@ impl Engine {
     /// outside the keys (to the mark of a heading a list of headings led
     /// to, to a label), comes to rest on what is shown nearest, as it
     /// does after every key. Else `x` or `dw` there would take marks
-    /// nobody sees. Other keys go from where it is: typing there goes
-    /// into what that place is in.
+    /// nobody sees, and `i` would type before the mark of a heading,
+    /// which makes it none. Other keys go from where it is.
     pub(super) fn rest_before_key(&mut self, press: KeyPress, host: &impl Host) {
         let changes = !press.ctrl
             && match press.key {
                 Key::Delete => true,
-                Key::Char(c) => "xXsSrR~dcDCpPJ.".contains(c),
+                Key::Char(c) => "xXsSrR~dcDCpPJ.ia".contains(c),
                 _ => false,
             };
         let begun = self.pending.operator.is_some() || self.pending.awaiting != Awaiting::Nothing;

@@ -2202,6 +2202,9 @@ impl Engine {
                 let command = if c == 'a' { "accept" } else { "reject" };
                 self.effects.push(Effect::Command(command.to_owned()));
             }
+            // Behind an operator, Vim's `gn` and `gN`: the next match of
+            // the search, or the one before (`cgn` and then `.`).
+            'n' | 'N' if self.pending.operator.is_some() => self.search_object(c == 'n', host),
             // Nor Vim's `gn` and `gq`: a note on what is selected or under
             // the cursor, and a question about it for an agent, whose text
             // the host asks for.
@@ -2290,17 +2293,26 @@ impl Engine {
             host.stop(at, Seek::After)
                 .is_some_and(|stop| stop.start < until && !stop.is_empty())
         };
-        if operator == Operator::Delete && !shown(from, start) && !shown(end, to) {
-            // The last line goes with the line break before it, as Vim's
-            // last line does.
-            let (from, end) = match text.next_line(to) {
-                Some(next) => (from, next),
-                None => (if from > 0 { text.prev(from) } else { from }, to),
-            };
+        let whole = matches!(operator, Operator::Delete | Operator::Yank);
+        if whole && !shown(from, start) && !shown(end, to) {
+            // Whole lines, as Vim's `dd` and `yy` take them: `p` puts
+            // them back as lines, paragraphs.
+            let (mut from, mut to) = (from, line_end_inclusive(text, to));
+            // A paragraph with empty lines on both sides takes one of them
+            // along, else they pile up where it was.
+            let apart_before = from == 0 || text.line_is_empty(text.prev(from));
+            let apart_after = to >= text.len() || text.line_is_empty(to);
+            if operator == Operator::Delete && apart_before && apart_after {
+                if to < text.len() {
+                    to = line_end_inclusive(text, to);
+                } else if from > 0 {
+                    from = text.line_start(text.prev(from));
+                }
+            }
             return Some(Object {
                 start: from,
-                end,
-                linewise: false,
+                end: to,
+                linewise: true,
             });
         }
         // With the blank that parts them from what follows, unless the
@@ -2469,7 +2481,8 @@ impl Engine {
         let found = match c {
             'w' => object::word(text, pos, around, false, count),
             'W' => object::word(text, pos, around, true, count),
-            'p' => object::paragraph(text, pos, around, count),
+            'p' => object::paragraph(text, pos, around, count)
+                .map(|found| self.shown_paragraph(found, pos, host)),
             '"' | '\'' | '`' => object::quote(text, pos, c, around, count),
             // The host's own: an equation, a section, an argument.
             _ => host.object(c, pos, around).map(|range| Object {
@@ -2526,8 +2539,14 @@ impl Engine {
         {
             return;
         }
+        let back = c == '{' && self.rows_first && self.mode == Mode::Normal;
+        let back = back && self.pending.operator.is_none();
+        let before = self.cursor;
         let moved = self.motion(c, host);
         self.finish_motion(moved, host);
+        if back {
+            self.shown_paragraph_start(before, host);
+        }
     }
 
     /// Up and down by the rows the host shows: `gj` and `gk`, and `j` and
@@ -3274,6 +3293,25 @@ impl Engine {
             // An empty text is one empty line without its line break.
             if host.text().is_empty() {
                 self.edit(host, 0..0, "\n");
+            }
+            // On a page lines are put as paragraphs of their own, beside
+            // the one the cursor is in: put into its lines, they would
+            // be part of it. (In a list they are lines, items.)
+            let paragraph = host
+                .open(self.cursor, after)
+                .filter(|(_, with, _)| self.rows_first && with == "\n\n");
+            if let Some((at, ..)) = paragraph {
+                let body = inserted.trim_end_matches('\n');
+                let (put, start) = if after {
+                    (format!("\n\n{body}"), at + 2)
+                } else {
+                    (format!("{body}\n\n"), at)
+                };
+                self.edit(host, at..at, &put);
+                self.took = Some(Took::Put(start..start + body.len()));
+                self.cursor = Text(host.text()).first_non_blank(start);
+                self.wanted_column = None;
+                return;
             }
             let text = Text(host.text());
             let at = if after {
@@ -4359,6 +4397,42 @@ impl Engine {
             column: Column::Reset,
         });
         self.finish_motion(moved, host);
+    }
+
+    /// `gn` (`forward`) and `gN` behind an operator: it goes over the
+    /// match of the last search the cursor is on, or else the next one
+    /// (the one before), as in Vim.
+    fn search_object(&mut self, forward: bool, host: &mut impl Host) {
+        let reading = host.reading();
+        let found = self.last_search.as_ref().map(|search| {
+            let query = Query {
+                pattern: search.pattern.clone(),
+                word_start: search.word_start,
+                word_end: search.word_end,
+            };
+            find::find_all(host.text(), reading.as_deref(), &query)
+        });
+        let found = found.unwrap_or_default();
+        let cursor = self.cursor;
+        let pick = if forward {
+            let next = found.iter().find(|range| range.end > cursor);
+            next.or_else(|| found.first())
+        } else {
+            let before = found.iter().rev().find(|range| range.start <= cursor);
+            before.or_else(|| found.last())
+        };
+        let (Some(range), Some(operator)) = (pick.cloned(), self.pending.operator) else {
+            self.reset_pending();
+            return self.fail();
+        };
+        self.searches += 1;
+        self.reset_pending_keep_register();
+        let object = Object {
+            start: range.start,
+            end: range.end,
+            linewise: false,
+        };
+        self.operate(operator, object, 1, range.start, host);
     }
 
     /// `*` and `#`: searches for the word under the cursor, or the next one

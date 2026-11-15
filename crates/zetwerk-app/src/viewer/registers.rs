@@ -19,6 +19,9 @@ pub(super) struct Clipboard {
     pub(super) read: fn() -> Result<String, String>,
     pub(super) write: fn(&str) -> Result<(), String>,
     known: Option<String>,
+    /// Whether the last key was Ctrl-R while typing, which asks for the
+    /// name of a register next.
+    ctrl_r: bool,
 }
 
 impl Default for Clipboard {
@@ -27,17 +30,23 @@ impl Default for Clipboard {
             read: crate::clipboard::text,
             write: crate::clipboard::write,
             known: None,
+            ctrl_r: false,
         }
     }
 }
 
-/// Whether `press` names the register of the clipboard: `+` behind `"`.
-pub(super) fn asks_clipboard(editor: &Editor, press: KeyPress) -> bool {
+/// Whether `press` names the register of the clipboard: `+` behind `"`,
+/// or behind Ctrl-R while typing.
+pub(super) fn asks_clipboard(clipboard: &mut Clipboard, editor: &Editor, press: KeyPress) -> bool {
+    let typing = editor.mode() == crate::editor::Mode::Insert;
+    let ctrl_r = typing && press.ctrl && press.key == Key::Char('r');
+    let after_ctrl_r = std::mem::replace(&mut clipboard.ctrl_r, ctrl_r) && typing;
     press.key == Key::Char(CLIPBOARD)
         && !press.ctrl
-        && editor
-            .following()
-            .is_some_and(|following| following.typed == "\"")
+        && (after_ctrl_r
+            || editor
+                .following()
+                .is_some_and(|following| following.typed == "\""))
 }
 
 impl Viewer {

@@ -73,6 +73,11 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("search for the word at the cursor", "*  #", Does::Tells),
     (
+        "change the next match of the search; . the one after",
+        "cgn",
+        Does::Tells,
+    ),
+    (
         "replace what is written, in this line or (%) in all",
         ":s/this/that/  :%s/this/that/g",
         Does::Ask("%s/"),

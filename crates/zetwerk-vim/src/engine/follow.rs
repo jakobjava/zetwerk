@@ -23,6 +23,8 @@ enum When {
     /// Where nothing else is under way, whether something is selected or
     /// not.
     Unpending,
+    /// Only behind an operator.
+    Operator,
 }
 
 /// The keys after `g`: each key (or keys, apart by blanks), what it
@@ -63,6 +65,11 @@ const G: &[(&str, &str, When)] = &[
         "n q",
         "a note, a question for agents, on this",
         When::Unpending,
+    ),
+    (
+        "n N",
+        "the next match of the search, the one before",
+        When::Operator,
     ),
 ];
 
@@ -236,6 +243,7 @@ impl Engine {
                     When::NoOperator => operator.is_none(),
                     When::Idle => unpending && !self.selecting(),
                     When::Unpending => unpending,
+                    When::Operator => operator.is_some(),
                 };
                 let next = G
                     .iter()
@@ -338,14 +346,14 @@ mod tests {
 
     const TEXT: &str = "one two three\nfour five six\nseven eight nine\n";
 
-    /// An engine on [`TEXT`], its cursor in the middle line, a selection
-    /// made before and left, and `keys` typed.
+    /// An engine on [`TEXT`], its cursor in the middle line, a search and
+    /// a selection made before and left, and `keys` typed.
     fn engine(keys: &str) -> (Engine, Plain) {
         let mut host = Plain {
             text: TEXT.to_owned(),
         };
         let mut engine = Engine::new();
-        for press in parse(&format!("jwvl<Esc>{keys}")).unwrap() {
+        for press in parse(&format!("/e<CR>gg0jwvl<Esc>{keys}")).unwrap() {
             engine.key(press, &mut host);
         }
         (engine, host)

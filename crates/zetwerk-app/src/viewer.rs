@@ -1741,7 +1741,9 @@ impl Viewer {
 
     /// A key for the source text.
     fn editor_key(&mut self, press: KeyPress) {
-        if (self.editor.as_ref()).is_some_and(|editor| registers::asks_clipboard(editor, press)) {
+        if (self.editor.as_ref())
+            .is_some_and(|editor| registers::asks_clipboard(&mut self.clipboard, editor, press))
+        {
             self.clipboard_to_register();
         }
         // What the pages say of where the text is holds also while one

@@ -101,6 +101,20 @@ fn a_cursor_put_on_what_shows_as_nothing_deletes_nothing_hidden() {
         ("Text <lab> more.\n", "<lab>", "x", "Text <lab> ore.\n"),
         ("Text <lab> more.\n", "Text", "]i2x", "Text <lab> re.\n"),
         ("Text <lab> more.\n", "Text", "]i\"_x", "Text <lab> ore.\n"),
+        // Typing there went before the mark of the heading, which made
+        // it a paragraph.
+        (
+            "= Head\n\nText.\n",
+            "= Head",
+            "iX<Esc>",
+            "= XHead\n\nText.\n",
+        ),
+        (
+            "= Head\n\nText.\n",
+            "= Head",
+            "aX<Esc>",
+            "= HXead\n\nText.\n",
+        ),
     ]);
 }
 
@@ -235,6 +249,10 @@ fn the_register_plus_is_the_clipboard() {
     // What is put is not copied back; other registers are not copied.
     press(&mut viewer, "yiw\"ayiw");
     assert_eq!(*COPIED.lock().unwrap(), ["one"]);
+    // Ctrl-R + while typing puts in what the clipboard holds too.
+    viewer.clipboard.read = || Ok("copied".to_owned());
+    press(&mut viewer, "A <C-r>+<Esc>");
+    assert_eq!(viewer.text(), Some("pasted one wo copied\n"));
     let _ = std::fs::remove_dir_all(directory);
 }
 
@@ -466,10 +484,10 @@ fn deleting_a_paragraph_leaves_the_cursor_on_the_next() {
             "First.\n\nSecond.\n\nThird.\n",
             "Second",
             "dd",
-            "First.\n\n\nThird.\n",
+            "First.\n\nThird.\n",
             "Third",
         ),
-        ("First.\n\nSecond.\n", "Second", "dd", "First.\n\n", "First"),
+        ("First.\n\nSecond.\n", "Second", "dd", "First.\n", "First"),
         ("= Head\n\nText.\n", "Head", "dd", "\nText.\n", "Text"),
     ] {
         let text = format!("{PAGE}{body}");
@@ -522,5 +540,114 @@ fn ctrl_o_while_typing_runs_one_command_and_typing_goes_on() {
     check(&[
         ("One two.\n", "two", "iX<C-o>xY<Esc>", "One XYwo.\n"),
         ("One two.\n", "two", "AX<C-o>0Y<Esc>", "YOne two.X\n"),
+    ]);
+}
+
+#[test]
+fn lines_deleted_or_yanked_on_a_page_are_put_back_as_paragraphs() {
+    check(&[
+        // `ddp` swaps two paragraphs, as it swaps two lines in Vim; it
+        // made `three` into `ttwo` and `hree`.
+        (
+            "one\n\ntwo\n\nthree\n",
+            "two",
+            "ddp",
+            "one\n\nthree\n\ntwo\n",
+        ),
+        (
+            "one\n\ntwo\n\nthree\n",
+            "two",
+            "ddP",
+            "one\n\ntwo\n\nthree\n",
+        ),
+        (
+            "one\n\ntwo\n\nthree\n",
+            "one",
+            "yyGp",
+            "one\n\ntwo\n\nthree\n\none\n",
+        ),
+        (
+            "one\n\ntwo\n\nthree\n",
+            "two",
+            "yapGp",
+            "one\n\ntwo\n\nthree\n\ntwo\n",
+        ),
+        // In a list, lines are items.
+        ("- a\n- b\n", "a", "ddp", "- b\n- a\n"),
+        ("- a\n- b\n", "a", "yyp", "- a\n- a\n- b\n"),
+    ]);
+}
+
+#[test]
+fn a_paragraph_as_a_text_object_is_what_the_page_shows() {
+    // The rules that set up the page stand right above the paragraph:
+    // `dap` took them along, unseen.
+    check(&[
+        ("one\n\ntwo\n", "one", "dap", "two\n"),
+        ("one\n\ntwo\n", "one", "dip", "\ntwo\n"),
+        (
+            "= Head\nText here.\n\nMore.\n",
+            "here",
+            "dap",
+            "= Head\nMore.\n",
+        ),
+        ("one\n\ntwo\n\nthree\n", "two", "dap", "one\n\nthree\n"),
+    ]);
+}
+
+#[test]
+fn cgn_changes_the_next_match_and_dot_the_one_after() {
+    // `gn` is a note where nothing is under way; behind an operator it
+    // is Vim's. `cgnX` failed, and then `X` deleted the blank before.
+    check(&[
+        (
+            "one two one two\n",
+            "one",
+            "/two<CR>cgnX<Esc>",
+            "one X one two\n",
+        ),
+        (
+            "one two one two\n",
+            "one",
+            "/two<CR>cgnX<Esc>.",
+            "one X one X\n",
+        ),
+        ("one two one two\n", "one", "/two<CR>dgn", "one  one two\n"),
+        (
+            "one two one two\n",
+            "one",
+            "/two<CR>$cgNX<Esc>",
+            "one two one X\n",
+        ),
+        // Nothing searched for: nothing changes.
+        ("one two\n", "one", "cgn", "one two\n"),
+    ]);
+}
+
+#[test]
+fn back_a_paragraph_is_to_its_start() {
+    // `{` came to rest on the end of the paragraph before, as the empty
+    // line it goes to shows nothing; `{x` took the last letter there.
+    check(&[
+        (
+            "one\n\ntwo three\n\nfour\n",
+            "three",
+            "{x",
+            "one\n\nwo three\n\nfour\n",
+        ),
+        (
+            "one\n\ntwo\n\nthree\n",
+            "three",
+            "{x",
+            "one\n\nwo\n\nthree\n",
+        ),
+        ("one\n\ntwo\n\nthree\n", "two", "{x", "ne\n\ntwo\n\nthree\n"),
+        (
+            "one\n\ntwo\n\nthree\n",
+            "hree",
+            "2{x",
+            "one\n\nwo\n\nthree\n",
+        ),
+        ("one\n\ntwo\n\nthree\n", "one", "}x", "one\n\nwo\n\nthree\n"),
     ]);
 }

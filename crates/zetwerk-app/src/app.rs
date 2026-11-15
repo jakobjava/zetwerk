@@ -699,6 +699,9 @@ fn translate(key: &WinitKey, text: Option<&str>, ctrl: bool) -> Option<Key> {
             NamedKey::End => Key::End,
             _ => return None,
         },
+        // With Ctrl, a dead key is the key: Ctrl-^ on a German keyboard,
+        // to the file edited before.
+        WinitKey::Dead(Some(c)) if ctrl => Key::Char(*c),
         _ => return None,
     })
 }
@@ -711,8 +714,12 @@ mod tests {
     fn keyboard_dead_keys_and_compose_type_what_they_make() {
         let character = |c: &str| WinitKey::Character(c.into());
         let space = WinitKey::Named(NamedKey::Space);
-        // A dead key alone types nothing yet.
+        // A dead key alone types nothing yet; with Ctrl it is the key.
         assert_eq!(translate(&WinitKey::Dead(Some('^')), None, false), None);
+        assert_eq!(
+            translate(&WinitKey::Dead(Some('^')), None, true),
+            Some(Key::Char('^'))
+        );
         // Then Space types the accent itself, a letter the two together.
         assert_eq!(translate(&space, Some("^"), false), Some(Key::Char('^')));
         assert_eq!(translate(&space, Some("`"), false), Some(Key::Char('`')));
