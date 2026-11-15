@@ -824,6 +824,43 @@ impl PageLines {
     }
 }
 
+impl PageLines {
+    /// The lines of a page that shows no text, only one thing made of
+    /// bytes `range` of `file` (a page put in whole, from a PDF or an
+    /// image): one line across `rect`, with that thing as its one place
+    /// for a cursor. What [`PageMap::lines`] finds of glyphs alone.
+    #[must_use]
+    pub fn of_one(file: FileId, range: Range<usize>, rect: Rect) -> Self {
+        let (left, right) = (rect.min.x.to_pt(), rect.max.x.to_pt());
+        let (top, bottom) = (rect.min.y.to_pt(), rect.max.y.to_pt());
+        let glyph = LineGlyph {
+            left,
+            right,
+            file,
+            offset: range.start,
+            end: range.end,
+            blank: false,
+        };
+        let stop = Stop {
+            line: 0,
+            file,
+            start: range.start,
+            end: range.end,
+            blank: false,
+        };
+        Self {
+            lines: vec![PageLine {
+                top,
+                bottom,
+                left,
+                right,
+                glyphs: vec![glyph],
+            }],
+            stops: vec![stop],
+        }
+    }
+}
+
 fn order(a: f64, b: f64) -> std::cmp::Ordering {
     a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
 }
