@@ -2575,6 +2575,9 @@ impl Engine {
                     return horizontal(to, Kind::Inclusive);
                 }
                 let (to, ok) = motion::word_forward(text, pos, count, big, operating);
+                let to = self.past_unshown(pos, to, host, |at| {
+                    motion::word_forward(text, at, 1, big, false).0
+                });
                 if !ok && !operating && to == pos {
                     self.wanted_column = None;
                     return None;
@@ -2597,10 +2600,16 @@ impl Engine {
             }
             'b' | 'B' => {
                 let (to, ok) = motion::word_backward(text, pos, count, c == 'B');
+                let to = self.past_unshown(pos, to, host, |at| {
+                    motion::word_backward(text, at, 1, c == 'B').0
+                });
                 horizontal(self.partial(text, to, ok)?, Kind::Exclusive)
             }
             'e' | 'E' => {
                 let (to, ok) = motion::word_end(text, pos, count, c == 'E', false);
+                let to = self.past_unshown(pos, to, host, |at| {
+                    motion::word_end(text, at, 1, c == 'E', false).0
+                });
                 if operating {
                     // Unlike `b` and `ge`, a pending operator is applied to
                     // however far `e` got.
@@ -2700,6 +2709,36 @@ impl Engine {
             kind: Kind::Linewise,
             column: Column::Keep,
         }
+    }
+
+    /// Where a word motion from byte `from` that got to `to` leads where
+    /// the host shows pages: on past the marks of strong or emphasised
+    /// text that show as nothing (the star that closes it), which are no
+    /// word there, by `step` from each. Only for the cursor itself, and
+    /// where it stands on what the host shows: then the host knows what
+    /// that is.
+    fn past_unshown(
+        &self,
+        from: usize,
+        to: usize,
+        host: &impl Host,
+        step: impl Fn(usize) -> usize,
+    ) -> usize {
+        let cursor_only = self.pending.operator.is_none() && !self.selecting();
+        if !self.rows_first || !cursor_only || host.stop(from, Seek::At).is_none() {
+            return to;
+        }
+        let text = Text(host.text());
+        let mut to = to;
+        for _ in 0..8 {
+            let mark = matches!(text.char_at(to), Some('*' | '_'));
+            let next = step(to);
+            if !mark || host.stop(to, Seek::At).is_some() || next == to {
+                break;
+            }
+            to = next;
+        }
+        to
     }
 
     /// What to make of a word motion that got to `to`. If it got as far as

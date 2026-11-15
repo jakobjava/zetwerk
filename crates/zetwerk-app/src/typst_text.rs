@@ -590,6 +590,18 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         Some(SyntaxKind::Hash) => return None,
         // The names of code and of what is referred to go on.
         Some(SyntaxKind::Ident) if matches!(c, '_' | '[' | '(') => return None,
+        // Unless the name is that of a label there, and no other label's
+        // begins with it and `c`: the reference is whole, and `c` is text
+        // behind it.
+        Some(SyntaxKind::RefMarker)
+            if (c.is_alphanumeric() || matches!(c, '_' | '-'))
+                && behind.is_some_and(|marker| {
+                    let name = text[marker.range()].trim_start_matches('@');
+                    text.contains(&format!("<{name}>")) && !text.contains(&format!("<{name}{c}"))
+                }) =>
+        {
+            return escaped();
+        }
         Some(SyntaxKind::RefMarker) if c == '_' => return None,
         // Behind a call (a footnote, a table), `(` would call what it
         // gives.

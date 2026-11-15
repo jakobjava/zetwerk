@@ -363,6 +363,40 @@ fn a_heading_with_a_label_is_not_joined_to_the_paragraph_before() {
 }
 
 #[test]
+fn a_letter_typed_behind_a_reference_is_text() {
+    // It went into the name of what is referred to: a label that is not
+    // there, an error, and the page stopped changing.
+    let text = "#set heading(numbering: \"1.\")\n= Intro <intro>\n\nSee @intro there.\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, "gsgs");
+    compile(&mut viewer);
+    paced(&mut viewer, "/there<CR>his-x");
+    assert!(viewer.state().problems.is_empty(), "{:?}", viewer.text());
+    assert!(
+        viewer.text().unwrap().contains("See @intro\\s-x there."),
+        "{:?}",
+        viewer.text()
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn word_motions_on_the_page_go_past_the_marks_of_strong_text() {
+    // They stopped on the star that closes it, which shows as nothing:
+    // a key that seemed to do nothing, or to go half a word.
+    let text = "First *bold text* end word.\n";
+    let cases = [
+        ("/bold<CR>ww", "First *bold text* |end word.\n"),
+        ("/end<CR>b", "First *bold |text* end word.\n"),
+        ("/text<CR>ee", "First *bold text* en|d word.\n"),
+        ("/First<CR>w", "First *|bold text* end word.\n"),
+    ];
+    for (keys, expected) in cases {
+        assert_eq!(typed(text, keys), expected, "{keys:?}");
+    }
+}
+
+#[test]
 fn enter_at_the_start_of_a_heading_keeps_it_a_heading() {
     // The mark stayed behind as an empty heading, and the heading's text
     // became a paragraph.
