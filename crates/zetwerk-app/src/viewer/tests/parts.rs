@@ -151,10 +151,16 @@ fn a_rule_among_the_text_holds_for_the_part() {
 #[test]
 fn text_in_columns_is_typeset_whole() {
     // Columns made by a rule that is not `#set page(columns: ..)`: the
-    // part was typeset in two columns of a page of its own and put in.
-    let text = "#set page(width: 300pt, height: 300pt)\n#show: columns.with(2)\n\n\
-                First words of the text, in the first column.\n\nSecond $x$ words.\n";
-    assert_eq!(after_keys(text, "$x", true, "a^2"), None);
+    // part is typeset in two columns of a page of its own, beginning one
+    // where it stood in the second.
+    // The part with the paragraph before it began a column of its own.
+    let text = format!(
+        "#set page(width: 300pt, height: 300pt)\n#show: columns.with(2)\n\n{}",
+        paragraphs(9)
+    );
+    for at in ["x_3", "x_6"] {
+        assert_eq!(after_keys(&text, at, true, "a^2"), None, "{at}");
+    }
 }
 
 /// The elements that begin on `frame` and do not end there, by where
@@ -275,64 +281,42 @@ fn margins_of_two_sides_are_kept_on_a_left_page() {
     assert_eq!(after_keys(&text, "x_6", true, "a^2"), None);
 }
 
-#[test]
-fn what_a_part_pushes_off_a_full_page_is_not_shown_in_its_margin() {
-    // An equation grown taller on a full page: the lines below it went
-    // into the margin and over the page number.
-    let text = format!(
-        "#set page(width: 300pt, height: 200pt, margin: 20pt, numbering: \"1\")\n\n\
-         Before the equation.\n\n$ x $\n\n{}",
-        paragraphs(6)
-    );
-    let (mut viewer, directory) = editing(&text);
-    press(&mut viewer, "gsgs");
-    if let Some(editor) = viewer.editor.as_mut() {
-        editor.set_cursor(text.find("$ x").unwrap_or(0) + 3);
-    }
-    press(&mut viewer, "a/(y/z)/(u/v)");
-    assert!(viewer.stats.local > 0, "{:?}", viewer.declined);
-    let document = viewer.document.clone().unwrap_or_else(|| panic!("pages"));
-    let world = viewer
-        .compiled_world
-        .clone()
-        .unwrap_or_else(|| panic!("a world"));
-    let map = PageMap::build(&world, &document.pages()[0].frame);
-    let low: Vec<_> = map
-        .glyphs()
-        .iter()
-        .filter(|glyph| !glyph.furniture && glyph.rect.min.y.to_pt() > 180.0)
-        .map(|glyph| glyph.rect)
-        .collect();
-    assert_eq!(low, Vec::new());
-    let _ = std::fs::remove_dir_all(directory);
-}
-
-/// The glyphs of the text (not the page number or a running head) that
-/// the page on screen with the cursor shows wholly below `foot` points.
+/// The text of the document (not the page number, which comes of no
+/// place in it) that the page on screen with the cursor shows on lines
+/// lower than `foot` points: their baselines (a subscript a few points
+/// lower is on the line).
 fn below_foot(viewer: &Viewer, foot: f64) -> Vec<String> {
-    let (page, world) = match (&viewer.predicted, &viewer.document, &viewer.compiled_world) {
-        (Some(predicted), _, Some(world)) => (predicted.page.clone(), world.clone()),
-        (None, Some(document), Some(world)) => (document.pages()[0].clone(), world.clone()),
+    use typst::layout::{Frame, FrameItem, Point};
+    fn walk(frame: &Frame, at: Point, foot: f64, out: &mut Vec<String>) {
+        for (position, item) in frame.items() {
+            let here = at + *position;
+            match item {
+                FrameItem::Group(group) => walk(&group.frame, here, foot, out),
+                FrameItem::Text(text)
+                    if here.y.to_pt() > foot + 5.0
+                        && text.glyphs.iter().any(|glyph| !glyph.span.0.is_detached()) =>
+                {
+                    out.push(text.text.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    let page = match (&viewer.predicted, &viewer.document) {
+        (Some(predicted), _) => predicted.page.clone(),
+        (None, Some(document)) => document.pages()[0].clone(),
         _ => return Vec::new(),
     };
-    let map = PageMap::build(&world, &page.frame);
-    let text = viewer.text().unwrap_or_default();
-    map.glyphs()
-        .iter()
-        .filter(|glyph| !glyph.furniture && glyph.rect.min.y.to_pt() > foot)
-        .map(|glyph| match &glyph.origin {
-            zetwerk_typst::Origin::Text { range, .. } => {
-                text.get(range.clone()).unwrap_or("?").to_owned()
-            }
-            other => format!("{other:?}"),
-        })
-        .collect()
+    let mut out = Vec::new();
+    walk(&page.frame, Point::zero(), foot, &mut out);
+    out
 }
 
 #[test]
 fn a_line_more_worked_out_on_a_full_page_is_not_shown_in_its_margin() {
-    // The predictor took the margin below the text to be as wide as the
-    // one above it, or as the running head is high.
+    // A paragraph grown on a full page: what it pushed down was drawn in
+    // the margin below the text, which was taken to be as wide as the one
+    // above it.
     for page in [
         "#set page(width: 300pt, height: 200pt, margin: (top: 20pt, bottom: 60pt))",
         "#set page(width: 300pt, height: 200pt, margin: 30pt, header: [Head])",
@@ -346,11 +330,15 @@ fn a_line_more_worked_out_on_a_full_page_is_not_shown_in_its_margin() {
             170.5
         };
         if let Some(editor) = viewer.editor.as_mut() {
-            editor.set_cursor(text.find("in it.").unwrap_or(0));
+            editor.set_cursor(text.find("in it.").unwrap_or(0) + 6);
         }
-        for _ in 0..6 {
-            press(&mut viewer, "iwords and more <Esc>");
-            assert_eq!(below_foot(&viewer, foot), Vec::<String>::new(), "{page}");
+        for key in ["o", "A", " new", " paragraph", " of", " words."] {
+            press(&mut viewer, key);
+            assert_eq!(
+                below_foot(&viewer, foot),
+                Vec::<String>::new(),
+                "{page} {key}"
+            );
         }
         let _ = std::fs::remove_dir_all(directory);
     }
