@@ -4138,12 +4138,27 @@ impl Engine {
                 end = text.next(self.cursor);
             }
             // On a page, of what is shown there: over the marks it is
-            // made with (the star that begins strong text), never them.
-            let shown = host
-                .stop(self.cursor, Seek::After)
-                .filter(|stop| typed != "\n" && self.rows_first && stop.start < line_end);
-            if let Some(stop) = shown {
-                (self.cursor, end) = (stop.start, stop.end.max(stop.start));
+            // made with (the star that begins strong text), never them;
+            // where nothing more is shown in the line, nothing is typed
+            // over (the bracket that closes a cell). And not where what
+            // is shown would not be read then: a letter against the
+            // star of strong text leaves it unclosed.
+            if typed != "\n" && self.rows_first {
+                let shown = host
+                    .stop(self.cursor, Seek::After)
+                    .filter(|stop| stop.start < line_end);
+                (self.cursor, end) = match shown {
+                    Some(stop) => (stop.start, stop.end.max(stop.start)),
+                    None => (self.cursor, self.cursor),
+                };
+                let edit = Edit {
+                    range: self.cursor..end,
+                    text: typed.to_owned(),
+                };
+                if host.refuses(std::slice::from_ref(&edit)) {
+                    self.failed = true;
+                    return;
+                }
             }
             let original = host.text().get(self.cursor..end).unwrap_or("");
             let at = self.cursor..self.cursor + typed.len();

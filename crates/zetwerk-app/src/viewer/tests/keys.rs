@@ -371,6 +371,8 @@ fn no_key_on_a_page_breaks_the_markup() {
     let keys = [
         "x", "3x", "X", "2X", "dw", "d3w", "de", "db", "D", "dh", "d3l", "dfe", "dta", "J", "gJ",
         "3~", "rx", "ylp", "dd", "2dd", "C<Esc>", "s<Esc>", "v3ld", "cwz<Esc>", "daw", "diw",
+        "Rxy<Esc>", "dap", "dip", "Vd", "yyP", "dj", "dk", "db", "dB", "de", "bx", "ex", "{x",
+        "-x",
     ];
     let mut wrong = Vec::new();
     for at in (PAGE.len()..text.len()).step_by(3) {
@@ -411,11 +413,21 @@ fn replacing_on_a_page_goes_over_what_is_shown_never_the_marks() {
     check(&[
         // The star that begins strong text stays, and what is shown is
         // typed over: `xyzc d.` as Vim would have `a bc d.` after `Rxyz`.
-        ("a *bc* d.\n", "a *", "Rxyz<Esc>", "xy*zc* d.\n"),
-        ("a *bc* d.\n", "a *", "Rxyzwv<Esc>", "xy*zw*vd.\n"),
+        // Where what is typed would stand against the star, so that the
+        // page could not be read, it is not typed (and the user is told).
+        ("a *bc* d.\n", "a *", "Rxyz<Esc>", "x *bc* d.\n"),
+        ("a bc d.\n", "a bc", "Rxyzwv<Esc>", "xyzwvd.\n"),
+        // Where nothing more is shown in the line, what is typed goes in
+        // before the marks, as at the end of a line.
+        (
+            "T.\n\n#table(columns: 2, [a], [b])\n",
+            "b]",
+            "Rxy<Esc>",
+            "T.\n\n#table(columns: 2, [a], [xy])\n",
+        ),
         ("a $x + y$ d.\n", "a $", "Rxyz<Esc>", "xy$z + y$ d.\n"),
         // Backspace brings back what was typed over, marks and all.
-        ("a *bc* d.\n", "a *", "Rxyz<BS><BS><BS><Esc>", "a *bc* d.\n"),
+        ("a *bc* d.\n", "a *", "Rx<BS><Esc>", "a *bc* d.\n"),
         (
             "a $x + y$ d.\n",
             "a $",
