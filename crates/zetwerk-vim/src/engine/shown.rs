@@ -590,7 +590,11 @@ impl Engine {
             return None;
         }
         let written = reading.written(to..read.next(to)).start;
-        if written == self.cursor {
+        // Not into or out of an equation (the host's object `$`): what
+        // one reads as runs its parts together (`frac(a, b)` is `ab`),
+        // and the places the host shows in it lead through it.
+        let in_equation = |at: usize| host.object('$', at, true).is_some();
+        if written == self.cursor || in_equation(self.cursor) || in_equation(written) {
             return None;
         }
         self.take_count();
