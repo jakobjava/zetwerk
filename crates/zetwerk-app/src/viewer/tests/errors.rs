@@ -521,3 +521,54 @@ fn what_is_left_open_is_closed_where_it_was_meant_to_be() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn a_value_typst_does_not_allow_is_said_shortly_and_made_the_one_meant() {
+    for (text, says, then) in [
+        (
+            "#set page(paper: \"a44\")\n= Intro\n",
+            "this is none of the values allowed here; “a4”, perhaps?",
+            "#set page(paper: \"a4\")\n= Intro\n",
+        ),
+        (
+            "#set text(size: 11)\n= Intro\n",
+            "a length needs a unit (pt, mm, cm or em); “11pt”, perhaps?",
+            "#set text(size: 11pt)\n= Intro\n",
+        ),
+    ] {
+        let (mut viewer, directory) = editing(text);
+        let status = said(&viewer);
+        assert!(status.ends_with(&format!("{says}  · :why")), "{status}");
+        press(&mut viewer, "c");
+        assert_eq!(viewer.text(), Some(then));
+        assert_eq!(problems(&mut viewer), Vec::<String>::new(), "{text:?}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
+fn code_left_unfinished_is_taken_out() {
+    let (mut viewer, directory) = editing("#let x = 1 +\n= Intro\n\nText.\n");
+    press(&mut viewer, "x");
+    assert_eq!(viewer.text(), Some("= Intro\n\nText.\n"));
+    assert_eq!(problems(&mut viewer), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_citation_of_no_source_is_said_so() {
+    let directory =
+        directory("= Intro\n\nAs #cite(<unknown>) says.\n\n#bibliography(\"refs.bib\")\n");
+    std::fs::write(
+        directory.join("refs.bib"),
+        "@article{known, title={T}, author={A}, year={2020}}\n",
+    )
+    .unwrap();
+    let (viewer, _) = open(&directory);
+    let status = said(&viewer);
+    assert!(
+        status.contains("there is no source “unknown” in the bibliography"),
+        "{status}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}

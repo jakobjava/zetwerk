@@ -41,6 +41,9 @@ use crate::keys::{Key, KeyPress};
 /// How many characters of what is taken out are shown, and of the
 /// words before and from the place Typst refuses.
 const BEGINS: usize = 48;
+/// How many characters of what Typst says are shown, where it is not
+/// said otherwise.
+const MESSAGE: usize = 120;
 const BEFORE: usize = 16;
 const FROM: usize = 28;
 /// How many steps back undo is searched for the text the pages show.
@@ -210,8 +213,16 @@ pub(super) fn for_writer(message: &str) -> String {
     if let Some(label) = between("label `<", ">` does not exist in the document") {
         return format!("nothing is labelled “{label}”: the reference leads nowhere");
     }
-    if let Some(key) = between("key `", "` does not exist in the bibliography") {
+    if let Some(key) = between("key `", "` does not exist in the bibliography")
+        .or_else(|| between("citation key `", "` is not present in the bibliography"))
+    {
         return format!("there is no source “{key}” in the bibliography");
+    }
+    if message.starts_with("expected \"") && message.matches('"').count() > 6 {
+        return "this is none of the values allowed here".to_owned();
+    }
+    if needs_unit(message) {
+        return "a length needs a unit (pt, mm, cm or em)".to_owned();
     }
     if message.starts_with("cannot reference heading without numbering") {
         return "a heading is referred to, but headings are not numbered (gD numbers them)"
@@ -249,7 +260,13 @@ pub(super) fn for_writer(message: &str) -> String {
     if message.starts_with("maximum") && message.contains("depth exceeded") {
         return "something here goes on in itself without end".to_owned();
     }
-    message.to_owned()
+    shortened(message, MESSAGE)
+}
+
+/// Whether Typst says that a number is no length: it wants a unit.
+fn needs_unit(message: &str) -> bool {
+    message.starts_with("expected length")
+        && (message.ends_with("found integer") || message.ends_with("found float"))
 }
 
 /// How many letters are to be put in, taken out, changed or swapped
@@ -439,7 +456,14 @@ pub(super) fn offending(
     if message.starts_with("unexpected closing") && !marked.is_empty() && marked.len() <= 3 {
         return Some((range.clone(), ""));
     }
-    let mut node = Some(node_at(source, range.start));
+    // Of a place between two things (where something is missing), the
+    // thing before it.
+    let at = if range.is_empty() {
+        range.start.saturating_sub(1)
+    } else {
+        range.start
+    };
+    let mut node = Some(node_at(source, at));
     let mut found = None;
     while let Some(at) = node {
         if at.kind() == SyntaxKind::Ref {
@@ -535,7 +559,7 @@ impl Viewer {
             .as_ref()
             .filter(|(file, place, _)| file == of && place == range)
         {
-            let _ = write!(said, "; “{name}”, perhaps?");
+            let _ = write!(said, "; “{}”, perhaps?", name.trim_matches('"'));
         }
         Some(Refusal {
             file: *of,
@@ -603,13 +627,28 @@ impl Viewer {
             .diagnostics
             .iter()
             .find(|(of, at, error, _)| *error && *of == refusal.file && *at == range)?;
-        let name = message.strip_prefix("unknown variable: ")?;
         let source = world.written(refusal.file).ok()?;
-        if source.text().get(range.clone()) != Some(name) {
+        let written = source.text().get(range.clone())?;
+        let quoted = written
+            .strip_prefix('"')
+            .and_then(|written| written.strip_suffix('"'));
+        let meant = if let Some(name) = message.strip_prefix("unknown variable: ") {
+            if written != name {
+                return None;
+            }
+            likely(name, known_names(world, &source).into_iter())?
+        } else if let Some(value) = quoted
+            && message.starts_with("expected \"")
+        {
+            // One of the values listed, between quotes.
+            let listed = message.split('"').skip(1).step_by(2);
+            format!("\"{}\"", likely(value, listed)?)
+        } else if needs_unit(message) && written.parse::<f64>().is_ok() {
+            format!("{written}pt")
+        } else {
             return None;
-        }
-        let name = likely(name, known_names(world, &source).into_iter())?;
-        Some((refusal.file, range, name))
+        };
+        Some((refusal.file, range, meant))
     }
 
     /// `:why`: the panel, with what Typst refuses and the ways out.
@@ -710,6 +749,8 @@ impl Viewer {
                 editor.set_cursor(range.start);
                 self.text_changed(super::Edited::Command);
                 self.refused.again = true;
+                let name = name.trim_matches('"');
+                let was = was.trim_matches('"');
                 self.notice(format!("“{was}” made “{name}”  (u brings it back)"));
             }
             Err(why) => self.alert(format!("not changed: {why}")),
@@ -881,7 +922,7 @@ impl Viewer {
             ));
         }
         if let Some((_, name)) = self.likely_here(&refusal) {
-            lines.push(format!("c      make it “{name}”"));
+            lines.push(format!("c      make it “{}”", name.trim_matches('"')));
         }
         if let Some((_, steps)) = self.good_state() {
             let undos = if steps == 1 { "undo" } else { "undos" };
