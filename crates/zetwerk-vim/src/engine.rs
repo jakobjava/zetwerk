@@ -2929,8 +2929,9 @@ impl Engine {
                     self.undo_block = None;
                     return self.reset_pending();
                 }
+                let whole = start..end;
                 let pieces = if linewise {
-                    Some(vec![start..end])
+                    Some(vec![whole])
                 } else {
                     host.pieces(start..end, "")
                 };
@@ -2998,7 +2999,7 @@ impl Engine {
                         (self.undo_cursor, self.undo_block) = (None, None);
                         return self.fail();
                     };
-                    if pieces != [start..end] {
+                    if pieces.len() != 1 || pieces[0] != (start..end) {
                         changed = pieces
                             .iter()
                             .filter_map(|piece| host.text().get(piece.clone()))
@@ -3783,6 +3784,7 @@ impl Engine {
 
     /// What a key other than Escape and the cursor keys does in insert
     /// mode. Returns whether it did anything.
+    #[allow(clippy::too_many_lines, reason = "one arm per key")]
     fn insert_apply(&mut self, press: KeyPress, host: &mut impl Host) -> bool {
         let text = Text(host.text());
         match (press.key, press.ctrl) {

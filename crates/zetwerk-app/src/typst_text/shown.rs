@@ -430,7 +430,8 @@ pub fn pieces(source: &Source, range: Range<usize>, with: &str) -> Option<Vec<Ra
         .0
         .iter()
         .any(|node| matches!(node.kind(), SyntaxKind::Strong | SyntaxKind::Emph));
-    (!glued && !onto_code && !(blank && in_set_off)).then_some(pieces)
+    let left_open = blank && in_set_off;
+    (!glued && !onto_code && !left_open).then_some(pieces)
 }
 
 /// Whether byte `at` of `source` ends code put into running text with
