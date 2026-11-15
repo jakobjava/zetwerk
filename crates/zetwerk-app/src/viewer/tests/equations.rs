@@ -826,3 +826,24 @@ fn an_equation_given_to_a_function_stays_when_emptied() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn a_mark_whose_base_is_deleted_shows_an_empty_place() {
+    // Deleting `x` of `x^2` left `^2`, which Typst refuses: the equation
+    // was shown in red as it is written. It shows the place of what was
+    // deleted now, to be typed into.
+    for (text, keys, left) in [
+        ("A $x^2$ b.\n", "x", "A $^2$ b.\n"),
+        ("A $x_1$ b.\n", "x", "A $_1$ b.\n"),
+        ("A $x/y$ b.\n", "x", "A $/y$ b.\n"),
+    ] {
+        let (mut viewer, directory) = typed(text, "x", keys);
+        assert_eq!(viewer.text(), Some(left), "{text:?}");
+        settled(&mut viewer);
+        assert!(shown_text(&mut viewer).contains(&format!("${EMPTY}")));
+        press(&mut viewer, "iz<Esc>");
+        assert_eq!(viewer.text(), Some(text.replace('x', "z").as_str()));
+        settled(&mut viewer);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

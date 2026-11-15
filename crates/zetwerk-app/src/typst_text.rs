@@ -1766,6 +1766,9 @@ pub fn left_empty_everywhere(source: &Source, but: Option<&Range<usize>>) -> Vec
                 walk.places.push(end - rest.len());
             }
         }
+        if lacks_base(node.kind(), node.leaf_text()) {
+            walk.places.push(start);
+        }
         // The arguments of a call are told what the call is.
         let needs_all = match node.kind() {
             SyntaxKind::MathCall => node
@@ -1945,9 +1948,19 @@ fn empty_in(
     if lacks {
         places.extend(ends(end));
     }
+    if lacks_base(node.kind(), node.leaf_text()) {
+        places.push(node.range().start);
+    }
     for child in node.children() {
         empty_in(&child, ends, sure, places);
     }
+}
+
+/// Whether a node of `kind` with the text `text` is a mark that raises,
+/// lowers or divides with nothing before it, which Typst refuses: what
+/// is left of `x^2` when `x` is deleted.
+fn lacks_base(kind: SyntaxKind, text: &str) -> bool {
+    kind == SyntaxKind::Error && matches!(text, "^" | "_" | "/")
 }
 
 /// Something to put into a document from the insert menu, or by its
@@ -2727,8 +2740,11 @@ mod tests {
             "$vec(1, 2, )$ $f()$ $$ $mat(1, ; 2, )$"
         );
         assert_eq!(left("$sqrt()$"), "$sqrt(?)$");
+        // A mark whose base was deleted lacks it.
+        assert_eq!(left("a $^2$ b $(_1)$ c $/y$"), "a $?^2$ b $(?_1)$ c $?/y$");
         // All at once, as it is done for every key: the same places.
         for text in [
+            "a $^2$ b $frac(_1, a)$ c $/y$",
             "a $x^$ b $frac(a, )$ c $y_$",
             "$vec(1, 2, )$ $f()$ $$ $mat(1, ; 2, )$ and #f[$a/$] - $x^()$",
         ] {
@@ -2750,6 +2766,7 @@ mod tests {
         assert_eq!(empties("$frac(, )$"), "$frac(?, ?)$");
         assert_eq!(empties("$frac(a, )$"), "$frac(a, ?)$");
         assert_eq!(empties("$sqrt()$"), "$sqrt(?)$");
+        assert_eq!(empties("$ ^2 + x$"), "$ ?^2 + x$");
         assert_eq!(empties("$x^$"), "$x^?$");
         // An equation that stands by itself keeps the blank it ends
         // with: without it, it would stand in its line.
