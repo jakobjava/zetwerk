@@ -41,79 +41,26 @@ fn run_commands() -> Vec<&'static str> {
 }
 
 #[test]
-#[ignore = "exploration: prints what each command says"]
-fn walk_every_command_of_the_list() {
-    for command in run_commands() {
-        for (name, text, page) in [
-            ("rich", RICH, false),
-            ("empty", "", false),
-            ("page", RICH, true),
-        ] {
-            let directory = directory(text);
-            std::fs::write(directory.join("refs.bib"), BIB).unwrap();
-            let (mut viewer, _) = open(&directory);
-            if page {
-                press(&mut viewer, "gsgs");
-            }
-            if let Some(editor) = viewer.editor.as_mut() {
-                editor.set_cursor(text.find("box").unwrap_or(0));
-            }
-            let before = viewer.text().unwrap_or_default().to_owned();
-            viewer.execute(command);
-            let picker = viewer.picker.as_ref().map(|picker| {
-                let (title, shown, _) = picker.listing();
-                format!("[{title} x{}]", shown.len())
-            });
-            let changed = viewer.text().unwrap_or_default() != before;
-            println!(
-                "{command:24} {name:6} {} {} {}",
-                picker.unwrap_or_default(),
-                if changed { "CHANGED" } else { "" },
-                said(&viewer)
-            );
-            press(&mut viewer, "<Esc><Esc>");
-            let _ = std::fs::remove_dir_all(&directory);
-        }
-    }
-}
-
-#[test]
-#[ignore = "exploration: escape and keys in every list"]
 fn every_list_closes_with_escape_and_keeps_its_keys() {
     for command in run_commands() {
-        for (name, text) in [("rich", RICH), ("empty", "")] {
-            let directory = directory(text);
-            std::fs::write(directory.join("refs.bib"), BIB).unwrap();
-            let (mut viewer, _) = open(&directory);
-            if let Some(editor) = viewer.editor.as_mut() {
-                editor.set_cursor(text.find("box").unwrap_or(0));
-            }
-            viewer.execute(command);
-            if viewer.picker.is_none() {
-                let _ = std::fs::remove_dir_all(&directory);
-                continue;
-            }
-            let before = viewer.text().unwrap_or_default().to_owned();
-            // Typed into the list, not the text.
-            press(&mut viewer, "ddxpu");
-            press(&mut viewer, "<BS><BS><BS><BS><BS>");
-            let mut escapes = 0;
-            while viewer.picker.is_some() && escapes < 6 {
-                press(&mut viewer, "<Esc>");
-                escapes += 1;
-            }
-            let after = viewer.text().unwrap_or_default();
-            println!(
-                "{command:24} {name:6} escapes {escapes} {} {}",
-                if viewer.picker.is_some() {
-                    "STILL OPEN"
-                } else {
-                    ""
-                },
-                if after == before { "" } else { "TEXT CHANGED" },
-            );
+        let directory = directory(RICH);
+        std::fs::write(directory.join("refs.bib"), BIB).unwrap();
+        let (mut viewer, _) = open(&directory);
+        viewer.execute(command);
+        if viewer.picker.is_none() {
             let _ = std::fs::remove_dir_all(&directory);
+            continue;
         }
+        let before = viewer.text().unwrap_or_default().to_owned();
+        // Typed into the list, not the text.
+        press(&mut viewer, "ddxpu<BS><BS><BS><BS><BS>");
+        // Escape leads back to the list it came of, and away at last.
+        for _ in 0..3 {
+            press(&mut viewer, "<Esc>");
+        }
+        assert!(viewer.picker.is_none(), "{command}: the list stays");
+        assert_eq!(viewer.text(), Some(before.as_str()), "{command}");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
 
@@ -137,71 +84,6 @@ fn every_command_of_the_list_is_one() {
         let said = said(&viewer);
         assert!(!said.starts_with("not a command"), "{command}: {said}");
         let _ = std::fs::remove_dir_all(&directory);
-    }
-}
-
-#[test]
-#[ignore = "exploration: Enter on every row of every list, then Escape"]
-fn enter_on_every_row_then_escape() {
-    for command in [
-        "doc",
-        "styles",
-        "bib",
-        "bib view",
-        "figures",
-        "structure",
-        "references",
-        "invisibles",
-        "outline",
-        "labels",
-        "files",
-    ] {
-        let mut row = 0;
-        loop {
-            let directory = directory(RICH);
-            std::fs::write(directory.join("refs.bib"), BIB).unwrap();
-            let (mut viewer, _) = open(&directory);
-            viewer.execute(command);
-            let Some(picker) = &viewer.picker else {
-                break;
-            };
-            let (_, shown, chosen) = picker.listing();
-            if row >= shown.len() {
-                break;
-            }
-            let label = shown[row].to_owned();
-            let before = viewer.text().unwrap_or_default().to_owned();
-            // To the first row, then down to the one wanted.
-            for _ in 0..chosen {
-                press(&mut viewer, "<Up>");
-            }
-            for _ in 0..row {
-                press(&mut viewer, "<Down>");
-            }
-            press(&mut viewer, "<CR>");
-            let after_enter = viewer.text().unwrap_or_default() != before;
-            let then = viewer
-                .picker
-                .as_ref()
-                .map(|picker| picker.listing().0.to_owned());
-            let said_then = said(&viewer);
-            let mut escapes = 0;
-            while viewer.picker.is_some() && escapes < 6 {
-                press(&mut viewer, "<Esc>");
-                escapes += 1;
-            }
-            let changed = viewer.text().unwrap_or_default() != before;
-            println!(
-                "{command:10} {row:2} {:50} -> [{}] {} esc {escapes}{} {}",
-                label.replace('\t', " | "),
-                then.unwrap_or_default(),
-                if after_enter { "CHANGED" } else { "" },
-                if changed { " KEPT" } else { "" },
-                said_then,
-            );
-            let _ = std::fs::remove_dir_all(&directory);
-            row += 1;
-        }
     }
 }
 
@@ -247,37 +129,6 @@ fn an_agent_never_changes_the_next_document_by_a_revision_of_the_last() {
 }
 
 #[test]
-#[ignore = "exploration: where the lists stand in small windows"]
-fn lists_in_small_windows() {
-    for (ui, window) in [
-        (1.0, (1000, 620)),
-        (1.6, (1000, 620)),
-        (1.6, (700, 500)),
-        (1.0, (500, 400)),
-    ] {
-        for command in ["help", "styles", "doc", "bib", "recent"] {
-            let (mut viewer, directory) = editing(RICH);
-            std::fs::write(directory.join("refs.bib"), BIB).unwrap();
-            viewer.resize(window, 1.0);
-            viewer.ui = ui;
-            viewer.scale = viewer.display * ui;
-            viewer.arrange();
-            viewer.execute(command);
-            let scene = viewer.scene(&|_| false);
-            let top = (f64::from(window.1) / 4.0).round() as f32;
-            let placed: Vec<(f32, f32, f32, f32)> = scene
-                .quads
-                .iter()
-                .filter(|quad| (quad.y - top).abs() < 1.0)
-                .map(|quad| (quad.x, quad.y, quad.width, quad.height))
-                .collect();
-            println!("ui {ui} {window:?} {command:8} {placed:?}");
-            let _ = std::fs::remove_dir_all(directory);
-        }
-    }
-}
-
-#[test]
 fn the_list_of_all_there_is_to_do_shows_every_entrys_keys_whole() {
     let (mut viewer, directory) = editing("Words.\n");
     press(&mut viewer, "g?");
@@ -318,35 +169,6 @@ fn a_list_wider_than_the_window_begins_in_it() {
 }
 
 #[test]
-#[ignore = "exploration: the bibliography manager on a broken file"]
-fn sources_of_a_broken_file() {
-    for bib in [
-        "@book{a,\n  title = {Unclosed\n",
-        "@book{a, title = {One}, year = {2000}}\n@misc{b, title = {Two\n\n@article{c, title = {Three}, year = 2001}\n",
-        "garbage only\n",
-        "@book{a, title = {One}, year = {2000}}\n@book{a, title = {Same key}, year = {2001}}\n",
-    ] {
-        let directory = directory("Text @a.\n#bibliography(\"refs.bib\")\n");
-        std::fs::write(directory.join("refs.bib"), bib).unwrap();
-        let (mut viewer, _) = open(&directory);
-        viewer.execute("bib");
-        let listed = viewer
-            .picker
-            .as_ref()
-            .map(|picker| picker.listing().1.join(" / "));
-        println!("{bib:?}\n  listed: {listed:?} said: {}", said(&viewer));
-        press(&mut viewer, "<Esc>");
-        viewer.execute("bib new book");
-        let after = std::fs::read_to_string(directory.join("refs.bib")).unwrap();
-        println!("  said: {}\n  file now: {after:?}", said(&viewer));
-        let entries = crate::bib::parse(&after);
-        let keys: Vec<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
-        println!("  parsed keys: {keys:?}");
-        let _ = std::fs::remove_dir_all(&directory);
-    }
-}
-
-#[test]
 fn a_list_of_files_and_the_completions_are_not_up_at_once() {
     let directory = directory("Words.\n");
     std::fs::write(directory.join("plot.png"), b"").unwrap();
@@ -363,46 +185,5 @@ fn a_list_of_files_and_the_completions_are_not_up_at_once() {
     // Escape leaves the list and nothing else.
     press(&mut viewer, "<Esc>");
     assert!(viewer.picker.is_none());
-    let _ = std::fs::remove_dir_all(&directory);
-}
-
-#[test]
-#[ignore = "exploration: an agent's change while the user looks through the history"]
-fn an_agent_changes_the_text_while_the_user_looks_back() {
-    let (mut viewer, directory) = editing("Broken #nope(\n");
-    press(&mut viewer, "ccFixed text.<Esc>");
-    compile(&mut viewer);
-    println!(
-        "now: {:?} problems {:?}",
-        viewer.text(),
-        viewer.state().problems
-    );
-    press(&mut viewer, "gh<Down>");
-    compile(&mut viewer);
-    println!(
-        "looking back: problems {:?} looks_back {}",
-        viewer.state().problems,
-        viewer.looks_back()
-    );
-    viewer
-        .agent_replace("Fixed", "Fine", false, None, false)
-        .unwrap();
-    compile(&mut viewer);
-    let state = viewer.state();
-    println!(
-        "after the agent: text {:?} revision {} compiled {:?} problems {:?} is_compiled {}",
-        viewer.text(),
-        state.revision,
-        state.compiled_revision,
-        state.problems,
-        viewer.is_compiled()
-    );
-    press(&mut viewer, "<Esc>");
-    compile(&mut viewer);
-    println!(
-        "after escape: {:?} problems {:?}",
-        viewer.text(),
-        viewer.state().problems
-    );
     let _ = std::fs::remove_dir_all(&directory);
 }
