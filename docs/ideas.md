@@ -56,15 +56,26 @@ Found by the random typist and not fixed (see the ignored tests in
 
 Put right since (`viewer/tests/parts.rs`): a part read otherwise when cut
 out (`*` behind `*strong*`, `- ` behind a rule) or numbered anew by Typst is
-refused, not shown; references, footnotes put in, rules among the text,
-columns made by a rule, floating figures, pages wider than high, margins as
-shares of the page and margins of two sides no longer make a part show other
-glyphs than the whole; what a part pushes below the text of the page is left
-out (not drawn in the margin) until the whole puts it on the next page; the
-number of an empty list item counts as part of it; an element cut in two by
-the splice (an equation broken over two lines) no longer stays open and takes
-the page number for its own. A compile of an older text keeping what was typed
-since is the frame-stability fix in `Viewer::compiled`.
+refused, not shown; references to what is not in the part show what the
+whole shows (what they refer to stands hidden in the part's lead); footnotes
+put in, rules among the text, columns made by a rule, floating figures, pages
+wider than high, margins as shares of the page and margins of two sides no
+longer make a part show other glyphs than the whole; what a part pushes below
+the text of the page is left out (not drawn in the margin) until the whole
+puts it on the next page; the number of an empty list item counts as part of
+it, and the marks of a part's elements go in and out with it (a bullet stayed
+behind, an equation broken over two lines took the page number for its own);
+a part is refused where the paragraph behind it would be set otherwise. A
+compile of an older text keeping what was typed since is the frame-stability
+fix in `Viewer::compiled`.
+
+Still open in parts (random typist, 25 seeds of 150 keys): where a part pushes
+a line off a full page the whole may move more (a heading keeps to what
+follows it), and what was left out does not come back if the part shrinks
+again before the pause; `- ` typed in a list of the plain document showed a
+few glyphs more than the whole once; the predictor's lines differ from the
+whole in justified text (it breaks first-fit), and its room below a full page
+is taken to be as wide as the margin above.
 
 Also open: search in an equation goes by what it reads (`/a + b` does not
 find `$a + b$`); Delete at the end of a paragraph does nothing (it does not
