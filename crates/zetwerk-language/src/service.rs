@@ -186,13 +186,21 @@ impl Service {
     }
 }
 
+/// How long dropping a [`Service`] waits for its thread. A check under
+/// way is of use to nobody then, and may wait for a LanguageTool server
+/// for half a minute: it is left to end by itself, or with the process.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl Drop for Service {
     fn drop(&mut self) {
         // Closing the channel ends the thread's loop after the paragraph
-        // in progress.
+        // in progress; it is waited for a moment, not for a whole check.
         self.requests = None;
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            let until = std::time::Instant::now() + EXIT_WAIT;
+            while !thread.is_finished() && std::time::Instant::now() < until {
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 }
@@ -308,5 +316,41 @@ mod tests {
         let service = Service::spawn(settings(), || {}).unwrap();
         service.check(job(1, "Some text.", Scope::All));
         drop(service);
+    }
+
+    #[test]
+    fn dropping_the_service_does_not_wait_for_a_server_that_does_not_answer() {
+        // Closing the window waited for the check under way: for a
+        // LanguageTool server that takes its time, up to 30 s.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let (accepted, connected) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Takes the request, and says nothing.
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = accepted.send(());
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                drop(stream);
+            }
+        });
+        let settings = Settings {
+            grammar: true,
+            languagetool: Some(crate::Server {
+                url: address,
+                remote: false,
+            }),
+            ..Settings::default()
+        };
+        let service = Service::spawn(settings, || {}).unwrap();
+        let mut asked = job(1, "Die Katze die mag schläft.", Scope::All);
+        asked.language = "de".to_owned();
+        service.check(asked);
+        connected
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let dropping = std::time::Instant::now();
+        drop(service);
+        let took = dropping.elapsed();
+        assert!(took < EXIT_WAIT * 3, "dropping took {took:?}");
     }
 }
