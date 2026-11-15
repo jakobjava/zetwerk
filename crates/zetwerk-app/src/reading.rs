@@ -93,16 +93,71 @@ fn breaks_around(
 /// light.
 #[must_use]
 pub fn paragraphs_changed(old: &Source, new: &Source) -> Option<Paragraphs> {
+    // Asked twice after an edit, for what is read and for what is found:
+    // the second time it is known. The texts kept keep their bytes
+    // where they are, so where those are tells the texts apart.
+    thread_local! {
+        static LAST: RefCell<Option<(Source, Source, Option<Paragraphs>)>> =
+            const { RefCell::new(None) };
+    }
+    let same = |a: &Source, b: &Source| std::ptr::eq(a.text(), b.text());
+    let known = LAST.with_borrow(|last| match last {
+        Some((was, now, changed)) if same(was, old) && same(now, new) => Some(*changed),
+        _ => None,
+    });
+    if let Some(changed) = known {
+        return changed;
+    }
+    let changed = paragraphs_between(old, new);
+    LAST.set(Some((old.clone(), new.clone(), changed)));
+    changed
+}
+
+/// How many bytes `a` and `b` begin with alike (or, `behind`, end with),
+/// looked at many at a time.
+fn alike(a: &[u8], b: &[u8], behind: bool) -> usize {
+    const AT_ONCE: usize = 256;
+    let most = a.len().min(b.len());
+    let (a, b) = if behind {
+        (&a[a.len() - most..], &b[b.len() - most..])
+    } else {
+        (&a[..most], &b[..most])
+    };
+    let mut same = 0;
+    while same + AT_ONCE <= most {
+        let (x, y) = if behind {
+            (most - same - AT_ONCE, most - same)
+        } else {
+            (same, same + AT_ONCE)
+        };
+        if a[x..y] != b[x..y] {
+            break;
+        }
+        same += AT_ONCE;
+    }
+    let rest = |(x, y): (&u8, &u8)| x == y;
+    same + if behind {
+        let (a, b) = (&a[..most - same], &b[..most - same]);
+        a.iter()
+            .rev()
+            .zip(b.iter().rev())
+            .take_while(|pair| rest(*pair))
+            .count()
+    } else {
+        a[same..]
+            .iter()
+            .zip(&b[same..])
+            .take_while(|pair| rest(*pair))
+            .count()
+    }
+}
+
+/// See [`paragraphs_changed`].
+fn paragraphs_between(old: &Source, new: &Source) -> Option<Paragraphs> {
     let (was, now) = (old.text().as_bytes(), new.text().as_bytes());
-    let same = was.iter().zip(now).take_while(|(a, b)| a == b).count();
-    let rest = was.len().min(now.len()) - same;
-    let same_behind = was
-        .iter()
-        .rev()
-        .zip(now.iter().rev())
-        .take(rest)
-        .take_while(|(a, b)| a == b)
-        .count();
+    let same = alike(was, now, false);
+    // Not into what is alike at the start.
+    let same_behind = alike(&was[same..], &now[same..], true);
     let (old_end, new_end) = (was.len() - same_behind, now.len() - same_behind);
     let (before, behind) = breaks_around(new.root(), same, new_end);
     let start = before.as_ref().map_or(0, |(_, range)| range.end);
