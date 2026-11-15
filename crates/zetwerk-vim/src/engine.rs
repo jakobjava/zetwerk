@@ -20,6 +20,9 @@ pub use follow::Following;
 /// Columns one `>` or `<` shifts by, and the width of a typed Tab.
 const SHIFT_WIDTH: usize = 2;
 
+/// How many places jumped from are remembered, as in Vim.
+const JUMPS: usize = 100;
+
 /// A replacement of part of the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edit {
@@ -495,13 +498,18 @@ pub struct Engine {
     /// count repeats along with the keys.
     insert_opened: bool,
     /// Whether this insert replaces characters instead of pushing them
-    /// along (`R`), and for each character typed so far what it replaced:
-    /// `None` where it was added to the text. Backspace brings those back.
+    /// along (`R`), and for each character typed so far where it stands
+    /// and what it replaced: `None` where it was added to the text.
+    /// Backspace brings those back.
     replacing: bool,
-    replaced: Vec<Option<String>>,
+    replaced: Vec<(Range<usize>, Option<String>)>,
     /// Whether Ctrl-R was typed in this insert and waits for the name of
     /// the register to put in.
     insert_register: bool,
+    /// After Ctrl-O while typing: typing goes on once the one command
+    /// that follows is done. Whether the cursor was at the end of its
+    /// line then, and where leaving insert mode put it.
+    resume: Option<(bool, usize)>,
     /// Whether the cursor was moved in this insert and nothing typed since.
     /// That ends the insert as far as undo, count and `.` are concerned;
     /// typing on begins a new one.
@@ -514,6 +522,11 @@ pub struct Engine {
     /// there), and the one before that while a command is still under way.
     jump: Option<usize>,
     prev_jump: Option<usize>,
+    /// The places jumped from, the oldest first, for Ctrl-O to go back
+    /// to and Ctrl-I (Tab) forward again; and which of them Ctrl-O went
+    /// to last: their number where it has not gone back.
+    jumps: Vec<usize>,
+    jumps_at: usize,
     /// The two ends and the kind of the last selection, for `gv`, and the
     /// column the cursor was aiming at in it.
     last_visual: Option<(usize, usize, Mode)>,
@@ -622,11 +635,14 @@ impl Engine {
             insert_opened: false,
             replacing: false,
             insert_register: false,
+            resume: None,
             replaced: Vec::new(),
             insert_moved: false,
             marks: HashMap::new(),
             jump: None,
             prev_jump: None,
+            jumps: Vec::new(),
+            jumps_at: 0,
             last_visual: None,
             last_visual_column: None,
             last_insert: None,
@@ -859,10 +875,56 @@ impl Engine {
 
     /// Handles one key press.
     pub fn key(&mut self, press: KeyPress, host: &mut impl Host) -> Vec<Effect> {
+        // Ctrl-O while typing: one command of normal mode, and then on
+        // typing, as in Vim.
+        let once = self.mode == Mode::Insert
+            && press.ctrl
+            && press.key == Key::Char('o')
+            && !self.insert_register;
+        let at_end = once && {
+            let text = Text(host.text());
+            self.cursor == text.line_end(self.cursor) && !text.line_is_empty(self.cursor)
+        };
+        let press = if once {
+            KeyPress::plain(Key::Escape)
+        } else {
+            press
+        };
         self.rest_before_key(press, host);
         let before = self.cursor;
         self.took = None;
-        let effects = self.key_as_typed(press, host);
+        let mut effects = self.key_as_typed(press, host);
+        if once {
+            // The cursor stays where it was, but behind the end of a
+            // line: there is nothing to stand on there.
+            if !at_end {
+                self.cursor = clamp(Text(host.text()), before, false);
+            }
+            self.resume = Some((at_end, self.cursor));
+        } else if let Some((at_end, left)) = self.resume {
+            match self.mode {
+                Mode::Normal if self.pending.is_idle() => {
+                    self.resume = None;
+                    // Behind the last character again, where it was (as
+                    // Vim does) or where `$` aimed.
+                    let text = Text(host.text());
+                    let last = !text.line_is_empty(self.cursor)
+                        && text.next(self.cursor) == text.line_end(self.cursor);
+                    let same_line = text.line_start(self.cursor) == text.line_start(left);
+                    // So too where what the command deleted went up to
+                    // the end of the line.
+                    let deleted_end = matches!(&self.took, Some(Took::Deleted { at, .. })
+                        if *at == text.line_end(self.cursor));
+                    let behind = (at_end && same_line)
+                        || deleted_end
+                        || self.wanted_column == Some(usize::MAX);
+                    let c = if last && behind { 'a' } else { 'i' };
+                    effects.extend(self.key_as_typed(KeyPress::plain(Key::Char(c)), host));
+                }
+                Mode::Normal | Mode::Command => {}
+                _ => self.resume = None,
+            }
+        }
         self.rest_on_shown(before, host);
         effects
     }
@@ -878,6 +940,34 @@ impl Engine {
         self.extent = None;
         if !self.rows_first || !matches!(self.mode, Mode::Normal | Mode::Visual) {
             return;
+        }
+        // Whole lines deleted, and the cursor left on an empty one: a
+        // page shows nothing there (it parts paragraphs), and is not yet
+        // one of the text as it is. To the paragraph that follows, as
+        // Vim goes to the line that follows, or else the one before.
+        let lines_went = matches!(&self.took, Some(Took::Deleted { text, .. })
+                if text.ends_with('\n') || text.starts_with('\n'));
+        if lines_went && Text(host.text()).line_is_empty(self.cursor) {
+            let text = Text(host.text());
+            let filled = |mut line: Option<usize>, down: bool| {
+                while let Some(at) = line {
+                    if !text.line_is_empty(at) {
+                        return Some(at);
+                    }
+                    line = if down {
+                        text.next_line(at)
+                    } else {
+                        text.prev_line(at)
+                    };
+                }
+                None
+            };
+            let found = filled(text.next_line(self.cursor), true)
+                .or_else(|| filled(text.prev_line(self.cursor), false));
+            if let Some(line) = found {
+                self.cursor = first_non_blank_or_end(text, line);
+                self.wanted_column = None;
+            }
         }
         let rest = |at: usize, forward: bool| {
             if host.stop(at, Seek::At).is_some() {
@@ -1169,6 +1259,42 @@ impl Engine {
     fn set_jump(&mut self) {
         self.prev_jump = self.jump;
         self.jump = Some(self.cursor);
+        self.remember_jump();
+    }
+
+    /// Puts where the cursor is at the end of the places jumped from,
+    /// and nowhere else in them.
+    fn remember_jump(&mut self) {
+        let at = self.cursor;
+        self.jumps.retain(|jumped| *jumped != at);
+        self.jumps.push(at);
+        if self.jumps.len() > JUMPS {
+            self.jumps.remove(0);
+        }
+        self.jumps_at = self.jumps.len();
+    }
+
+    /// Ctrl-O (`back`) and Ctrl-I or Tab: back through the places jumped
+    /// from, `count` of them, and forward again, as in Vim. Going back
+    /// from where the last jump led remembers that place too, for Ctrl-I
+    /// to come back to.
+    fn jump_list(&mut self, back: bool, host: &impl Host) {
+        let (count, _) = self.take_count();
+        if back && self.jumps_at >= self.jumps.len() {
+            self.remember_jump();
+            self.jumps_at = self.jumps.len() - 1;
+        }
+        let to = if back {
+            self.jumps_at.checked_sub(count)
+        } else {
+            Some(self.jumps_at.saturating_add(count))
+        };
+        let Some((to, &at)) = to.and_then(|to| Some((to, self.jumps.get(to)?))) else {
+            return self.fail();
+        };
+        self.jumps_at = to;
+        self.cursor = clamp(Text(host.text()), at, false);
+        self.wanted_column = None;
     }
 
     /// Moves what is remembered by position along with a change of the
@@ -1184,6 +1310,7 @@ impl Engine {
         self.marks.values_mut().for_each(shift);
         self.jump.iter_mut().for_each(shift);
         self.prev_jump.iter_mut().for_each(shift);
+        self.jumps.iter_mut().for_each(shift);
         self.last_insert.iter_mut().for_each(shift);
         if let Some((anchor, cursor, _)) = &mut self.last_visual {
             shift(anchor);
@@ -1409,7 +1536,10 @@ impl Engine {
                     Key::Char(name) if name.is_ascii_lowercase() => {
                         self.marks.insert(name, self.cursor);
                     }
-                    Key::Char('\'' | '`') => self.jump = Some(self.cursor),
+                    Key::Char('\'' | '`') => {
+                        self.jump = Some(self.cursor);
+                        self.remember_jump();
+                    }
                     _ => self.fail(),
                 }
                 return;
@@ -1589,6 +1719,10 @@ impl Engine {
                 Key::Enter => self.motion_key('+', host),
                 Key::Home => self.motion_key('0', host),
                 Key::End => self.motion_key('$', host),
+                // Tab is Ctrl-I, as in Vim.
+                Key::Tab if !visual && self.pending.operator.is_none() => {
+                    self.jump_list(false, host);
+                }
                 _ => self.fail(),
             }
             return;
@@ -1637,6 +1771,9 @@ impl Engine {
                     }
                     self.wanted_column = None;
                     self.joined = false;
+                }
+                'o' | 'i' if !visual && self.pending.operator.is_none() => {
+                    self.jump_list(c == 'o', host);
                 }
                 'c' | '[' => {
                     self.reset_pending();
@@ -2154,9 +2291,15 @@ impl Engine {
                 .is_some_and(|stop| stop.start < until && !stop.is_empty())
         };
         if operator == Operator::Delete && !shown(from, start) && !shown(end, to) {
+            // The last line goes with the line break before it, as Vim's
+            // last line does.
+            let (from, end) = match text.next_line(to) {
+                Some(next) => (from, next),
+                None => (if from > 0 { text.prev(from) } else { from }, to),
+            };
             return Some(Object {
                 start: from,
-                end: text.next_line(to).unwrap_or(to),
+                end,
                 linewise: false,
             });
         }
@@ -3911,12 +4054,22 @@ impl Engine {
             // A character takes the place of the one under the cursor; at
             // the end of a line, and for a line break, there is none.
             let text = Text(host.text());
-            if typed != "\n" && self.cursor < text.line_end(self.cursor) {
+            let line_end = text.line_end(self.cursor);
+            if typed != "\n" && self.cursor < line_end {
                 end = text.next(self.cursor);
             }
+            // On a page, of what is shown there: over the marks it is
+            // made with (the star that begins strong text), never them.
+            let shown = host
+                .stop(self.cursor, Seek::After)
+                .filter(|stop| typed != "\n" && self.rows_first && stop.start < line_end);
+            if let Some(stop) = shown {
+                (self.cursor, end) = (stop.start, stop.end.max(stop.start));
+            }
             let original = host.text().get(self.cursor..end).unwrap_or("");
+            let at = self.cursor..self.cursor + typed.len();
             self.replaced
-                .push((end > self.cursor).then(|| original.to_owned()));
+                .push((at, (end > self.cursor).then(|| original.to_owned())));
         }
         self.edit(host, self.cursor..end, typed);
         self.cursor += typed.len();
@@ -4028,10 +4181,18 @@ impl Engine {
             // Back over what was typed, bringing back what it replaced;
             // before that, only back, also onto the end of the line
             // before.
-            let from = Text(host.text()).prev(self.cursor);
-            if let Some(original) = self.replaced.pop() {
+            let mut from = Text(host.text()).prev(self.cursor);
+            if let Some((typed, original)) = self.replaced.pop() {
                 let original = original.unwrap_or_default();
-                self.edit(host, from..self.cursor, &original);
+                // Where it was typed: on a page, marks it went over may
+                // stand between it and what was typed before it.
+                let typed = if typed.start < self.cursor && typed.end <= self.cursor {
+                    typed
+                } else {
+                    from..self.cursor
+                };
+                from = typed.start;
+                self.edit(host, typed, &original);
             }
             self.cursor = from;
             return true;

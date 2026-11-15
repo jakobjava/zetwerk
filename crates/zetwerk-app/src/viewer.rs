@@ -1674,8 +1674,9 @@ impl Viewer {
     ///    source, blanks to the next stop.
     ///
     /// In normal mode Tab goes to the next place to fill in of a starter
-    /// where the text has one, and does nothing where it has none. On
-    /// the command line it takes the rest of a command shown faint.
+    /// where the text has one; where it has none, it is Vim's Ctrl-I:
+    /// on again to where Ctrl-O came back from. On the command line it
+    /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
         self.message = None;
         if self.grid.is_some() {

@@ -609,7 +609,7 @@ impl Engine {
         let changes = !press.ctrl
             && match press.key {
                 Key::Delete => true,
-                Key::Char(c) => "xXsSrR~dcDCpPJ".contains(c),
+                Key::Char(c) => "xXsSrR~dcDCpPJ.".contains(c),
                 _ => false,
             };
         let begun = self.pending.operator.is_some() || self.pending.awaiting != Awaiting::Nothing;

@@ -62,6 +62,11 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("undo, redo", "u  Ctrl-R", Does::Tells),
     (
+        "back to where a jump came from, and on again",
+        "Ctrl-O  Ctrl-I",
+        Does::Tells,
+    ),
+    (
         "search for what is read on the page; \\= first: as written",
         "/  ?  n  N",
         Does::Tells,

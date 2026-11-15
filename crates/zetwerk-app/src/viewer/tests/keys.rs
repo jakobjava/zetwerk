@@ -384,3 +384,143 @@ fn no_key_on_a_page_breaks_the_markup() {
     );
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn replacing_on_a_page_goes_over_what_is_shown_never_the_marks() {
+    check(&[
+        // The star that begins strong text stays, and what is shown is
+        // typed over: `xyzc d.` as Vim would have `a bc d.` after `Rxyz`.
+        ("a *bc* d.\n", "a *", "Rxyz<Esc>", "xy*zc* d.\n"),
+        ("a *bc* d.\n", "a *", "Rxyzwv<Esc>", "xy*zw*vd.\n"),
+        ("a $x + y$ d.\n", "a $", "Rxyz<Esc>", "xy$z + y$ d.\n"),
+        // Backspace brings back what was typed over, marks and all.
+        ("a *bc* d.\n", "a *", "Rxyz<BS><BS><BS><Esc>", "a *bc* d.\n"),
+        (
+            "a $x + y$ d.\n",
+            "a $",
+            "Rxyz<BS><BS><Esc>",
+            "x $x + y$ d.\n",
+        ),
+        ("One two.\n", "two", "Rxyz<Esc>", "One xyz.\n"),
+    ]);
+}
+
+#[test]
+fn repeating_from_where_nothing_is_shown_goes_by_what_is() {
+    // The first `x` leaves the cursor on a dollar sign; `.` takes what
+    // is shown there, as `x` would.
+    check(&[("abc $x$ d.\n", "c $", "x..", "ab$$ d.\n")]);
+}
+
+#[test]
+fn opening_a_paragraph_keeps_to_the_paragraph_not_what_stands_against_it() {
+    check(&[
+        // Not above the rules that come before it: what is typed there
+        // would be typeset without them.
+        (
+            "#set text(size: 10pt)\nOne two.\n",
+            "two",
+            "Onew<Esc>",
+            "#set text(size: 10pt)\nnew\n\nOne two.\n",
+        ),
+        (
+            "= Head\nText.\n",
+            "Text",
+            "Onew<Esc>",
+            "= Head\nnew\n\nText.\n",
+        ),
+        (
+            "= Head\nText.\n",
+            "Head",
+            "onew<Esc>",
+            "= Head\n\nnew\nText.\n",
+        ),
+        ("One.\n- a\n", "One", "onew<Esc>", "One.\n\nnew\n- a\n"),
+        // Paragraphs apart as they were.
+        (
+            "One.\n\nTwo.\n",
+            "Two",
+            "Onew<Esc>",
+            "One.\n\nnew\n\nTwo.\n",
+        ),
+        (
+            "One\ntwo.\n\nThree.\n",
+            "One",
+            "onew<Esc>",
+            "One\ntwo.\n\nnew\n\nThree.\n",
+        ),
+    ]);
+}
+
+#[test]
+fn deleting_a_paragraph_leaves_the_cursor_on_the_next() {
+    for (body, needle, keys, after, on) in [
+        (
+            "First words.\n\nSecond words.\n",
+            "First",
+            "dd",
+            "\nSecond words.\n",
+            "Second",
+        ),
+        (
+            "First.\n\nSecond.\n\nThird.\n",
+            "Second",
+            "dd",
+            "First.\n\n\nThird.\n",
+            "Third",
+        ),
+        ("First.\n\nSecond.\n", "Second", "dd", "First.\n\n", "First"),
+        ("= Head\n\nText.\n", "Head", "dd", "\nText.\n", "Text"),
+    ] {
+        let text = format!("{PAGE}{body}");
+        let (mut viewer, directory) = editing(&text);
+        press(&mut viewer, "gsgs");
+        let at = text.find(needle).unwrap();
+        viewer.editor.as_mut().unwrap().set_cursor(at);
+        press(&mut viewer, keys);
+        compile(&mut viewer);
+        let now = viewer.text().unwrap().to_owned();
+        assert_eq!(now.strip_prefix(PAGE), Some(after), "{body:?}, {keys}");
+        let cursor = viewer.editor.as_ref().unwrap().cursor();
+        assert_eq!(Some(cursor), now.find(on), "{body:?}, {keys}: the cursor");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
+fn ctrl_o_goes_back_where_a_jump_came_from_and_tab_on_again() {
+    check(&[
+        (
+            "One two.\n\nThree four.\n",
+            "One",
+            "/four<CR><C-o>x",
+            "ne two.\n\nThree four.\n",
+        ),
+        (
+            "One two.\n\nThree four.\n",
+            "One",
+            "/four<CR><C-o><Tab>x",
+            "One two.\n\nThree our.\n",
+        ),
+        (
+            "One two.\n\nThree four.\n",
+            "One",
+            "/four<CR><C-o><C-i>x",
+            "One two.\n\nThree our.\n",
+        ),
+        (
+            "One two.\n\nThree four.\n",
+            "two",
+            "G<C-o>x",
+            "One wo.\n\nThree four.\n",
+        ),
+    ]);
+}
+
+#[test]
+fn ctrl_o_while_typing_runs_one_command_and_typing_goes_on() {
+    check(&[
+        ("One two.\n", "two", "iX<C-o>xY<Esc>", "One XYwo.\n"),
+        ("One two.\n", "two", "AX<C-o>0Y<Esc>", "YOne two.X\n"),
+    ]);
+}

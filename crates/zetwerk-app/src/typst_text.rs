@@ -362,6 +362,73 @@ fn block(text: &str, at: usize) -> Range<usize> {
     start..end.max(start)
 }
 
+/// The paragraph byte `at` of `source` is in, as [`block`] has it, but
+/// without the lines next to it that are things of their own however
+/// close they stand (see [`own_line`]): a heading, an item, a rule.
+fn paragraph(source: &Source, at: usize) -> Range<usize> {
+    let text = source.text();
+    let block = block(text, at);
+    let line_start = |at: usize| text[..at].rfind('\n').map_or(0, |found| found + 1);
+    let line_end = |at: usize| text[at..].find('\n').map_or(text.len(), |found| at + found);
+    let here = line_start(at.min(text.len()));
+    if here < block.start {
+        return block;
+    }
+    if own_line(source, here) {
+        // A heading is its line.
+        return here..line_end(here).min(block.end).max(here);
+    }
+    let mut start = here;
+    while start > block.start {
+        let before = line_start(start - 1);
+        if own_line(source, before) {
+            break;
+        }
+        start = before;
+    }
+    let mut end = line_end(here);
+    while end < block.end {
+        if own_line(source, end + 1) {
+            break;
+        }
+        end = line_end(end + 1);
+    }
+    start..end.min(block.end).max(start)
+}
+
+/// Whether the line of `source` that begins at byte `start` is a thing
+/// of its own, not part of a paragraph it stands against: a heading, an
+/// item of a list, a rule (`#set`, `#show`), a binding, an import, or a
+/// line of one of these.
+fn own_line(source: &Source, start: usize) -> bool {
+    let Some(line) = source.text().get(start..) else {
+        return false;
+    };
+    let mut first = start + (line.len() - line.trim_start_matches([' ', '\t']).len());
+    // The hash that begins code is not part of what it begins.
+    if source
+        .text()
+        .get(first..)
+        .is_some_and(|rest| rest.starts_with('#'))
+    {
+        first += 1;
+    }
+    ancestors(source, first).iter().any(|node| {
+        matches!(
+            node.kind(),
+            SyntaxKind::Heading
+                | SyntaxKind::ListItem
+                | SyntaxKind::EnumItem
+                | SyntaxKind::TermItem
+                | SyntaxKind::SetRule
+                | SyntaxKind::ShowRule
+                | SyntaxKind::LetBinding
+                | SyntaxKind::ModuleImport
+                | SyntaxKind::ModuleInclude
+        )
+    })
+}
+
 /// Where and what to put into `source` to begin a new paragraph below
 /// the one byte `at` is in (or above it): the byte, the text, and how
 /// far into that text the cursor goes. In a list, a new item.
@@ -382,7 +449,7 @@ pub fn open(source: &Source, at: usize, below: bool) -> (usize, String, usize) {
         let within = item.len() - 1;
         return (start, item, within);
     }
-    let block = block(text, at);
+    let block = paragraph(source, at);
     if below {
         (block.end, "\n\n".to_owned(), 2)
     } else {
