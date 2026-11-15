@@ -49,17 +49,22 @@ refused equation and `gx`, jump labels, search marks, margin tags, the frame
 and "exponent", the styles list, a new document.
 
 Found by the random typist and not fixed (see the ignored tests in
-`viewer/tests/left_behind.rs` and `zetwerk-typst/tests/local_region.rs`):
+`viewer/tests/left_behind.rs`):
 
-- the part cut out to be typeset alone is sometimes parsed otherwise than in
-  the whole (27 of 2000 random edits: `*` behind `*strong*`, `- ` at the end
-  of a `#set` line, `]` in a caption);
-- the part typeset alone can show other glyphs than the whole (a `#strong[]`
-  in a word, a `#footnote` in an empty document);
 - a lone `$`, a `#xyz` or a `#ref` begun and left keeps the whole document
-  from being typeset;
-- a compile of an older text still takes away the typed-word overlay where
-  the pages are not a part typeset alone.
+  from being typeset.
+
+Put right since (`viewer/tests/parts.rs`): a part read otherwise when cut
+out (`*` behind `*strong*`, `- ` behind a rule) or numbered anew by Typst is
+refused, not shown; references, footnotes put in, rules among the text,
+columns made by a rule, floating figures, pages wider than high, margins as
+shares of the page and margins of two sides no longer make a part show other
+glyphs than the whole; what a part pushes below the text of the page is left
+out (not drawn in the margin) until the whole puts it on the next page; the
+number of an empty list item counts as part of it; an element cut in two by
+the splice (an equation broken over two lines) no longer stays open and takes
+the page number for its own. A compile of an older text keeping what was typed
+since is the frame-stability fix in `Viewer::compiled`.
 
 Also open: search in an equation goes by what it reads (`/a + b` does not
 find `$a + b$`); Delete at the end of a paragraph does nothing (it does not

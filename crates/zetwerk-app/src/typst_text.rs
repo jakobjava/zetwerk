@@ -1453,12 +1453,35 @@ pub fn lead_for_part(source: &Source, at: usize) -> String {
     let text = source.text();
     let mut levels: Vec<usize> = Vec::new();
     let (mut equations, mut images, mut tables) = (0, 0, 0);
+    // The rules, definitions and imports among the text before the part:
+    // the part is cut down to the rules before all of the text.
+    let (mut begun, mut among) = (false, String::new());
     let mut offset = 0;
     for child in source.root().children() {
         if offset >= at {
             break;
         }
         let written = text.get(offset..offset + child.len()).unwrap_or("");
+        let rule = matches!(
+            child.kind(),
+            SyntaxKind::SetRule
+                | SyntaxKind::ShowRule
+                | SyntaxKind::LetBinding
+                | SyntaxKind::ModuleImport
+        );
+        if rule && begun {
+            let _ = writeln!(among, "#{written}");
+        }
+        begun |= !rule
+            && !matches!(
+                child.kind(),
+                SyntaxKind::Hash
+                    | SyntaxKind::Space
+                    | SyntaxKind::Parbreak
+                    | SyntaxKind::LineComment
+                    | SyntaxKind::BlockComment
+                    | SyntaxKind::Semicolon
+            );
         match child.kind() {
             SyntaxKind::Heading => {
                 let level = written
@@ -1484,11 +1507,12 @@ pub fn lead_for_part(source: &Source, at: usize) -> String {
         }
         offset += child.len();
     }
-    // On a page as long as it takes: a part is not to break across
-    // pages only because it stands lower here than where it belongs.
-    let mut lead = String::from(
-        "#set page(height: auto)\n\
-         #show ref: it => context { if query(it.target).len() > 0 { it } \
+    // On a page of the size of the document's, which Typst's margins are
+    // a share of; with a mark of where its text ends.
+    let mut lead = among;
+    lead.push_str(zetwerk_typst::local::FOOT_MARK);
+    lead.push_str(
+        "#show ref: it => context { if query(it.target).len() > 0 { it } \
          else { text(str(it.target)) } }\n",
     );
     let notes = text

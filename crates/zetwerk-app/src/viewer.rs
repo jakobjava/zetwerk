@@ -3027,6 +3027,7 @@ mod tests {
     mod cursor;
     mod files;
     mod left_behind;
+    mod parts;
     mod speed;
     mod typist;
 
