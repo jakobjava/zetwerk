@@ -83,7 +83,13 @@ impl Viewer {
                 self.alert(format!("there is no {}; :e! makes it", self.name_of(path)));
                 return;
             }
-            if let Err(err) = std::fs::write(path, "") {
+            // Made anew, never truncated: a file that came into being
+            // since it was looked for is the user's, and stays as it is.
+            let made = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path);
+            if let Err(err) = made.map(drop) {
                 self.alert(format!("cannot make {}: {err}", path.display()));
                 return;
             }

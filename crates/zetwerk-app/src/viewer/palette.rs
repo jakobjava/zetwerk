@@ -62,6 +62,23 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("undo, redo", "u  Ctrl-R", Does::Tells),
     (
+        "search for what is read on the page; \\= first: as written",
+        "/  ?  n  N",
+        Does::Tells,
+    ),
+    ("search for the word at the cursor", "*  #", Does::Tells),
+    ("hide the matches of the search", ":noh", Does::Run("noh")),
+    (
+        "show the matches of searches, or not",
+        ":hlsearch",
+        Does::Run("hlsearch"),
+    ),
+    (
+        "show what is yanked and put, tell what deleting took, or not",
+        ":feedback",
+        Does::Run("feedback"),
+    ),
+    (
         "join this paragraph with the next; part it at a blank",
         "J  r Enter",
         Does::Tells,
@@ -112,6 +129,11 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("count"),
     ),
     ("go to a heading", "go", Does::Run("outline")),
+    (
+        "jump: a label on every word in view; type one to go there",
+        "gw",
+        Does::Run("jump"),
+    ),
     ("go to a label", ":labels", Does::Run("labels")),
     (
         "structure: the headings — move sections, change their level",
@@ -152,6 +174,26 @@ const ALL: &[(&str, &str, Does)] = &[
     ("search", "/", Does::Tells),
     ("open a file of the document", ":files", Does::Run("files")),
     ("open a file by name", ":e <file>", Does::Ask("e ")),
+    (
+        "documents opened last, to open one; a new document",
+        ":recent",
+        Does::Run("recent"),
+    ),
+    (
+        "a new document, in a file of its own, begun from a starter",
+        ":new <name>",
+        Does::Ask("new "),
+    ),
+    (
+        "begin this empty document as an article, report, letter, slides, notes",
+        ":new",
+        Does::Run("new"),
+    ),
+    (
+        "to the next ‹place to fill in›; what is typed takes its place",
+        "Tab",
+        Does::Tells,
+    ),
     (
         "next problem the compiler has",
         "]d",
@@ -231,9 +273,34 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("doc"),
     ),
     (
+        "document: styles — headings, links, code, captions, tables, page head and foot, theorems, …",
+        ":styles",
+        Does::Run("styles"),
+    ),
+    (
         "sources: the bibliography — list, add, cite",
         "gB",
         Does::Run("bib"),
+    ),
+    (
+        "sources: paste from the clipboard (BibTeX, RIS, CSL-JSON)",
+        ":bib paste",
+        Does::Run("bib paste"),
+    ),
+    (
+        "sources: import another bibliography file",
+        ":bib import",
+        Does::Run("bib import"),
+    ),
+    (
+        "sources: sort, only those not cited, there twice",
+        ":bib view",
+        Does::Run("bib view"),
+    ),
+    (
+        "sources: undo the last change to the bibliography file",
+        ":bib undo",
+        Does::Run("bib undo"),
     ),
     (
         "figures and tables: list — caption, label, width, rows, …",
@@ -306,9 +373,74 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("agents"),
     ),
     (
+        "note: on what is selected, or the paragraph or figure here",
+        "gn  :note",
+        Does::Run("note"),
+    ),
+    (
+        "ask an agent about what is selected, or the paragraph here",
+        "gq  :ask",
+        Does::Run("ask"),
+    ),
+    (
+        "notes: all of them — go to, answer, resolve, delete",
+        ":notes",
+        Does::Run("notes"),
+    ),
+    (
+        "notes: next and previous",
+        "]n  [n",
+        Does::Run("notes next"),
+    ),
+    (
+        "proposal: next, accept, reject",
+        "]p  ga  gr",
+        Does::Run("proposal next"),
+    ),
+    (
+        "proposal: the page as it would be, or as it is",
+        "zp",
+        Does::Run("proposal flip"),
+    ),
+    (
         "lines say how far they are from the cursor (for 5j): on or off",
         ":numbers",
         Does::Run("numbers"),
+    ),
+    (
+        "equation: show it as it is written, or as what it means",
+        "gx",
+        Does::Run("written"),
+    ),
+    (
+        "frame what typing goes into; say what empty places are for: on or off",
+        ":hints",
+        Does::Run("hints"),
+    ),
+    (
+        "what shows as nothing (labels, comments, breaks): next, previous",
+        "]i  [i",
+        Does::Run("invisible next"),
+    ),
+    (
+        "what shows as nothing, gone to: take it out, type it anew",
+        "x  Enter",
+        Does::Tells,
+    ),
+    (
+        "what shows as nothing: all of it, to go to",
+        ":invisibles",
+        Does::Run("invisibles"),
+    ),
+    (
+        "tags beside the page for what shows as nothing: on or off",
+        ":tags",
+        Does::Run("tags"),
+    ),
+    (
+        "the compiler's complaints beside the page: on or off",
+        ":errors",
+        Does::Run("errors"),
     ),
     ("what typing costs", ":perf", Does::Run("perf")),
     (
@@ -316,7 +448,26 @@ const ALL: &[(&str, &str, Does)] = &[
         ":parts",
         Does::Run("parts"),
     ),
+    (
+        "what can follow g, z, ], d, … shown under the page: on or off",
+        ":nextkeys",
+        Does::Run("nextkeys"),
+    ),
+    (
+        "the rest of a name or word, faint behind the cursor (Tab takes it): on or off",
+        ":ghost",
+        Does::Run("ghost"),
+    ),
 ];
+
+/// The keys of each entry of the list of all there is to do, and the
+/// command it runs or begins, if it does.
+pub(super) fn entries() -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
+    ALL.iter().map(|(_, keys, does)| match does {
+        Does::Run(command) | Does::Ask(command) => (*keys, Some(*command)),
+        Does::Tells => (*keys, None),
+    })
+}
 
 /// The papers there are to choose from.
 const PAPERS: &[&str] = &[
@@ -545,6 +696,9 @@ impl Viewer {
                 });
             }
             ("count" | "words", "") => self.count_words(),
+            ("written", "") => self.toggle_written(),
+            ("hints", "" | "on" | "off") => self.hints_command(wanted),
+            ("nextkeys" | "ghost", "" | "on" | "off") => self.following_command(name, wanted),
             ("numbers", "" | "on" | "off") => {
                 self.numbers = match wanted {
                     "on" => true,
@@ -558,6 +712,7 @@ impl Viewer {
                 });
             }
             ("doc" | "document", command) => self.doc_command(command),
+            ("styles" | "style", command) => self.styles_command(command),
             ("bib" | "sources", command) => self.bib_command(command),
             ("figures", command) => self.figures_command(command),
             // Alone only: `:figure png` and the like write the figure
@@ -566,6 +721,9 @@ impl Viewer {
             ("structure", command) => self.structure_command(command),
             ("section", what) => self.section_command(what),
             ("table", what) => self.table_command(what),
+            ("tags" | "errors" | "invisible" | "invisibles", _) => {
+                self.margin_command(name, wanted);
+            }
             _ => return false,
         }
         true

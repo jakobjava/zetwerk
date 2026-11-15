@@ -234,10 +234,16 @@ impl Viewer {
     /// A key that may be for a list on screen. Returns whether it was.
     pub(super) fn assist_key(&mut self, press: KeyPress) -> bool {
         self.tooltip = None;
+        if self.jump_key(press) {
+            return true;
+        }
         if self.picker.is_some() {
             self.picker_key(press);
             self.history_looked();
             return true;
+        }
+        if let Some(taken) = self.hint_key(press) {
+            return taken;
         }
         let typing = self
             .editor
@@ -558,7 +564,7 @@ impl Viewer {
     /// The files in and below the folder of the file being edited whose
     /// names end in one of `endings`, as paths from there: as a call in
     /// that file names them.
-    fn files_beside(&self, endings: &[&str]) -> Vec<String> {
+    pub(super) fn files_beside(&self, endings: &[&str]) -> Vec<String> {
         let Some(editor) = &self.editor else {
             return Vec::new();
         };
@@ -765,7 +771,7 @@ impl Viewer {
             let within = (margin, margin, width - margin, bottom);
             super::lens_place(anchor, size, within, 2.0)
         };
-        if let Some(completion) = &self.completion {
+        if let Some(completion) = self.completion.as_ref().filter(|_| self.lists_completion()) {
             let first = completion
                 .chosen
                 .saturating_sub(LIST_ROWS / 2)

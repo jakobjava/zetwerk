@@ -21,6 +21,7 @@ use crate::bridge::Bridge;
 
 const USAGE: &str = "\
 Usage: zetwerk <file.typ> [options]
+       zetwerk [directory] [options]
        zetwerk render <file.typ> [options]
        zetwerk mcp [file.typ]
 
@@ -64,6 +65,13 @@ Settings are read from ~/.config/zetwerk/config.toml:
 
 A file that another file includes is opened as part of that document:
 the whole document is shown, the file is what is edited.
+
+Without a file (or with a directory) the documents opened last are
+listed, and new ones are begun there: :new <name> makes one, :recent
+lists them again. A new document begins as an article, a report, a
+letter, slides, notes, or as your own: .typ files in
+~/.config/zetwerk/templates, where ‹what is between these› is a place to
+fill in (Tab leads from one to the next).
 
 Options:
       --main <file.typ>   The main file of the document, where zetwerk
@@ -135,6 +143,10 @@ fn begin_if_new(path: &Path) -> Result<(), String> {
     if path.is_file() {
         return Ok(());
     }
+    // A directory is where new documents are begun (see `app::Options`).
+    if path.is_dir() {
+        return Ok(());
+    }
     if path.exists() {
         return Err(format!("{} is not a file", path.display()));
     }
@@ -173,12 +185,17 @@ fn options(
         ui_scale: config.view.ui_scale,
         inserts: config.inserts(),
         language: config.language.settings(),
+        templates: config::templates(),
     })
 }
 
 /// The main file of the document `file` is part of, if that is another
 /// file: the one the user named, or the one that includes it.
 fn main_of(file: &Path, named: Option<&Path>) -> Option<PathBuf> {
+    // A directory is no document: nothing to look for.
+    if file.is_dir() {
+        return None;
+    }
     let main = named.map_or_else(|| zetwerk_typst::find_main(file), Path::to_owned);
     let same = match (main.canonicalize(), file.canonicalize()) {
         (Ok(main), Ok(file)) => main == file,
@@ -197,11 +214,7 @@ fn run() -> Result<(), String> {
         Command::Call => return call(&args),
         Command::Open | Command::Render => {}
     }
-    let input = match args.values.as_slice() {
-        [input] => PathBuf::from(input),
-        [] => return Err(format!("missing input file\n\n{USAGE}")),
-        [_, extra, ..] => return Err(format!("unexpected argument {}", extra.display())),
-    };
+    let input = input(&args)?;
     let font_set = if args.embedded_fonts {
         FontSet::Embedded
     } else {
@@ -247,9 +260,24 @@ fn run() -> Result<(), String> {
     script_done.try_recv().unwrap_or(Ok(()))
 }
 
+/// The file to open or render: the one named; to open, where none is,
+/// the current directory, for the list of the documents opened last.
+fn input(args: &Args) -> Result<PathBuf, String> {
+    match args.values.as_slice() {
+        [input] => Ok(PathBuf::from(input)),
+        [] if args.command == Command::Open => Ok(PathBuf::from(".")),
+        [] => Err(format!("missing input file\n\n{USAGE}")),
+        [_, extra, ..] => Err(format!("unexpected argument {}", extra.display())),
+    }
+}
+
 fn parse_args() -> Result<Option<Args>, String> {
+    parse(lexopt::Parser::from_env())
+}
+
+/// The command line `parser` reads, or `None` where it asks for help.
+fn parse(mut parser: lexopt::Parser) -> Result<Option<Args>, String> {
     let fail = |err: lexopt::Error| err.to_string();
-    let mut parser = lexopt::Parser::from_env();
     let mut args = Args::default();
     while let Some(arg) = parser.next().map_err(fail)? {
         match arg {
@@ -514,4 +542,51 @@ fn state_dir() -> Result<PathBuf, String> {
         }
     };
     Ok(base.join("zetwerk"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a failed step should fail the test")]
+mod tests {
+    use super::*;
+
+    /// What the command line `line` (without the program's name) says.
+    fn parsed(line: &[&str]) -> Args {
+        parse(lexopt::Parser::from_args(line.iter().copied()))
+            .unwrap_or_else(|why| panic!("{why}"))
+            .unwrap_or_else(|| panic!("help was asked for"))
+    }
+
+    #[test]
+    fn without_a_file_the_current_directory_is_opened() {
+        let args = parsed(&[]);
+        assert!(args.command == Command::Open);
+        assert_eq!(input(&args), Ok(PathBuf::from(".")));
+        // A file is opened as it always was.
+        let args = parsed(&["paper.typ", "--power", "saver"]);
+        assert_eq!(input(&args), Ok(PathBuf::from("paper.typ")));
+        assert_eq!(args.power, Some(PowerMode::Saver));
+        assert!(input(&parsed(&["a.typ", "b.typ"])).is_err());
+        // Rendering needs a file all the same.
+        let args = parsed(&["render"]);
+        assert!(args.command == Command::Render);
+        assert!(input(&args).is_err_and(|why| why.starts_with("missing input file")));
+        assert!(parse(lexopt::Parser::from_args(["--help"])).is_ok_and(|args| args.is_none()));
+    }
+
+    #[test]
+    fn a_directory_is_opened_as_it_is_and_a_new_file_is_begun() {
+        let directory = std::env::temp_dir().join(format!("zetwerk-main-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        assert_eq!(begin_if_new(&directory), Ok(()));
+        assert_eq!(main_of(&directory, None), None);
+        let new = directory.join("new.typ");
+        assert_eq!(begin_if_new(&new), Ok(()));
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "");
+        // What is there is never begun anew.
+        std::fs::write(&new, "Text.\n").unwrap();
+        assert_eq!(begin_if_new(&new), Ok(()));
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "Text.\n");
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }

@@ -12,9 +12,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use typst::World;
 use typst::ecow::EcoVec;
 use typst::model::Document;
+use typst::{World, WorldExt};
 use typst_layout::{Page, PagedDocument};
 use zetwerk_typst::{PageMap, ProjectWorld, local};
 
@@ -153,14 +153,26 @@ impl Viewer {
         let lead = typst_text::lead_for_part(&new, region.kept.start);
         let alone = world.with_text(local::cut_down(&new, &region, &lead));
         let compiled = zetwerk_typst::compile(&alone);
-        let typeset = compiled.document.ok_or_else(|| {
-            let why = compiled.errors.first();
-            let why = why.map(|error| zetwerk_typst::describe(&alone, error));
-            format!(
+        let Some(typeset) = compiled.document else {
+            let first = compiled.errors.first();
+            // An equation Typst refuses is shown as it is written; with
+            // it so, the part is typeset after all.
+            let refused = first.and_then(|error| {
+                let at = alone.range(error.span)?.start;
+                let whole = region.in_whole(at, lead.len())?;
+                Some((world.written_at(file, whole), error.message.to_string()))
+            });
+            if let Some((at, why)) = refused
+                && self.show_as_written(at, &why)
+            {
+                return self.typeset_part(before);
+            }
+            let why = first.map(|error| zetwerk_typst::describe(&alone, error));
+            return Err(format!(
                 "the part cannot be typeset by itself: {}",
                 why.unwrap_or_default()
-            )
-        })?;
+            ));
+        };
         Ok(Part {
             revision,
             world,

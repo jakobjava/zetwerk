@@ -464,6 +464,7 @@ impl Viewer {
     /// Moves the proposals along with a change of the text; those whose
     /// text was changed are stale from then on.
     pub(super) fn sync_proposals(&mut self) {
+        self.sync_notes();
         if self.proposals.is_empty() {
             self.proposal_text = None;
             return;
@@ -844,6 +845,16 @@ impl Viewer {
         String,
     > {
         let editor = self.editor.as_ref().ok_or(NOT_EDITING)?;
+        if self.looks_back() {
+            // The pages are those of another state of the history: of
+            // a text that is not the text, which nothing is to be told
+            // of or written from.
+            return Err(
+                "the user is looking through the history of the text: the pages \
+                 show another state of it; ask again in a moment"
+                    .to_owned(),
+            );
+        }
         match (&self.document, &self.compiled_world) {
             (Some(document), Some(world)) if self.document_revision == Some(self.revision) => {
                 Ok((editor, document, world))

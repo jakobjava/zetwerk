@@ -28,6 +28,8 @@ pollster.workspace = true
 bytemuck.workspace = true
 notify.workspace = true
 rayon.workspace = true
+hayagriva.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

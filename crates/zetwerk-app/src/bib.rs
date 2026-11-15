@@ -8,6 +8,10 @@
 use std::fmt::Write;
 use std::ops::Range;
 
+pub mod found;
+pub mod same;
+pub mod yaml;
+
 /// One source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -87,6 +91,16 @@ pub fn fields_of(kind: &str) -> &'static [&'static str] {
         .map_or(&["author", "title", "year", "note"], |(_, _, fields)| {
             fields
         })
+}
+
+/// Whether the file `name` ends in one of `endings` (without their dot),
+/// in capitals or not.
+#[must_use]
+pub fn ends_in(name: &str, endings: &[&str]) -> bool {
+    let ending = std::path::Path::new(name)
+        .extension()
+        .and_then(|ending| ending.to_str());
+    ending.is_some_and(|ending| endings.iter().any(|one| ending.eq_ignore_ascii_case(one)))
 }
 
 impl Entry {

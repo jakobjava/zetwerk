@@ -57,6 +57,18 @@ impl Keymap {
     fn is_empty(&self) -> bool {
         self.normal.is_empty() && self.insert.is_empty()
     }
+
+    /// The mappings of normal mode that begin with `typed`: what is
+    /// typed for each, and what it stands for.
+    pub(super) fn begun<'a>(
+        &'a self,
+        typed: &'a [KeyPress],
+    ) -> impl Iterator<Item = (&'a [KeyPress], &'a [KeyPress])> {
+        self.normal
+            .iter()
+            .filter(move |(keys, _)| keys.starts_with(typed))
+            .map(|(keys, stands_for)| (keys.as_slice(), stands_for.as_slice()))
+    }
 }
 
 /// What a key means once the mappings have been looked at.
@@ -110,18 +122,21 @@ impl Viewer {
 
     /// A key was pressed: it, or what the user's mappings make of it.
     pub fn key(&mut self, press: KeyPress) {
-        let plain = self.keymap.is_empty() || self.is_picking() || self.is_grid();
+        let plain =
+            self.keymap.is_empty() || self.is_picking() || self.is_grid() || self.is_jumping();
         if plain {
-            return self.plain_key(press);
-        }
-        match self.mapped(press) {
-            Mapped::Wait => self.message = None,
-            Mapped::Keys(keys) => {
-                for key in keys {
-                    self.plain_key(key);
+            self.plain_key(press);
+        } else {
+            match self.mapped(press) {
+                Mapped::Wait => self.message = None,
+                Mapped::Keys(keys) => {
+                    for key in keys {
+                        self.plain_key(key);
+                    }
                 }
             }
         }
+        self.hints_keyed();
     }
 }
 

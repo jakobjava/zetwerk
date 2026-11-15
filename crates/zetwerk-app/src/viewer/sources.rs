@@ -11,12 +11,17 @@
 //! The file is a BibTeX file beside the document (`refs.bib`, unless the
 //! document names another); the document is told to list it the first
 //! time a source is added. Agents see the same sources and add to them
-//! by the same way (see `zetwerk_mcp`).
+//! by the same way (see `zetwerk_mcp`). A Hayagriva file (`.yml`) is
+//! read as well, and added to, but not changed (see `bib::yaml`).
+//!
+//! Sources that come many at a time (pasted, imported, from an agent)
+//! are in `sources_add`; sorting, narrowing, what is cited where and
+//! what is there twice in `sources_look`; the way back for the file in
+//! `sources_undo`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use super::agent::AgentEdits;
 use super::assist::Target;
 use super::{Edited, Viewer};
 use crate::bib::{self, Entry};
@@ -27,7 +32,7 @@ const USUAL_FILE: &str = "refs.bib";
 
 /// Writes `text` to `path` so that the file is the old one or the new
 /// one whatever happens: beside it first, then in its place.
-fn write_whole(path: &Path, text: &str) -> Result<(), String> {
+pub(super) fn write_whole(path: &Path, text: &str) -> Result<(), String> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
     let name = path.file_name().map(|name| name.to_string_lossy());
     let name = name.ok_or_else(|| format!("{} is no file", path.display()))?;
@@ -49,11 +54,29 @@ pub struct Sources {
     /// The file.
     pub path: PathBuf,
     /// What is in it.
-    text: String,
+    pub(super) text: String,
     /// The sources it holds.
     pub entries: Vec<Entry>,
     /// Whether the document names the file: lists what is cited of it.
     pub listed: bool,
+    /// Whether it is a Hayagriva file (`.yml`), not a BibTeX file.
+    pub hayagriva: bool,
+}
+
+impl Sources {
+    /// Refuses a change that would rewrite a source of a Hayagriva
+    /// file, saying what can be done instead.
+    pub(super) fn writable(&self) -> Result<(), String> {
+        if !self.hayagriva {
+            return Ok(());
+        }
+        let name = self.path.file_name().map(|name| name.to_string_lossy());
+        Err(format!(
+            "{} is a Hayagriva file: sources are added to it (paste, import, agents), \
+             changed or taken out only in it, by hand",
+            name.unwrap_or_default()
+        ))
+    }
 }
 
 impl Viewer {
@@ -83,10 +106,11 @@ impl Viewer {
             Some(from_root) => self.project.root_dir().join(from_root),
             None => folder.join(&name),
         };
-        if !name.to_lowercase().ends_with(".bib") {
+        let hayagriva = bib::ends_in(&name, &["yml", "yaml"]);
+        if !hayagriva && !bib::ends_in(&name, &["bib"]) {
             return Err(format!(
-                "the sources are in {name}: only BibTeX files (.bib) are managed here; \
-                 what is in it can be cited with @ all the same"
+                "the sources are in {name}: only BibTeX (.bib) and Hayagriva (.yml) files \
+                 are managed here; what is in it can be cited with @ all the same"
             ));
         }
         let text = match std::fs::read_to_string(&path) {
@@ -94,18 +118,30 @@ impl Viewer {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(err) => return Err(format!("cannot read {}: {err}", path.display())),
         };
-        let entries = bib::parse(&text);
+        let entries = if hayagriva {
+            bib::yaml::entries(&text).map_err(|err| format!("cannot read {name}: {err}"))?
+        } else {
+            bib::parse(&text)
+        };
         Ok(Sources {
             path,
             text,
             entries,
             listed,
+            hayagriva,
         })
     }
 
-    /// Writes the sources' file as `text`, has the document list it if
-    /// it does not yet, and has the pages made anew.
-    fn write_sources(&mut self, sources: &Sources, text: &str) -> Result<(), String> {
+    /// Writes the sources' file as `text`, after keeping it as it was to
+    /// go back to (`what` is done to it), has the document list it if it
+    /// does not yet, and has the pages made anew.
+    pub(super) fn write_sources(
+        &mut self,
+        sources: &Sources,
+        text: &str,
+        what: &str,
+    ) -> Result<(), String> {
+        self.keep_version(&sources.path, &sources.text, text, what)?;
         write_whole(&sources.path, text)?;
         if !sources.listed
             && let Some(editor) = &mut self.editor
@@ -126,64 +162,23 @@ impl Viewer {
                 .map_err(|why| format!("the document could not be told of {name}: {why}"))?;
             self.text_changed(Edited::Command);
         }
-        if self.file_changed(&sources.path) {
-            self.edited = Some(Edited::Command);
-        }
+        self.sources_written(&sources.path);
         Ok(())
     }
 
     /// Adds the sources written in `bibtex` (one entry or several) to
-    /// the document's sources, for an agent. Each gets a key of its own
-    /// where the one it has is taken or it has none. Returns the keys
-    /// they can be cited by.
+    /// the document's sources, for an agent; not those that are there
+    /// already (see [`Viewer::agent_add_sources_checked`]). Each gets a
+    /// key of its own where the one it has is taken or it has none.
+    /// Returns the keys they can be cited by.
     ///
     /// # Errors
     ///
     /// If agents only propose changes, `bibtex` holds no entry, or the
     /// file cannot be read or written.
     pub fn agent_add_sources(&mut self, bibtex: &str) -> Result<Vec<String>, String> {
-        if self.agent_edits == AgentEdits::Propose {
-            return Err(
-                "the user reviews what agents change (edit_mode = \"propose\"): a source \
-                 cannot be proposed. Ask the user to add it (:bib), or to let agents \
-                 change things (:agents live)."
-                    .to_owned(),
-            );
-        }
-        let new = bib::parse(bibtex);
-        if new.is_empty() {
-            return Err(
-                "no BibTeX entry in that: an entry looks like @article{key, author = {…}, \
-                 title = {…}, year = {…}}"
-                    .to_owned(),
-            );
-        }
-        let sources = self.sources()?;
-        let mut taken: Vec<String> = sources
-            .entries
-            .iter()
-            .map(|entry| entry.key.clone())
-            .collect();
-        let mut text = sources.text.clone();
-        let mut keys = Vec::new();
-        for mut entry in new {
-            let free = !entry.key.is_empty() && !taken.contains(&entry.key);
-            if !free {
-                let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
-                entry.key = bib::key_for(&entry, &taken);
-            }
-            text = bib::with_added(&text, &entry);
-            taken.push(entry.key.clone());
-            keys.push(entry.key);
-        }
-        self.write_sources(&sources, &text)?;
-        let name = sources.path.file_name().map(|name| name.to_string_lossy());
-        self.notice(format!(
-            "an agent added {} to {}  (:bib shows the sources)",
-            keys.join(", "),
-            name.unwrap_or_default()
-        ));
-        Ok(keys)
+        self.agent_add_sources_checked(bibtex, false)
+            .map(|added| added.keys)
     }
 
     /// The commands of the bibliography manager, without their `bib`.
@@ -237,32 +232,18 @@ impl Viewer {
                 Ok(())
             }
             "remove!" => self.remove_source(key),
-            _ => Err(format!("not a command: bib {command}")),
+            _ => self.more_bib_command(what, rest),
         };
         if let Err(why) = done {
             self.alert(why);
         }
     }
 
-    /// `:bib`: the sources, and before them the way to add one.
-    fn list_sources(&mut self) -> Result<(), String> {
-        let sources = self.sources()?;
-        let mut items = vec![(
-            "+ add a source".to_owned(),
-            Target::Command("bib add".to_owned()),
-        )];
-        for entry in &sources.entries {
-            let open = Target::Command(format!("bib open {}", entry.key));
-            items.push((format!("{}\t{}", entry.key, entry.line()), open));
-        }
-        self.open_picker("sources", items, usize::from(sources.entries.len() == 1));
-        Ok(())
-    }
-
     /// A new source of `kind`, with nothing known of it yet: it is put
     /// into the file, and shown to be filled in.
     fn new_source(&mut self, kind: &str) -> Result<(), String> {
         let sources = self.sources()?;
+        sources.writable()?;
         let taken: Vec<&str> = sources
             .entries
             .iter()
@@ -276,12 +257,12 @@ impl Viewer {
         };
         entry.key = bib::key_for(&entry, &taken);
         let text = bib::with_added(&sources.text, &entry);
-        self.write_sources(&sources, &text)?;
+        self.write_sources(&sources, &text, &format!("added {}", entry.key))?;
         self.open_source(&entry.key)
     }
 
     /// The source cited by `key` among the document's sources.
-    fn source(&self, key: &str) -> Result<(Sources, Entry), String> {
+    pub(super) fn source(&self, key: &str) -> Result<(Sources, Entry), String> {
         let sources = self.sources()?;
         let entry = sources
             .entries
@@ -294,12 +275,20 @@ impl Viewer {
 
     /// All that is known of the source cited by `key`, and what can be
     /// done with it.
-    fn open_source(&mut self, key: &str) -> Result<(), String> {
-        let (_, entry) = self.source(key)?;
-        let mut items = vec![(
-            "cite it where the cursor is".to_owned(),
-            Target::Command(format!("bib cite {key}")),
-        )];
+    pub(super) fn open_source(&mut self, key: &str) -> Result<(), String> {
+        let (sources, entry) = self.source(key)?;
+        let cited = self.citation_counts_of(&sources.entries);
+        let cited = cited.get(key).copied().unwrap_or(0);
+        let mut items = vec![
+            (
+                "cite it where the cursor is".to_owned(),
+                Target::Command(format!("bib cite {key}")),
+            ),
+            (
+                format!("where it is cited\t{}", super::sources_look::times(cited)),
+                Target::Command(format!("bib where {key}")),
+            ),
+        ];
         // What a source of its kind is asked for, then what else it has.
         let asked = bib::fields_of(&entry.kind);
         let others = entry
@@ -322,13 +311,17 @@ impl Viewer {
         ));
         // The first thing it lacks comes up chosen: to be typed next.
         let lacking = asked.iter().position(|field| entry.field(field).is_none());
-        let chosen = lacking.map_or(0, |field| field + 1);
+        let lacking = lacking.filter(|_| !sources.hayagriva);
+        let chosen = lacking.map_or(0, |field| field + 2);
         self.open_picker_for("source", items, chosen, "bib".to_owned(), None);
         Ok(())
     }
 
     /// Asks what `field` of the source cited by `key` is to be.
     fn ask_field(&mut self, key: &str, field: &str) {
+        if let Err(why) = self.sources().and_then(|sources| sources.writable()) {
+            return self.alert(why);
+        }
         let now = self
             .source(key)
             .ok()
@@ -351,6 +344,8 @@ impl Viewer {
     /// its author and year as soon as it has those.
     fn set_field(&mut self, key: &str, field: &str, value: &str) -> Result<(), String> {
         let (sources, mut entry) = self.source(key)?;
+        sources.writable()?;
+        let before = entry.clone();
         let others: Vec<&str> = sources
             .entries
             .iter()
@@ -379,15 +374,21 @@ impl Viewer {
             }
         }
         let text = bib::with_replaced(&sources.text, &entry.range, Some(&entry));
-        self.write_sources(&sources, &text)?;
+        let what = format!("{field} of {key} changed");
+        self.write_sources(&sources, &text, &what)?;
+        // Now that it says what it is, it may be one that is there.
+        if self.offer_kept_one(&before, &entry.key) {
+            return Ok(());
+        }
         self.open_source(&entry.key)
     }
 
     /// Takes the source cited by `key` out of the file.
     fn remove_source(&mut self, key: &str) -> Result<(), String> {
         let (sources, entry) = self.source(key)?;
+        sources.writable()?;
         let text = bib::with_replaced(&sources.text, &entry.range, None);
-        self.write_sources(&sources, &text)?;
+        self.write_sources(&sources, &text, &format!("{key} taken out"))?;
         self.notice(format!("{key} is out of the bibliography"));
         self.list_sources()
     }

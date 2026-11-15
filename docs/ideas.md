@@ -5,6 +5,66 @@ the bibliography manager were built. The user judged all of them worth doing.
 Ordered by how much each is expected to change daily use; nothing here is
 started unless it says so.
 
+## Where this stands (2026-11-15)
+
+Built since, on the working tree of `page-surface` (each by an agent on a
+branch of its own, merged and tested together; lint and all tests pass):
+
+- **9, start:** `zetwerk` with no file lists recent documents and "new
+  document…"; `:recent`, `:new <name>`, `:template <name>`, `:open`; starters
+  (article, report, letter, slides, notes, and the user's own in
+  `~/.config/zetwerk/templates`) with places to fill in that Tab goes through.
+- **10, styles:** `:styles`, or the last row of `gD`: headings, title, links,
+  equation font, code, quotes, captions, tables, lists, footnotes, page head
+  and foot, and theorem-like environments, written as `#show`/`#let` lines
+  between two marker comments and read back from them.
+- **11, review:** notes and questions for agents on text (`gn`, `gq`, `]n`,
+  `[n`, `:notes`), kept beside the journal, not in the file; MCP tools
+  `list_notes`, `add_note`, `answer_note`, `resolve_note`; a proposal is shown
+  typeset, as it would be and as it is (`zp`).
+- **12, sources:** `:bib paste` (BibTeX, RIS, CSL-JSON from the clipboard),
+  `:bib import`, duplicates found and merged, `:bib view` (sort, narrow, where
+  cited), Hayagriva `.yml` read and added to, `:bib undo`/`redo`.
+- **15, hardening:** a seeded random typist through the real viewer, property
+  tests of the text functions and of the region typeset alone, a speed guard.
+- **Aids over the page** (nothing of them is in the text):
+  - relative line numbers in the margin (`:numbers`);
+  - jump labels (`gw`);
+  - a frame around what typing goes into and words for empty places
+    (`:hints`);
+  - tags in the right margin for what shows as nothing, `]i`/`[i` to reach
+    it, and the compiler's complaints beside their line (`:tags`, `:errors`);
+  - the keys that can follow, after a pause (`:nextkeys`), and the likeliest
+    completion shown faintly, taken with Tab (`:ghost`);
+  - search by what the page reads, with all matches marked and counted
+    (`:noh`, `:hlsearch`; `\=` in front searches the text as written), and a
+    flash on what was yanked or put (`:feedback`).
+- **Equations:** one that Typst refuses is shown as it is written, in place,
+  and `gx` shows any equation so; letters typed together that name nothing
+  become a product (`xy` → `x y`); an equation that stands by itself stays in
+  the middle with its number while it is typed.
+
+Seen in a hidden window (not yet with a real keyboard): line numbers, a
+refused equation and `gx`, jump labels, search marks, margin tags, the frame
+and "exponent", the styles list, a new document.
+
+Found by the random typist and not fixed (see the ignored tests in
+`viewer/tests/left_behind.rs` and `zetwerk-typst/tests/local_region.rs`):
+
+- the part cut out to be typeset alone is sometimes parsed otherwise than in
+  the whole (27 of 2000 random edits: `*` behind `*strong*`, `- ` at the end
+  of a `#set` line, `]` in a caption);
+- the part typeset alone can show other glyphs than the whole (a `#strong[]`
+  in a word, a `#footnote` in an empty document);
+- a lone `$`, a `#xyz` or a `#ref` begun and left keeps the whole document
+  from being typeset;
+- a compile of an older text still takes away the typed-word overlay where
+  the pages are not a part typeset alone.
+
+Also open: search in an equation goes by what it reads (`/a + b` does not
+find `$a + b$`); Delete at the end of a paragraph does nothing (it does not
+join it with the next); the key-hint pause is fixed at 600 ms.
+
 ## Where this stands (2026-11-13, evening)
 
 Built since the list was written, all on the working tree of `page-surface`:
@@ -34,7 +94,7 @@ Built since the list was written, all on the working tree of `page-surface`:
   Not yet tried against a real LanguageTool server, nor with the British
   dictionary (`hunspell-en_gb` is not installed on this machine).
 
-Not started: 1 (needs the user at a keyboard), 9, 10, 11, 12, 15.
+Not started then: 1 (needs the user at a keyboard), 9, 10, 11, 12, 15.
 
 None of what the agents built has been seen in a real window: it is covered by
 tests that drive the viewer, not by anybody's eyes.

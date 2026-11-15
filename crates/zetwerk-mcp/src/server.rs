@@ -19,7 +19,8 @@ use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 
 use crate::{
-    Change, ChangeKind, Direction, ImageExport, ImageFormat, ImageOf, Place, SharedEditor,
+    Change, ChangeKind, Direction, ImageExport, ImageFormat, ImageOf, NewNote, NoteAnchor,
+    NoteAnswer, Place, SharedEditor,
 };
 
 /// Longest side of a rendered page unless the caller asks otherwise. Large
@@ -68,6 +69,9 @@ struct EditSourceArgs {
     /// to accept or reject. Where the user asked for proposals, every
     /// change is a proposal.
     mode: Option<EditMode>,
+    /// Why you propose it, in a sentence or two: shown to the user with
+    /// the proposal.
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
@@ -92,8 +96,15 @@ struct TextArgs {
 struct AddSourceArgs {
     /// One BibTeX entry or several, as text:
     /// `@article{key, author = {Family, Given and …}, title = {…},
-    /// journal = {…}, year = {2024}, doi = {…}}`.
+    /// journal = {…}, year = {2024}, doi = {…}}`. RIS and CSL-JSON
+    /// are read too.
     bibtex: String,
+    /// Add sources that are there already (the same DOI, the same title
+    /// and year, or the same key and no title or DOI that differs) all
+    /// the same, under keys of their own (default: false: they are
+    /// reported in `there_already` and not added).
+    #[serde(default)]
+    anyway: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -141,6 +152,50 @@ struct LocateArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ProposalArgs {
     /// The proposal's `id`, as `edit_source` or `list_proposals` gave it.
+    id: u64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ListNotesArgs {
+    /// Also the notes that are resolved (default false).
+    include_resolved: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AddNoteArgs {
+    /// What the note says, to the user.
+    note: String,
+    /// The text the note is about, exactly as it is in the source; it has
+    /// to be there exactly once. Give this or `line`.
+    anchor_text: Option<String>,
+    /// A line of the source, counting from 1: the note is about the
+    /// paragraph (or heading, or item) on it.
+    line: Option<usize>,
+    /// The `revision` you read the source at. The note is refused if the
+    /// text has changed since.
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AnswerNoteArgs {
+    /// The note's `id`, as `list_notes` gives it.
+    id: u64,
+    /// The answer, to the user.
+    answer: String,
+    /// Where a change is the answer: the text to replace, exactly as it is
+    /// in the source and there once, as `edit_source` takes it. The change
+    /// is proposed to the user with the answer, never made at once.
+    old_str: Option<String>,
+    /// What to put in its place.
+    new_str: Option<String>,
+    /// The `revision` you read the source at. The answer is refused if
+    /// the text has changed since.
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct NoteArgs {
+    /// The note's `id`, as `list_notes` gives it.
     id: u64,
 }
 
@@ -353,9 +408,12 @@ impl Server {
     }
 
     /// The sources of the document: what its bibliography file (a BibTeX
-    /// file beside it) holds, each with its `key`, its `kind` and its
-    /// fields, and the `file` they are in. A source is cited in the text
-    /// as `@key`.
+    /// file beside it, or a Hayagriva `.yml` file) holds, each with its
+    /// `key`, its `kind`, its fields and how often it is `cited` in the
+    /// text (0: not at all), and the `file` they are in. `there_twice`
+    /// pairs the keys of sources that seem to be one (the same DOI, or
+    /// the same title and year). A source is cited in the text as
+    /// `@key`.
     #[tool(annotations(title = "List sources", read_only_hint = true))]
     async fn list_sources(&self) -> Result<CallToolResult, ErrorData> {
         self.value(crate::Editor::sources).await
@@ -427,14 +485,20 @@ impl Server {
     /// once. Where the document does not list a bibliography yet, it is
     /// made to. Answers with the `keys` the sources are cited by, which
     /// are the ones given unless those were taken: cite with `@key` in
-    /// the text (`edit_source`). Refused while the user wants changes
-    /// proposed only.
+    /// the text (`edit_source`). A source that is there already (the
+    /// same DOI, the same title and year, or the same key and nothing
+    /// that tells them apart) is not added again: it is in
+    /// `there_already`, with the key it is `cited_as`; cite that, or set
+    /// `anyway`. The file may also be a Hayagriva `.yml` file: the
+    /// sources are given as BibTeX all the same. zetwerk does not look
+    /// up DOIs: resolve one yourself and hand over what it gives.
+    /// Refused while the user wants changes proposed only.
     #[tool(annotations(title = "Add source", read_only_hint = false))]
     async fn add_source(
         &self,
         Parameters(args): Parameters<AddSourceArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.value(move |editor| editor.add_source(&args.bibtex))
+        self.value(move |editor| editor.add_source(&args.bibtex, args.anyway))
             .await
     }
 
@@ -451,6 +515,7 @@ impl Server {
             },
             expected_revision: args.expected_revision,
             propose: args.mode == Some(EditMode::Propose),
+            reason: args.reason,
         };
         self.value(move |editor| editor.change(change)).await
     }
@@ -466,6 +531,7 @@ impl Server {
             what: ChangeKind::Insert(args.text),
             expected_revision: args.expected_revision,
             propose: args.mode == Some(EditMode::Propose),
+            reason: None,
         };
         self.value(move |editor| editor.change(change)).await
     }
@@ -481,6 +547,7 @@ impl Server {
             what: ChangeKind::ReplaceSelection(args.text),
             expected_revision: args.expected_revision,
             propose: args.mode == Some(EditMode::Propose),
+            reason: None,
         };
         self.value(move |editor| editor.change(change)).await
     }
@@ -506,6 +573,7 @@ impl Server {
             },
             expected_revision: args.expected_revision,
             propose: args.mode == Some(EditMode::Propose),
+            reason: None,
         };
         self.value(move |editor| editor.change(change)).await
     }
@@ -518,6 +586,91 @@ impl Server {
     ) -> Result<CallToolResult, ErrorData> {
         self.value(move |editor| editor.withdraw_proposal(args.id))
             .await
+    }
+}
+
+#[tool_router(router = notes_tools)]
+impl Server {
+    /// The notes on the text: questions the user asks you about it
+    /// (`to_agent` true), notes the user or an agent left on it, and what
+    /// was answered. Each has its `id`, the `file`, `line` and `column`
+    /// where the `text` it is about begins, that `text`, the `note`
+    /// itself, who wrote it (`by`), the `answers` given since, whether it
+    /// is `resolved`, whether its text is gone (`detached`), and the
+    /// `proposals` made as answers to it that still wait. Answer a
+    /// question with `answer_note`. Notes are not in the source, and not
+    /// in what is exported.
+    #[tool(annotations(title = "List notes", read_only_hint = true))]
+    async fn list_notes(
+        &self,
+        Parameters(args): Parameters<ListNotesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let all = args.include_resolved.unwrap_or(false);
+        self.value(move |editor| editor.notes(all)).await
+    }
+
+    /// Leave a note for the user on the text: a remark, a doubt, a
+    /// question. It is shown on the page by the text it is about, with
+    /// `anchor_text` or `line`, and moves with that text as it is edited.
+    /// Nothing in the text is changed. Answers with the note's `id`.
+    #[tool(annotations(title = "Add note", read_only_hint = false))]
+    async fn add_note(
+        &self,
+        Parameters(args): Parameters<AddNoteArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let anchor = match (args.anchor_text, args.line) {
+            (Some(text), None) => NoteAnchor::Text(text),
+            (None, Some(line)) => NoteAnchor::Line(line),
+            _ => {
+                return Ok(failure(
+                    "give either `anchor_text` or `line`, not both".to_owned(),
+                ));
+            }
+        };
+        let note = NewNote {
+            text: args.note,
+            anchor,
+            expected_revision: args.expected_revision,
+        };
+        self.value(move |editor| editor.add_note(note)).await
+    }
+
+    /// Answer a note: a question the user asked you, or a note left on
+    /// the text. Where a change is the answer, give it as `old_str` and
+    /// `new_str`: it is proposed to the user together with the answer,
+    /// who sees it set on the page and accepts or rejects it. Answers with
+    /// the `proposal`'s id, if one was made.
+    #[tool(annotations(title = "Answer note", read_only_hint = false))]
+    async fn answer_note(
+        &self,
+        Parameters(args): Parameters<AnswerNoteArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let change = match (args.old_str, args.new_str) {
+            (Some(old), Some(new)) => Some((old, new)),
+            (None, None) => None,
+            _ => {
+                return Ok(failure(
+                    "give both `old_str` and `new_str`, or neither".to_owned(),
+                ));
+            }
+        };
+        let answer = NoteAnswer {
+            id: args.id,
+            text: args.answer,
+            change,
+            expected_revision: args.expected_revision,
+        };
+        self.value(move |editor| editor.answer_note(answer)).await
+    }
+
+    /// Mark a note resolved: what it asked is done. The user sees it
+    /// resolved and may open it again.
+    #[tool(annotations(title = "Resolve note", read_only_hint = false))]
+    async fn resolve_note(
+        &self,
+        Parameters(args): Parameters<NoteArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.value(move |editor| editor.resolve_note(args.id)).await
     }
 }
 
@@ -642,6 +795,7 @@ impl Server {
     fn new(editor: SharedEditor, tools: Tools) -> Self {
         let mut tool_router =
             Self::document_tools() + Self::reading_tools() + Self::editing_tools();
+        tool_router += Self::notes_tools();
         if tools.save {
             tool_router += Self::saving_tools();
         }

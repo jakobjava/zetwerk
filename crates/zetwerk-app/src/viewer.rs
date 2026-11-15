@@ -11,18 +11,30 @@ mod assist;
 mod buffers;
 pub mod export;
 mod figures;
+mod find;
+mod focus;
+mod hints;
 mod history;
 mod inplace;
+mod jump;
 mod keymap;
 mod language;
 mod local;
 mod manager;
+mod margin;
+pub mod notes;
 mod palette;
 mod pointer;
 pub mod refer;
 mod slides;
 mod sources;
+mod sources_add;
+mod sources_look;
+mod sources_undo;
+pub mod start;
 mod structure;
+mod styles;
+mod written;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -709,11 +721,22 @@ impl Rows for PageRows<'_> {
 )]
 pub struct Viewer {
     chrome: Chrome,
+    /// The equation that is shown as it is written, if one is (see
+    /// `written`).
+    written: Option<written::Written>,
+    /// The revision of the text at which an equation was last shown as
+    /// written because Typst refused it: once for each.
+    written_tried: Option<u64>,
     /// Whether the lines of the pages say how far they are from the
     /// cursor (see `aids`), and what they say, for as long as the cursor
     /// and the pages are the same.
     numbers: bool,
     numbered: Option<aids::NumberedFor>,
+    /// The labels to jump by, while they are up (see `jump`).
+    jump: jump::Jump,
+    /// The frame around what typing goes into and the words for empty
+    /// places (see `focus`): whether they are drawn, and what they are.
+    focus: focus::Focus,
     /// Whether what changed is typeset by itself and put into the page
     /// (see `local`): on, unless the user turned it off (`:parts`).
     in_parts: bool,
@@ -839,6 +862,8 @@ pub struct Viewer {
     completion: Option<assist::Completion>,
     /// What Typst says the thing under the cursor is, until the next key.
     tooltip: Option<String>,
+    /// The aids that say what is coming (see [`hints`]).
+    hints: hints::Hints,
     /// A list of places to go that keys are for, while it is up.
     picker: Option<assist::Picker>,
     /// What the list of the text's history is showing, while that is the
@@ -846,8 +871,15 @@ pub struct Viewer {
     history: Option<history::Panel>,
     /// What the reference helper keeps between keys (see [`refer`]).
     refer: refer::Refer,
+    /// What the bibliography manager keeps between commands.
+    sources_kept: sources_look::Kept,
     /// What is known about the spelling and grammar of the text.
     language: language::Language,
+    /// The notes on the text, and what reviewing keeps (see [`notes`]).
+    notes: notes::Notes,
+    /// What is beside the pages: tags for what they show as nothing, and
+    /// the compiler's complaints (see [`margin`]).
+    margin: margin::Margin,
     /// Where the cursor is drawn in the source pane or the lens, in device
     /// pixels: how far across, and its top and bottom.
     caret_at: Option<(f64, f64, f64)>,
@@ -859,6 +891,10 @@ pub struct Viewer {
     exports: export::Exports,
     /// What the pointer is doing (see [`pointer`]).
     pointer: pointer::Pointer,
+    /// What is kept about beginnings (see [`start`]).
+    start: start::Start,
+    /// The matches of a search and what keys took (see [`find`]).
+    find: find::Find,
     pub stats: Stats,
 }
 
@@ -877,8 +913,12 @@ impl Viewer {
         );
         let mut viewer = Self {
             chrome: Chrome::new(env)?,
+            written: None,
+            written_tried: None,
             numbers: true,
             numbered: None,
+            jump: jump::Jump::default(),
+            focus: focus::Focus::default(),
             in_parts: true,
             inserts: Vec::new(),
             shown_put: Vec::new(),
@@ -945,15 +985,21 @@ impl Viewer {
             agent_mark: None,
             completion: None,
             tooltip: None,
+            hints: hints::Hints::default(),
             picker: None,
             history: None,
             refer: refer::Refer::default(),
+            sources_kept: sources_look::Kept::default(),
             language: language::Language::default(),
+            notes: notes::Notes::default(),
+            margin: margin::Margin::default(),
             caret_at: None,
             planned: HashMap::new(),
             shown: HashMap::new(),
             exports: export::Exports::default(),
             pointer: pointer::Pointer::default(),
+            start: start::Start::default(),
+            find: find::Find::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1065,6 +1111,7 @@ impl Viewer {
         if let Some(err) = failed.first() {
             self.alert(format!("cannot write the journal: {err}"));
         }
+        self.keep_notes();
     }
 
     /// The current revision and a snapshot of it to compile.
@@ -1076,7 +1123,8 @@ impl Viewer {
         if let Some(world) = self.history_world() {
             return (self.revision, world);
         }
-        let put = self.put_to_show();
+        let mut put = self.put_to_show();
+        self.put_as_written(&mut put);
         self.shown_put.clone_from(&put);
         let world = match &self.editor {
             Some(editor) if !put.is_empty() => self.project.snapshot_showing(editor.file(), &put),
@@ -1151,6 +1199,12 @@ impl Viewer {
         }
         put.sort_by_key(|(at, _)| *at);
         put
+    }
+
+    /// Whether what was last put into the text to typeset it holds more
+    /// than the empty places: marks that are there only while typing.
+    fn shows_typing(&self) -> bool {
+        self.shown_put.iter().any(|(_, mark)| *mark != EMPTY)
     }
 
     /// Where the document's main file is, if it is a file.
@@ -1393,6 +1447,14 @@ impl Viewer {
             return;
         };
         let cursor = change.back_or_edge(editor.cursor());
+        // Blanks right before it in the text the pages were made of.
+        // Behind blanks at the end of what holds them (a footnote's
+        // text, a caption) the cursor has no place of its own: it
+        // stands behind what is before them. Not where the thing that
+        // holds them begins, which may be far up the page.
+        let blanks = world
+            .written(file)
+            .map_or(0, |written| blanks_before(written.text(), cursor));
         // Where it was last found, if it is there still: that page shows
         // it for certain, and may show it by something no search finds.
         let near = self.cursor_page.get();
@@ -1401,7 +1463,14 @@ impl Viewer {
                 .maps
                 .entry(near)
                 .or_insert_with(|| PageMap::build(world, &page.frame));
-            let caret = map.caret(file, cursor).map(|caret| caret.cell);
+            let caret = map
+                .caret(file, cursor)
+                .or_else(|| {
+                    (blanks > 0)
+                        .then(|| map.caret(file, cursor - blanks))
+                        .flatten()
+                })
+                .map(|caret| caret.cell);
             let cell = caret.or_else(|| map.object(file, cursor).first().copied())?;
             Some(zetwerk_typst::PagePosition {
                 page: near,
@@ -1463,9 +1532,18 @@ impl Viewer {
             })
             .collect();
         self.diagnostics.sort_by_key(|(_, range, _, _)| range.start);
+        // Pages a part of a newer text was put into stay until that text
+        // is typeset whole: the older one would take back what was typed
+        // since.
+        let newer = self
+            .document_revision
+            .is_some_and(|shown| shown > output.revision);
         if let Some(document) = output.compiled.document {
             let document = Arc::new(document);
             self.whole = Some(Arc::clone(&document));
+            if newer && self.document.is_some() {
+                return;
+            }
             if self.document.is_none() {
                 // The first pages there are: until now the window showed
                 // the source in their place.
@@ -1487,6 +1565,21 @@ impl Viewer {
             self.follow_cursor();
         }
         self.refer_problems();
+        // An equation Typst refuses is shown as it is written, and the
+        // pages are made again with it so.
+        let file = self.editor.as_ref().map(crate::editor::Editor::file);
+        let refused = self
+            .diagnostics
+            .iter()
+            .find(|(of, _, is_error, _)| *is_error && Some(*of) == file)
+            .map(|(_, range, _, message)| (range.start, message.clone()));
+        if self.document_revision != Some(self.revision)
+            && let Some((at, why)) = refused
+            && self.show_as_written(at, &why)
+        {
+            self.edited = Some(Edited::Command);
+        }
+        self.margin_compiled(&output.world);
     }
 
     /// The user turned the wheel or dragged on the touchpad, by this many
@@ -1556,6 +1649,9 @@ impl Viewer {
         self.message = None;
         if self.grid.is_some() {
             return self.grid_key(press);
+        }
+        if self.start_key(press) || self.margin_key(press) {
+            return;
         }
         if self.editor.is_some() {
             if !self.assist_key(press) {
@@ -1655,6 +1751,7 @@ impl Viewer {
             self.revision += 1;
             self.touched();
             self.sync_proposals();
+            self.try_as_equation();
             let shown = self.predict();
             // What begins a paragraph moves all that is below it: that
             // is for Typst to settle, at once.
@@ -1672,7 +1769,10 @@ impl Viewer {
             if typing {
                 self.offer_files();
             }
-        } else if was_typing && !typing && !self.is_compiled() {
+        } else if was_typing && !typing && (!self.is_compiled() || self.shows_typing()) {
+            // So too where the pages were typeset while typing, with the
+            // marks of it in: where the cursor was, the quotes around a
+            // word. They are not to stay once typing is over.
             self.edited = Some(Edited::LeftInsert);
         } else if typing && moved {
             // The cursor has come to a place with nothing in it (Tab
@@ -1700,6 +1800,7 @@ impl Viewer {
         if let Some((file, offset)) = self.elsewhere.take() {
             self.open_file(file, Some(offset));
         }
+        self.find_after_key(press);
     }
 
     /// Works out what the page looks like with the text as it is now, if
@@ -1746,9 +1847,14 @@ impl Viewer {
             .map_err(|_| "the compiled source is gone".to_owned())?;
         let (offset, removed, text) = match difference(base.text(), editor.text()) {
             Difference::Nothing => {
-                // Back at the text the pages show.
+                // Back at the text the pages show. Pages a part was put
+                // into are not all of it typeset: that is still to come.
+                let whole = matches!((document, &self.whole),
+                    (document, Some(whole)) if Arc::ptr_eq(document, whole));
                 self.document_revision = Some(self.revision);
-                self.compiled_revision = Some(self.revision);
+                if whole {
+                    self.compiled_revision = Some(self.revision);
+                }
                 return Ok(());
             }
             Difference::Replacement {
@@ -1878,12 +1984,16 @@ impl Viewer {
     }
 
     fn execute(&mut self, command: &str) {
+        if self.start_command(command) {
+            return;
+        }
         let unwritten = self.unwritten();
         let modified = !unwritten.is_empty();
         if self.file_command(command)
             || self.ui_command(command)
             || self.settings_command(command)
             || self.language_command(command)
+            || self.notes_command(command)
         {
             return;
         }
@@ -1917,10 +2027,12 @@ impl Viewer {
                 self.set_paging(paging);
             }
             "grid" => self.open_grid(),
+            "jump" => self.start_jump(),
             "page next" => self.step_page(true),
             "page previous" => self.step_page(false),
             "describe" => self.describe(),
             history if self.history_command(history) => {}
+            find if self.find_command(find) => {}
             "definition" => self.goto_definition(),
             "outline" => self.pick(false),
             "labels" => self.pick(true),
@@ -2073,7 +2185,10 @@ impl Viewer {
             self.performance(&mut scene, has);
         }
         self.proposal_panel(&mut scene, has);
+        self.review_panels(&mut scene, has);
+        self.hints(&mut scene, has);
         self.assist_panels(&mut scene, has);
+        self.margin_panel(&mut scene, has);
         scene
     }
 
@@ -2140,7 +2255,13 @@ impl Viewer {
             self.line_numbers(scene, has, visible.index, origin);
             self.step_marks(scene, has, visible.index, origin);
             self.language_page(scene, has, visible.index, origin);
+            self.find_marks(scene, has, visible.index, origin);
+            self.margin_page(scene, has, visible.index, origin);
             self.page_cursor(scene, has, visible.index, origin);
+            self.review_page(scene, has, visible.index, origin);
+            self.focus_marks(scene, has, visible.index, origin);
+            // Last: the labels lie over all else.
+            self.jump_labels(scene, has, visible.index, origin);
         }
     }
 
@@ -2617,10 +2738,12 @@ impl Viewer {
             1 => "1 proposal ]p  ".to_owned(),
             count => format!("{count} proposals ]p  "),
         };
+        let notes = self.notes_status();
         let right = format!(
-            "{proposals}{progress}{place}{}/{}  {percent:.0}%",
+            "{proposals}{notes}{progress}{place}{}/{}  {percent:.0}%",
             state.page, state.pages
         );
+        let right = format!("{}{right}", self.search_count());
         let status = Status {
             mode,
             left,
@@ -2670,6 +2793,9 @@ impl Viewer {
     /// The change an agent proposes for the text under the cursor: what
     /// would go and what would come, in the corner above the status line.
     fn proposal_panel(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {
+        if self.proposal_explained() {
+            return;
+        }
         let Some(cursor) = self.editor.as_ref().map(Editor::cursor) else {
             return;
         };
@@ -2899,6 +3025,10 @@ mod tests {
     use crate::keys;
 
     mod cursor;
+    mod files;
+    mod left_behind;
+    mod speed;
+    mod typist;
 
     /// A viewer in an 800×620 window showing `pages` A4 pages.
     fn viewer(pages: usize) -> Viewer {
@@ -3501,6 +3631,135 @@ mod tests {
     }
 
     #[test]
+    fn an_equation_that_stands_by_itself_stays_so_while_it_is_typed() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    #set math.equation(numbering: \"(1)\")\n\
+                    Before.\n\n$ a + b $\n\nAfter.\n";
+        let (mut viewer, directory) = editing(text);
+        // Where the equation and its number stand, and where they stand
+        // once all of it has been typeset again.
+        press(&mut viewer, "gsgs/\\=+ b<CR>la + 2");
+        let whole = |viewer: &mut Viewer| {
+            compile(viewer);
+            glyph_places(viewer, 0)
+        };
+        let before = glyph_places(&viewer, 0);
+        assert_eq!(before, whole(&mut viewer));
+        // What is raised is yet to come: the equation is as much in
+        // the middle as before, and has its number.
+        press(&mut viewer, "^");
+        assert_eq!(
+            viewer.document_revision,
+            Some(viewer.revision),
+            "{:?}",
+            viewer.declined
+        );
+        let raised = glyph_places(&viewer, 0);
+        assert_eq!(raised, whole(&mut viewer));
+        assert_eq!(
+            raised.len(),
+            before.len() + 1,
+            "the box for what is to come"
+        );
+        let number = |places: &[(i64, i64)]| places.iter().map(|place| place.0).max();
+        assert_eq!(
+            number(&raised),
+            number(&before),
+            "the number stands where it stood"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn letters_typed_together_in_an_equation_are_what_is_meant() {
+        let text = "#set page(width: 300pt, height: 300pt)\nSome words\n\nMore.\n";
+        let (mut viewer, directory) = editing(text);
+        // `xy` is no name: it is x times y, as whoever types it means.
+        // A name is a name, and so is one that is still being typed.
+        press(&mut viewer, "/words<CR>gsgsA and $xy + alpha = abc");
+        assert!(
+            viewer
+                .text()
+                .is_some_and(|text| text.contains("$x y + alpha = abc$")),
+            "{:?}",
+            viewer.text()
+        );
+        press(&mut viewer, "<Esc>");
+        assert!(
+            viewer
+                .text()
+                .is_some_and(|text| text.contains("$x y + alpha = a b c$")),
+            "{:?}",
+            viewer.text()
+        );
+        compile(&mut viewer);
+        assert_eq!(viewer.document_revision, Some(viewer.revision));
+        assert_eq!(viewer.problems, Vec::<String>::new());
+        // All of it is one step to take back.
+        press(&mut viewer, "u");
+        assert!(viewer.text().is_some_and(|text| !text.contains('$')));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn an_equation_typst_refuses_is_shown_as_it_is_written() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    Before $a + \"b$ after.\n\nMore words.\n";
+        let (mut viewer, directory) = editing(text);
+        // Typst has no meaning for it. It is shown as its characters
+        // then, and all the rest is typeset around it.
+        compile(&mut viewer);
+        assert!(viewer.written.is_some(), "{:?}", viewer.problems);
+        compile(&mut viewer);
+        assert_eq!(
+            viewer.document_revision,
+            Some(viewer.revision),
+            "{:?}",
+            viewer.problems
+        );
+        let shown = glyph_places(&viewer, 0).len();
+        // Each of its characters is a place for the cursor: what is in
+        // the way can be gone to and taken away, on the page.
+        press(&mut viewer, "gsgs/\\=\"b<CR>");
+        assert_eq!(tints(&mut viewer, PAGE_CURSOR).len(), 1);
+        press(&mut viewer, "x");
+        assert!(
+            viewer
+                .text()
+                .is_some_and(|text| text.contains("Before $a + b$ after.")),
+            "{:?}",
+            viewer.text()
+        );
+        // It is an equation again, and shown as one, at once.
+        assert_eq!(viewer.written, None);
+        assert_eq!(
+            viewer.document_revision,
+            Some(viewer.revision),
+            "{:?}",
+            viewer.declined
+        );
+        let meant = glyph_places(&viewer, 0).len();
+        assert!(meant < shown, "no marks of the equation are shown");
+        // For the asking, an equation is shown as written too, while
+        // the cursor is in it.
+        press(&mut viewer, "gx");
+        compile(&mut viewer);
+        assert!(viewer.written.is_some());
+        assert!(
+            glyph_places(&viewer, 0).len() > meant + 3,
+            "its marks and blanks are shown: {:?}",
+            viewer.shown_put
+        );
+        press(&mut viewer, "gx");
+        compile(&mut viewer);
+        assert_eq!(viewer.written, None);
+        press(&mut viewer, "gx/More<CR>");
+        compile(&mut viewer);
+        assert_eq!(viewer.written, None, "left behind, it is what it means");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn the_cursor_is_behind_the_blank_that_was_typed() {
         let text = "#set page(width: 300pt, height: 300pt)\nSome words\n\nMore.\n";
         let (mut viewer, directory) = editing(text);
@@ -3551,6 +3810,14 @@ mod tests {
         let before = viewer.scene(&|_| false).quads.len();
         press(&mut viewer, ":numbers<CR>");
         assert!(viewer.scene(&|_| false).quads.len() > before);
+        // While something is typed the pages are behind it after each
+        // key (here for good: nothing compiles them, and nothing is
+        // typeset by itself). The numbers stay where they stood; they do
+        // not go and come with every letter.
+        let stood = numbered(&mut viewer);
+        press(&mut viewer, ":parts<CR>A more");
+        assert!(viewer.places().is_none(), "the pages are behind");
+        assert_eq!(numbered(&mut viewer), stood);
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -5133,7 +5400,7 @@ mod tests {
         press(&mut viewer, "u");
 
         // What a reference shows is one thing: stepped over, deleted whole.
-        press(&mut viewer, "/@start<CR>");
+        press(&mut viewer, "/\\=@start<CR>");
         assert_eq!(under(&viewer), '@');
         press(&mut viewer, "l");
         assert_eq!(under(&viewer), ' ', "past all of it");
@@ -5573,6 +5840,196 @@ mod tests {
         report("half a page down", "<C-d>", &mut viewer);
         report("deleting words", "dwdwdwdwdwdwdwdw", &mut viewer);
         report("undo", "uuuuuuuu", &mut viewer);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_string_left_open_in_an_equation_does_not_take_the_document_with_it() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    #set heading(numbering: \"1.\")\n\
+                    Before.\n\nLet $x_0$ be real, see @later.\n\n= Later <later>\nWords.\n";
+        let (mut viewer, directory) = editing(text);
+        // The quote that closed the string is taken away: to Typst the
+        // string then goes on to the end of the document, label and all.
+        press(&mut viewer, "/Before<CR>A Then $a + \"<Del> b");
+        assert!(
+            viewer
+                .text()
+                .is_some_and(|text| text.contains("Then $a + \" b$\n\nLet $x_0$")),
+            "{:?}",
+            viewer.text()
+        );
+        compile(&mut viewer);
+        compile(&mut viewer);
+        // Only the equation is shown as it is written; what follows its
+        // paragraph is typeset as ever.
+        assert!(viewer.written.is_some(), "{:?}", viewer.problems);
+        assert_eq!(
+            viewer.document_revision,
+            Some(viewer.revision),
+            "{:?}",
+            viewer.problems
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn an_equation_with_a_number_keeps_it_while_it_is_shown_as_written() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    #set math.equation(numbering: \"(1)\")\n\
+                    Before.\n\n$ a + b $ <sum>\n\nSee @sum for it.\n";
+        let (mut viewer, directory) = editing(text);
+        let meant = glyph_places(&viewer, 0).len();
+        press(&mut viewer, "gsgs/\\=a +<CR>gx");
+        compile(&mut viewer);
+        // What refers to it still finds it: the pages are made.
+        assert!(viewer.written.is_some());
+        assert_eq!(
+            viewer.document_revision,
+            Some(viewer.revision),
+            "{:?}",
+            viewer.problems
+        );
+        assert!(
+            glyph_places(&viewer, 0).len() > meant + 3,
+            "its marks are shown"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn deleting_at_the_end_of_a_paragraph_takes_nothing_of_the_next() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    Before.\n\nLet $x_0$ be real.\n";
+        let (mut viewer, directory) = editing(text);
+        // In the string just begun nothing is shown behind the cursor
+        // but the next paragraph, beyond marks that show as nothing.
+        press(&mut viewer, "gsgs/Before<CR>A Then $a + \"");
+        compile(&mut viewer);
+        press(&mut viewer, "<Del>");
+        assert!(
+            viewer
+                .text()
+                .is_some_and(|text| text.contains("Then $a + \"\"$\n\nLet $x_0$")),
+            "{:?}",
+            viewer.text()
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_mark_that_takes_the_end_of_an_equation_with_it_ends_nothing_else() {
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    Before.\n\nLet $x_0$ be real, and $y$ too.\n\nAnd $z$ as well.\n";
+        let (mut viewer, directory) = editing(text);
+        // The backslash makes the `$` behind it a character: to Typst
+        // the equation goes on to the next one's beginning, that one's
+        // text is no equation, and what stands between them is one.
+        press(&mut viewer, "gsgs/Before<CR>A Then $a + b \\");
+        assert!(
+            viewer
+                .text()
+                .is_some_and(|text| text.contains("Then $a + b \\$\n\nLet $x_0$")),
+            "{:?}",
+            viewer.text()
+        );
+        compile(&mut viewer);
+        compile(&mut viewer);
+        // The equation being typed is shown as written, whatever else
+        // Typst complained of; all else is typeset as ever.
+        assert!(viewer.written.is_some(), "{:?}", viewer.problems);
+        assert_eq!(
+            viewer.document_revision,
+            Some(viewer.revision),
+            "{:?}",
+            viewer.problems
+        );
+        // With something behind it the mark is that, and the equation
+        // an equation.
+        press(&mut viewer, "a");
+        compile(&mut viewer);
+        assert_eq!(viewer.written, None);
+        assert_eq!(
+            viewer.document_revision,
+            Some(viewer.revision),
+            "{:?}",
+            viewer.problems
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_blank_typed_in_a_footnote_leaves_the_view_where_it_is() {
+        // The note's number stands at the top of a long page, its text
+        // at the foot, out of the window while the top is shown.
+        let text = "#set page(width: 300pt, height: 900pt)\n\
+                    First words of the page.\n\nMore of them.\n";
+        let (mut viewer, directory) = editing(text);
+        let settle = |viewer: &mut Viewer| {
+            compile(viewer);
+            let _ = viewer.scene(&|_| false);
+            viewer.view.top
+        };
+        // A note begun from the menu, and a word typed into it.
+        press(&mut viewer, "gsgs/\\=words<CR>ea#foot<CR>");
+        settle(&mut viewer);
+        press(&mut viewer, "word");
+        let top = settle(&mut viewer);
+        assert!(
+            viewer
+                .text()
+                .is_some_and(|text| text.contains("#footnote[word]")),
+            "{:?}",
+            viewer.text()
+        );
+        assert!(top > 100.0, "the foot of the page is shown: {top}");
+        // Behind the blank the cursor has no place of its own in the
+        // note. It is not looked for where the note's number stands.
+        for key in [" ", "n", "e", "x", "t", " "] {
+            press(&mut viewer, key);
+            let _ = viewer.scene(&|_| false);
+            let typed = viewer.view.top;
+            let typeset = settle(&mut viewer);
+            assert!(
+                (typed - top).abs() < 1.0 && (typeset - top).abs() < 1.0,
+                "after {key:?} the view is at {typed}, typeset at {typeset}; it was at {top}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_numbers_of_the_lines_stay_while_the_pages_are_made() {
+        let text = "#set page(width: 300pt, height: 400pt)\n\
+                    One line of words.\n\nTwo lines of them, the second.\n\n\
+                    Three lines.\n\nFour lines.\n\nFive lines.\n";
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "gsgs/second<CR>");
+        compile(&mut viewer);
+        // How often the number 1 is drawn: beside the line above the
+        // cursor's and the one below.
+        let ones = |viewer: &mut Viewer| {
+            let markup = crate::chrome::margin_number_markup(1, 6.5);
+            let zoom = viewer.view.zoom;
+            let id = viewer.chrome.render(&markup, zoom).map(|image| image.id);
+            let scene = viewer.scene(&|_| false);
+            let of_one = |quad: &&Quad| Some(quad.texture) == id;
+            scene.quads.iter().filter(of_one).count()
+        };
+        assert_eq!(ones(&mut viewer), 2);
+        // After every key, in the frames before its pages are there and
+        // in the one in which they come: also where they are made a
+        // second time of the same text, after what was typeset by
+        // itself.
+        for keys in [
+            "A", " ", "w", "o", "r", "d", " ", "<Esc>", "x", "x", "u", "ia", "b", "<Esc>", "p", "u",
+        ] {
+            press(&mut viewer, keys);
+            assert_eq!(ones(&mut viewer), 2, "after {keys}");
+            assert_eq!(ones(&mut viewer), 2, "after {keys}, the next frame");
+            compile(&mut viewer);
+            assert_eq!(ones(&mut viewer), 2, "after {keys}, with its pages");
+        }
         let _ = std::fs::remove_dir_all(directory);
     }
 }

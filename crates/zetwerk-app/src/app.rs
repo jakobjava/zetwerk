@@ -27,9 +27,13 @@ use crate::viewer::agent::AgentEdits;
 use crate::viewer::{self, Edited, State, Viewer};
 use crate::watch::FileWatcher;
 
+mod switch;
+
 /// How the window should be opened.
 pub struct Options {
-    /// The file to edit.
+    /// The file to edit; or a directory, where there is none yet: the
+    /// window then lists the documents opened last, and new ones are
+    /// made there (see `switch`).
     pub path: PathBuf,
     /// The main file of the document it is part of, if it is not that
     /// itself.
@@ -56,6 +60,8 @@ pub struct Options {
     pub inserts: Vec<crate::typst_text::Insert>,
     /// What the user has to say about spelling and grammar.
     pub language: zetwerk_language::Settings,
+    /// Where the user's own starters for new documents are.
+    pub templates: Option<PathBuf>,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -175,6 +181,8 @@ struct App {
 
 struct Session {
     window: Arc<Window>,
+    /// The fonts and the library, for documents opened later.
+    env: Arc<Environment>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     gpu: Gpu,
@@ -227,6 +235,7 @@ impl ApplicationHandler<Event> for App {
         if session.viewer.wants_quit() {
             event_loop.exit();
         }
+        self.switch_if_wanted();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
@@ -243,6 +252,7 @@ impl ApplicationHandler<Event> for App {
         if session.viewer.wants_quit() {
             event_loop.exit();
         }
+        self.switch_if_wanted();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -251,8 +261,17 @@ impl ApplicationHandler<Event> for App {
         };
         let now = Instant::now();
         // A pointer held beyond the text while it selects moves the view
-        // along; nothing else here goes by the clock.
+        // along, and keys that wait for another are explained once they
+        // pause; nothing else here goes by the clock.
         if session.viewer.autoscroll(now) {
+            session.window.request_redraw();
+        }
+        // The tint on what a key yanked or put goes when its time is up.
+        if session.viewer.flash_over(now) {
+            session.window.request_redraw();
+        }
+        // And the keys that can follow come up when typing has paused.
+        if session.viewer.hints_due(now) {
             session.window.request_redraw();
         }
         if session.scheduler.take_due(now) {
@@ -271,6 +290,8 @@ impl ApplicationHandler<Event> for App {
             session.scheduler.deadline(),
             sync_at,
             session.viewer.autoscroll_at(),
+            session.viewer.flash_at(),
+            session.viewer.hints_at(),
         ]
         .into_iter()
         .flatten()
@@ -295,15 +316,9 @@ impl Session {
         event_loop: &ActiveEventLoop,
     ) -> Result<Self, String> {
         let env = Environment::new(options.font_set);
-        let (project, editor, opened) = crate::headless::open(&env, options)?;
-        let name = options
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-        let title = name.map_or_else(|| "zetwerk".to_owned(), |name| format!("{name} — zetwerk"));
-
+        let document = switch::Document::open(&env, options)?;
         let attributes = Window::default_attributes()
-            .with_title(title)
+            .with_title(switch::title(&options.path))
             .with_inner_size(LogicalSize::new(900.0, 1000.0));
         let window = Arc::new(
             event_loop
@@ -360,19 +375,18 @@ impl Session {
         })
         .ok();
 
-        let viewer = Viewer::new(
-            env,
-            project,
+        let viewer = document.viewer(
+            Arc::clone(&env),
             (size.width, size.height),
             window.scale_factor(),
-        )
-        .ok_or("cannot set up the interface")?
-        .editing(editor, &opened)
-        .configured(options);
+            options,
+        )?;
         let mut viewer = viewer;
         viewer.wake_for_language(wake(proxy));
+        viewer.wake_for_review(wake(proxy));
         let mut session = Self {
             window,
+            env,
             surface,
             config,
             gpu,
@@ -390,6 +404,7 @@ impl Session {
         };
         session.viewer.export_in_background(wake(proxy));
         session.watch_dependencies();
+        switch::welcome(&mut session.viewer, options, false);
         session.scheduler.request(Urgency::Now, Instant::now());
         Ok(session)
     }
@@ -535,10 +550,14 @@ impl Session {
 
     fn redraw(&mut self) {
         let start = Instant::now();
+        // Asked before the results are taken: see `Compiler::is_idle`.
+        let compiled_all = self.compiler.is_idle();
         if let Some(output) = self.compiler.poll() {
             self.viewer.compiled(output);
             // The compile may have read files it had not read before.
             self.watch_dependencies();
+            // And what it said may want the pages made again.
+            self.after_keys();
         }
         self.viewer.export_progress();
         for tile in self.rasterizer.poll() {
@@ -556,8 +575,14 @@ impl Session {
             self.gpu
                 .upload(image.id, pixmap.width(), pixmap.height(), pixmap.data());
         }
-        let settled =
-            self.viewer.is_compiled() && scene.wanted.is_empty() && self.rasterizer.is_idle();
+        // No pages are being made or about to be: those of this revision
+        // may be made a second time, when Typst refused something that
+        // is then shown another way.
+        let settled = self.viewer.is_compiled()
+            && compiled_all
+            && self.scheduler.deadline().is_none()
+            && scene.wanted.is_empty()
+            && self.rasterizer.is_idle();
         self.rasterizer.request(scene.wanted);
         self.present(&scene.quads);
 

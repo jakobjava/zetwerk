@@ -90,8 +90,9 @@ pub trait Editor: Send + Sync + 'static {
     fn targets(&self) -> Result<serde_json::Value, String>;
 
     /// Adds the sources written in `bibtex` to that file, and reports
-    /// the keys they can be cited by.
-    fn add_source(&self, bibtex: &str) -> Result<serde_json::Value, String>;
+    /// the keys they can be cited by; those that are there already only
+    /// if `anyway`, else it reports them.
+    fn add_source(&self, bibtex: &str, anyway: bool) -> Result<serde_json::Value, String>;
 
     /// The figures of the file being edited, and the tables and images
     /// that stand in none.
@@ -99,6 +100,52 @@ pub trait Editor: Send + Sync + 'static {
 
     /// What is wrong with the spelling and the grammar of the text.
     fn check_language(&self) -> Result<serde_json::Value, String>;
+
+    /// The notes on the text, the questions for agents among them: those
+    /// not resolved, or all.
+    fn notes(&self, include_resolved: bool) -> Result<serde_json::Value, String>;
+
+    /// Leaves an agent's note on the text.
+    fn add_note(&self, note: NewNote) -> Result<serde_json::Value, String>;
+
+    /// An agent's answer to a note, with a change proposed as part of it
+    /// where one is given.
+    fn answer_note(&self, answer: NoteAnswer) -> Result<serde_json::Value, String>;
+
+    /// Marks note `id` resolved.
+    fn resolve_note(&self, id: u64) -> Result<serde_json::Value, String>;
+}
+
+/// A note an agent leaves on the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewNote {
+    pub text: String,
+    pub anchor: NoteAnchor,
+    /// The revision the agent read the text at: the note is refused if
+    /// the text has changed since.
+    pub expected_revision: Option<u64>,
+}
+
+/// What a note is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoteAnchor {
+    /// This text, which is in the source exactly once.
+    Text(String),
+    /// The paragraph (or heading, or item) on this line, counting from 1.
+    Line(usize),
+}
+
+/// An agent's answer to note `id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteAnswer {
+    pub id: u64,
+    pub text: String,
+    /// Text to replace (once) and what to put there: proposed to the user
+    /// as part of the answer.
+    pub change: Option<(String, String)>,
+    /// The revision the agent read the text at: the answer is refused if
+    /// the text has changed since.
+    pub expected_revision: Option<u64>,
 }
 
 /// A change an agent asks for.
@@ -110,6 +157,8 @@ pub struct Change {
     pub expected_revision: Option<u64>,
     /// Whether to put it before the user instead of making it.
     pub propose: bool,
+    /// Why, shown to the user with the proposal.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

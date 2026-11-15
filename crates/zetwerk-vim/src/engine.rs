@@ -2,13 +2,20 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
+use std::sync::Arc;
 
+use crate::find::{self, Query, Reading};
 use crate::keys::{Key, KeyPress};
 use crate::motion::{self, Kind};
 use crate::object::{self, Object};
 use crate::text::{Class, Text};
+use crate::took::Took;
 
+mod follow;
+mod read;
 mod shown;
+
+pub use follow::Following;
 
 /// Columns one `>` or `<` shifts by, and the width of a typed Tab.
 const SHIFT_WIDTH: usize = 2;
@@ -189,6 +196,13 @@ pub trait Host {
     /// there is no such object.
     fn object(&self, name: char, at: usize, around: bool) -> Option<Range<usize>> {
         let _ = (name, at, around);
+        None
+    }
+
+    /// What the text is read as, where the host shows it as something to
+    /// be read and not as it is written: a search goes over that (see
+    /// [`crate::find`]). `None` where the text is shown as it is.
+    fn reading(&self) -> Option<Arc<Reading>> {
         None
     }
 }
@@ -503,6 +517,11 @@ pub struct Engine {
     /// The last search: what for, which way, and whether only as a whole
     /// word (`*`, `#`).
     last_search: Option<Search>,
+    /// How many searches were made: a host that shows their matches shows
+    /// them again after each.
+    searches: u64,
+    /// What the last key yanked, deleted or put.
+    took: Option<Took>,
     /// Whether `j` and `k` go by the rows the host shows instead of by
     /// lines of the text, as `gj` and `gk` always do where it shows any.
     rows_first: bool,
@@ -595,6 +614,8 @@ impl Engine {
             prompt: ':',
             prompt_return: Mode::Normal,
             last_search: None,
+            searches: 0,
+            took: None,
             rows_first: false,
             pairs: false,
             line_select: false,
@@ -769,9 +790,32 @@ impl Engine {
             .map(|register| (register.text.as_str(), register.linewise))
     }
 
+    /// What the last search was for, if there was one.
+    #[must_use]
+    pub fn last_search(&self) -> Option<Query> {
+        self.last_search.as_ref().map(|search| Query {
+            pattern: search.pattern.clone(),
+            word_start: search.word_start,
+            word_end: search.word_end,
+        })
+    }
+
+    /// How many searches have been made (`/`, `n`, `*` and their like).
+    #[must_use]
+    pub fn searches(&self) -> u64 {
+        self.searches
+    }
+
+    /// What the last key yanked, deleted or put, if it did.
+    #[must_use]
+    pub fn took(&self) -> Option<&Took> {
+        self.took.as_ref()
+    }
+
     /// Handles one key press.
     pub fn key(&mut self, press: KeyPress, host: &mut impl Host) -> Vec<Effect> {
         let before = self.cursor;
+        self.took = None;
         let effects = self.key_as_typed(press, host);
         self.rest_on_shown(before, host);
         effects
@@ -1430,6 +1474,10 @@ impl Engine {
                     Key::Char('d') if !press.ctrl => "diagnostic",
                     // And to what is misspelt, as in Vim.
                     Key::Char('s') if !press.ctrl => "issue",
+                    // And to the notes on the text.
+                    Key::Char('n') if !press.ctrl => "notes",
+                    // And to what the page shows as nothing.
+                    Key::Char('i') if !press.ctrl => "invisible",
                     _ => return self.fail(),
                 };
                 let way = if forward { "next" } else { "previous" };
@@ -1443,6 +1491,9 @@ impl Engine {
                     Key::Char('=') => Some("suggest"),
                     Key::Char('g') => Some("word good"),
                     Key::Char('w') => Some("word wrong"),
+                    // Not Vim's: a proposed change shown on the page as
+                    // it is, or as it would be.
+                    Key::Char('p') => Some("proposal flip"),
                     _ => None,
                 };
                 if let Some(command) = spelling {
@@ -1939,6 +1990,11 @@ impl Engine {
                 };
                 self.effects.push(Effect::Command(command.to_owned()));
             }
+            // Not Vim's `gx` (which opens what is under the cursor
+            // elsewhere): the equation there as it is written.
+            'x' if self.pending.is_idle() && !self.selecting() => {
+                self.effects.push(Effect::Command("written".to_owned()));
+            }
             // Nor Vim's `gF`: the host's list of the figures and tables.
             'F' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("figures".to_owned()));
@@ -1960,10 +2016,23 @@ impl Engine {
                 let command = if c == 'a' { "accept" } else { "reject" };
                 self.effects.push(Effect::Command(command.to_owned()));
             }
+            // Nor Vim's `gn` and `gq`: a note on what is selected or under
+            // the cursor, and a question about it for an agent, whose text
+            // the host asks for.
+            'n' | 'q' if self.pending.is_idle() => {
+                let command = if c == 'n' { "note" } else { "ask" };
+                self.effects.push(Effect::Command(command.to_owned()));
+            }
             // Nor Vim's `gh` (which selects): the host's list of the steps
             // of the undo history, to look at and to go back to.
             'h' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("history".to_owned()));
+            }
+            // Nor Vim's `gw` (which formats): the host's labels on the
+            // words in view, to jump to one by typing its label. In
+            // visual mode too, to extend the selection.
+            'w' if self.pending.is_idle() => {
+                self.effects.push(Effect::Command("jump".to_owned()));
             }
             _ => self.fail(),
         }
@@ -2777,6 +2846,7 @@ impl Engine {
                     yanked.push('\n');
                 }
                 self.store(yanked, linewise, false);
+                self.took = Some(Took::Yanked(start..end));
                 self.cursor = clamp(Text(host.text()), landing, false);
             }
             Operator::Delete => {
@@ -2797,6 +2867,11 @@ impl Engine {
                 if linewise && !deleted.ends_with('\n') {
                     deleted.push('\n');
                 }
+                self.took = Some(Took::Deleted {
+                    text: deleted.clone(),
+                    at: start,
+                    linewise,
+                });
                 self.store(deleted, linewise, true);
                 self.edit(host, start..end, "");
                 let text = Text(host.text());
@@ -2817,6 +2892,11 @@ impl Engine {
                 }
             }
             Operator::Change => {
+                self.took = Some(Took::Deleted {
+                    text: selected.clone(),
+                    at: start,
+                    linewise,
+                });
                 let mut changed = selected;
                 if linewise {
                     // The lines go, one empty line stays to type into.
@@ -2971,6 +3051,7 @@ impl Engine {
                 text.line_start(self.cursor)
             };
             self.edit(host, at..at, &inserted);
+            self.took = Some(Took::Put(at..at + inserted.len()));
             self.cursor = Text(host.text()).first_non_blank(at);
         } else {
             let text = Text(host.text());
@@ -2980,6 +3061,7 @@ impl Engine {
                 self.cursor
             };
             self.edit(host, at..at, &inserted);
+            self.took = Some(Took::Put(at..at + inserted.len()));
             let text = Text(host.text());
             self.cursor = if inserted.contains('\n') {
                 at
@@ -3016,6 +3098,7 @@ impl Engine {
             inserted.insert(0, '\n');
         }
         self.edit(host, range.clone(), &inserted);
+        self.took = Some(Took::Put(range.start..range.start + inserted.len()));
         if keep {
             self.store(replaced, linewise_selection, true);
         }
@@ -3650,6 +3733,16 @@ impl Engine {
                 } else {
                     None
                 };
+                // What is shown behind the end of a line is not behind
+                // the cursor: it is of the next paragraph, and what
+                // lies between (marks that show as nothing) hid that.
+                let apart = |shown: &Range<usize>| {
+                    let between = text.0.get(self.cursor..shown.start);
+                    between.is_some_and(|between| between.contains('\n'))
+                };
+                if shown.as_ref().is_some_and(apart) {
+                    return false;
+                }
                 let next = text.next(self.cursor);
                 let behind = shown.unwrap_or(self.cursor..next);
                 // Not the line break the text ends with.
@@ -3953,10 +4046,18 @@ impl Engine {
     /// from `from`, or applies the pending operator up to it.
     fn search(&mut self, forward: bool, from: usize, host: &mut impl Host) {
         let (count, _) = self.take_count();
-        let found = self
-            .last_search
-            .as_ref()
-            .and_then(|search| find_match(host.text(), from, search, forward, count));
+        self.searches += 1;
+        let reading = host.reading();
+        let found = self.last_search.as_ref().and_then(|search| {
+            find_match(
+                host.text(),
+                reading.as_deref(),
+                from,
+                search,
+                forward,
+                count,
+            )
+        });
         // Found or not, the cursor aims at the column it ends up in.
         self.wanted_column = None;
         if found.is_some() {
@@ -3975,6 +4076,9 @@ impl Engine {
     /// on the line; failing that, for what is under the cursor up to the
     /// next blank.
     fn search_word(&mut self, forward: bool, host: &mut impl Host) {
+        if self.shown_search_word(forward, host) {
+            return;
+        }
         let text = Text(host.text());
         let class_of = |c: char| crate::text::class(c, false);
         let line_end = text.line_end(self.cursor);
@@ -4020,31 +4124,20 @@ impl Engine {
 /// going on at the other end of the text when its end is reached.
 fn find_match(
     text: &str,
+    reading: Option<&Reading>,
     from: usize,
     search: &Search,
     forward: bool,
     count: usize,
 ) -> Option<usize> {
-    let pattern = search.pattern.as_str();
-    if pattern.is_empty() {
-        return None;
-    }
-    let is_word = |c: char| crate::text::class(c, false) == Class::Word;
-    let mut matches = Vec::new();
-    let mut at = 0;
-    while let Some(offset) = text.get(at..).and_then(|rest| rest.find(pattern)) {
-        let start = at + offset;
-        let end = start + pattern.len();
-        let continues_word =
-            search.word_start && text[..start].chars().next_back().is_some_and(is_word);
-        let goes_on = search.word_end && text[end..].chars().next().is_some_and(is_word);
-        if !continues_word && !goes_on {
-            matches.push(start);
-        }
-        // Matches may overlap: go on one character further, not behind
-        // this match.
-        at = start + text[start..].chars().next().map_or(1, char::len_utf8);
-    }
+    let query = Query {
+        pattern: search.pattern.clone(),
+        word_start: search.word_start,
+        word_end: search.word_end,
+    };
+    let found = find::find_all(text, reading, &query);
+    let mut matches: Vec<usize> = found.into_iter().map(|range| range.start).collect();
+    matches.dedup();
     if matches.is_empty() {
         return None;
     }

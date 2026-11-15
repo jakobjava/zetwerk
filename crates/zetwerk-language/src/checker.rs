@@ -334,21 +334,28 @@ impl Checker {
         self.grammar = (by, grammar);
     }
 
+    /// Finds the dictionary and the grammar checker for `language`, if
+    /// they are not those already gone by. [`Checker::check`] does this
+    /// first; done before, [`Checker::speller`] is the one it will use.
+    pub fn prepare(&mut self, language: &str) {
+        if self.settings.spelling {
+            self.find_speller(language);
+        } else {
+            self.speller = None;
+        }
+        if self.settings.grammar {
+            self.find_grammar(language);
+        } else {
+            self.grammar = (String::new(), Grammar::Nothing);
+        }
+    }
+
     /// Checks what `job` asks for. Every answer goes to `report`, the
     /// last of them with `done` set. `stop` is asked between paragraphs
     /// whether to go on: if not, there is no last answer.
     pub fn check(&mut self, job: &Job, stop: &dyn Fn() -> bool, report: &mut dyn FnMut(Checked)) {
         self.round += 1;
-        if self.settings.spelling {
-            self.find_speller(&job.language);
-        } else {
-            self.speller = None;
-        }
-        if self.settings.grammar {
-            self.find_grammar(&job.language);
-        } else {
-            self.grammar = (String::new(), Grammar::Nothing);
-        }
+        self.prepare(&job.language);
         let text = job.source.text();
         let units = prose::units(job.source.root());
         let keys: Vec<Cow<str>> = units.iter().map(|unit| unit.key(text)).collect();

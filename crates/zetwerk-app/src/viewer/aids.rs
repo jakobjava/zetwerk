@@ -78,9 +78,26 @@ impl Viewer {
                 .map_or(0, crate::editor::Editor::cursor),
             self.document_revision,
         );
-        if self.numbered.as_ref().is_none_or(|(of, _)| *of != key) {
-            let numbered = self.lines_away().unwrap_or_default();
-            self.numbered = Some((key, numbered));
+        // Counted anew, too, when the pages were made again of the same
+        // text: where their lines are is forgotten then, and is found
+        // again by counting.
+        let forgotten = self.page_lines.borrow().is_empty();
+        if forgotten || self.numbered.as_ref().is_none_or(|(of, _)| *of != key) {
+            let typing = self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.mode() == crate::editor::Mode::Insert);
+            // The pages of this text are yet to come.
+            let awaited = self.compiled_revision != Some(self.revision);
+            match (self.lines_away(), &mut self.numbered) {
+                (Some(numbered), _) => self.numbered = Some((key, numbered)),
+                // After a key the pages are behind the text for a moment,
+                // and the lines cannot be counted. They are where they
+                // were, nearly always: the numbers stay, where otherwise
+                // they would go and come with every key.
+                (None, Some((of, _))) if typing || awaited => *of = key,
+                (None, _) => self.numbered = Some((key, Vec::new())),
+            }
         }
         let drawn = {
             let Some((_, numbered)) = &self.numbered else {

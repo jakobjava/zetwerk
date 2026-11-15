@@ -941,7 +941,11 @@ fn descend(
     target: u64,
     in_equation: bool,
 ) -> Option<Found> {
-    let in_equation = in_equation || node.kind() == SyntaxKind::Equation;
+    // What is written as it stands is that wherever it is: its
+    // characters are text, each with its place, in an equation too
+    // (where it can only be in something that is put into it).
+    let in_equation =
+        (in_equation || node.kind() == SyntaxKind::Equation) && node.kind() != SyntaxKind::Raw;
     if node.span() == span {
         return Some((offset..offset + node.len(), node.kind(), in_equation));
     }

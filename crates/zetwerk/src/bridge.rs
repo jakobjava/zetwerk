@@ -10,10 +10,11 @@ use zetwerk_app::keys;
 use zetwerk_app::sections::Way;
 use zetwerk_app::viewer::agent::{AgentEdits, Outcome};
 use zetwerk_app::viewer::export::{Exported, Format, Pages, Wanted, What};
+use zetwerk_app::viewer::notes::{Author, Listed, NoteAnchor as Anchor};
 use zetwerk_app::viewer::{Mode, Panes, Viewer};
 use zetwerk_mcp::{
-    Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, Place,
-    Selection,
+    Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, NewNote,
+    NoteAnchor, NoteAnswer, Place, Selection,
 };
 
 /// How long the window may take to answer something it can answer at once.
@@ -87,6 +88,52 @@ impl Bridge {
         let job = self.compiled(move |viewer| viewer.plan_export(&wanted))??;
         job.run().map_err(|why| format!("not exported: {why}"))
     }
+}
+
+/// Makes the change `what`, or proposes it, as an agent asked.
+fn made(
+    viewer: &mut Viewer,
+    what: ChangeKind,
+    expected: Option<u64>,
+    propose: bool,
+) -> Result<Outcome, String> {
+    match what {
+        ChangeKind::Replace { old, new, all } => {
+            viewer.agent_replace(&old, &new, all, expected, propose)
+        }
+        ChangeKind::Insert(text) => viewer.agent_insert(&text, expected, propose),
+        ChangeKind::ReplaceSelection(text) => {
+            viewer.agent_replace_selection(&text, expected, propose)
+        }
+        ChangeKind::MoveSection { line, direction } => {
+            let way = match direction {
+                Direction::Up => Way::Up,
+                Direction::Down => Way::Down,
+                Direction::Deeper => Way::Deeper,
+                Direction::Shallower => Way::Shallower,
+            };
+            viewer.agent_move_section(line, way, expected, propose)
+        }
+    }
+}
+
+/// A note as an agent is given it.
+fn listed_note(note: Listed) -> Value {
+    let said = |(by, text): (Author, String)| json!({ "by": by.name(), "text": text });
+    json!({
+        "id": note.id,
+        "file": note.file,
+        "line": note.line,
+        "column": note.column,
+        "text": note.text,
+        "note": note.note,
+        "by": note.by.name(),
+        "to_agent": note.to_agent,
+        "answers": note.answers.into_iter().map(said).collect::<Vec<Value>>(),
+        "resolved": note.resolved,
+        "detached": note.detached,
+        "proposals": note.proposals,
+    })
 }
 
 /// The pages `text` names, as an agent wrote them.
@@ -175,24 +222,15 @@ impl Editor for Bridge {
             what,
             expected_revision: expected,
             propose,
+            reason,
         } = change;
-        let outcome = self.now(move |viewer| match what {
-            ChangeKind::Replace { old, new, all } => {
-                viewer.agent_replace(&old, &new, all, expected, propose)
+        let outcome = self.now(move |viewer| {
+            let first = viewer.next_proposal_id();
+            let outcome = made(viewer, what, expected, propose);
+            if let (Ok(Outcome::Proposed { .. }), Some(reason)) = (&outcome, &reason) {
+                viewer.explain_proposals(first, reason);
             }
-            ChangeKind::Insert(text) => viewer.agent_insert(&text, expected, propose),
-            ChangeKind::ReplaceSelection(text) => {
-                viewer.agent_replace_selection(&text, expected, propose)
-            }
-            ChangeKind::MoveSection { line, direction } => {
-                let way = match direction {
-                    Direction::Up => Way::Up,
-                    Direction::Down => Way::Down,
-                    Direction::Deeper => Way::Deeper,
-                    Direction::Shallower => Way::Shallower,
-                };
-                viewer.agent_move_section(line, way, expected, propose)
-            }
+            outcome
         })??;
         match outcome {
             Outcome::Proposed { id, revision } => Ok(json!({
@@ -293,13 +331,24 @@ impl Editor for Bridge {
                 .proposals()
                 .iter()
                 .map(|proposal| {
-                    json!({
+                    let mut listed = json!({
                         "id": proposal.id,
                         "line": line(proposal.range.start),
                         "old_str": proposal.old,
                         "new_str": proposal.new,
                         "stale": proposal.stale,
-                    })
+                    });
+                    // Only what was given with it.
+                    let (reason, note) = viewer.proposal_about(proposal.id);
+                    if let Some(fields) = listed.as_object_mut() {
+                        if let Some(reason) = reason {
+                            fields.insert("reason".to_owned(), json!(reason));
+                        }
+                        if let Some(note) = note {
+                            fields.insert("note".to_owned(), json!(note));
+                        }
+                    }
+                    listed
                 })
                 .collect::<Vec<Value>>()
         })?;
@@ -364,7 +413,11 @@ impl Editor for Bridge {
     }
 
     fn sources(&self) -> Result<Value, String> {
-        let sources = self.now(|viewer| viewer.sources())??;
+        let (sources, cited) = self.now(|viewer| {
+            let sources = viewer.sources()?;
+            let cited = viewer.citation_counts()?;
+            Ok::<_, String>((sources, cited))
+        })??;
         let entries: Vec<Value> = sources
             .entries
             .iter()
@@ -374,13 +427,20 @@ impl Editor for Bridge {
                     .iter()
                     .map(|(name, value)| (name.clone(), json!(value)))
                     .collect();
-                json!({ "key": entry.key, "kind": entry.kind, "fields": fields })
+                let times = cited.get(&entry.key).copied().unwrap_or(0);
+                json!({ "key": entry.key, "kind": entry.kind, "fields": fields, "cited": times })
             })
+            .collect();
+        let twice: Vec<Value> = zetwerk_app::bib::same::pairs(&sources.entries)
+            .into_iter()
+            .map(|(first, second)| json!([sources.entries[first].key, sources.entries[second].key]))
             .collect();
         Ok(json!({
             "file": sources.path.display().to_string(),
             "listed_by_the_document": sources.listed,
+            "format": if sources.hayagriva { "hayagriva" } else { "bibtex" },
             "sources": entries,
+            "there_twice": twice,
         }))
     }
 
@@ -455,14 +515,21 @@ impl Editor for Bridge {
         }))
     }
 
-    fn add_source(&self, bibtex: &str) -> Result<Value, String> {
+    fn add_source(&self, bibtex: &str, anyway: bool) -> Result<Value, String> {
         let bibtex = bibtex.to_owned();
-        let (keys, revision) = self.now(move |viewer| {
+        let (added, revision) = self.now(move |viewer| {
             viewer
-                .agent_add_sources(&bibtex)
-                .map(|keys| (keys, viewer.state().revision))
+                .agent_add_sources_checked(&bibtex, anyway)
+                .map(|added| (added, viewer.state().revision))
         })??;
-        Ok(json!({ "keys": keys, "revision": revision }))
+        let there: Vec<Value> = added
+            .there
+            .iter()
+            .map(|there| {
+                json!({ "given": there.given, "source": there.line, "cited_as": there.cited_as })
+            })
+            .collect();
+        Ok(json!({ "keys": added.keys, "there_already": there, "revision": revision }))
     }
 
     fn save(&self) -> Result<Value, String> {
@@ -502,6 +569,45 @@ impl Editor for Bridge {
 
     fn screenshot(&self) -> Result<Vec<u8>, String> {
         encode(self.ask(Request::Screenshot, PATIENT)??)
+    }
+
+    fn notes(&self, include_resolved: bool) -> Result<Value, String> {
+        let (notes, revision) = self.now(move |viewer| {
+            (
+                viewer.notes_listed(include_resolved),
+                viewer.state().revision,
+            )
+        })?;
+        let notes: Vec<Value> = notes.into_iter().map(listed_note).collect();
+        Ok(json!({ "revision": revision, "notes": notes }))
+    }
+
+    fn add_note(&self, note: NewNote) -> Result<Value, String> {
+        let (id, line) = self.now(move |viewer| {
+            let anchor = match &note.anchor {
+                NoteAnchor::Text(text) => Anchor::Text(text),
+                NoteAnchor::Line(line) => Anchor::Line(*line),
+            };
+            viewer.agent_add_note(&note.text, anchor, note.expected_revision)
+        })??;
+        Ok(json!({ "id": id, "line": line }))
+    }
+
+    fn answer_note(&self, answer: NoteAnswer) -> Result<Value, String> {
+        let id = answer.id;
+        let proposal = self.now(move |viewer| {
+            let change = answer
+                .change
+                .as_ref()
+                .map(|(old, new)| (old.as_str(), new.as_str()));
+            viewer.agent_answer_note(answer.id, &answer.text, change, answer.expected_revision)
+        })??;
+        Ok(json!({ "answered": id, "proposal": proposal }))
+    }
+
+    fn resolve_note(&self, id: u64) -> Result<Value, String> {
+        self.now(move |viewer| viewer.agent_resolve_note(id))??;
+        Ok(json!({ "resolved": id }))
     }
 }
 
@@ -570,6 +676,7 @@ mod tests {
             ui_scale: None,
             inserts: Vec::new(),
             language: zetwerk_language::Settings::default(),
+            templates: None,
         }
     }
 
@@ -683,6 +790,7 @@ mod tests {
             },
             expected_revision,
             propose: false,
+            reason: None,
         }
     }
 
@@ -794,6 +902,155 @@ mod tests {
         );
         bridge.withdraw_proposal(id).unwrap();
         assert_eq!(bridge.proposals().unwrap()["proposals"], json!([]));
+    }
+
+    #[test]
+    fn notes_change_no_text_where_agents_only_propose() {
+        let session = session(TEXT, AgentEdits::Propose);
+        let bridge = &session.bridge;
+        bridge.send_keys(":6<CR>gqShorter?<CR>").unwrap();
+        let listed = bridge.notes(false).unwrap();
+        let revision = listed["revision"].as_u64().unwrap();
+        let id = listed["notes"][0]["id"].as_u64().unwrap();
+        let answer = |change: Option<(&str, &str)>, expected| NoteAnswer {
+            id,
+            text: "Yes.".to_owned(),
+            change: change.map(|(old, new)| (old.to_owned(), new.to_owned())),
+            expected_revision: expected,
+        };
+        // For a text there no longer is: refused.
+        let late = answer(Some(("lazy", "idle")), Some(revision + 1));
+        assert!(bridge.answer_note(late).is_err());
+        let note = NewNote {
+            text: "x".to_owned(),
+            anchor: NoteAnchor::Text("lazy".to_owned()),
+            expected_revision: Some(revision + 1),
+        };
+        assert!(bridge.add_note(note).is_err());
+        assert_eq!(
+            bridge.notes(false).unwrap()["notes"][0]["answers"],
+            json!([])
+        );
+
+        let answered = bridge
+            .answer_note(answer(Some(("lazy", "idle")), Some(revision)))
+            .unwrap();
+        let proposal = answered["proposal"].as_u64().unwrap();
+        assert_eq!(bridge.state().unwrap().revision, revision, "nothing made");
+        assert!(bridge.read_source(None, None).unwrap().contains("lazy dog"));
+        // Its text changed by the user, the proposal is stale: it can only
+        // be dropped.
+        bridge.send_keys("0wcwsleepy<Esc>").unwrap();
+        let proposals = bridge.proposals().unwrap();
+        assert_eq!(proposals["proposals"][0]["id"], json!(proposal));
+        assert_eq!(proposals["proposals"][0]["stale"], json!(true));
+        assert!(
+            bridge
+                .read_source(None, None)
+                .unwrap()
+                .contains("sleepy dog")
+        );
+    }
+
+    #[test]
+    fn notes_are_asked_and_answered_without_a_window() {
+        let session = session(TEXT, AgentEdits::Live);
+        let bridge = &session.bridge;
+        // The user asks about the third line.
+        bridge.send_keys(":3<CR>gqIs this right?<CR>").unwrap();
+        let listed = bridge.notes(false).unwrap();
+        let [question] = listed["notes"].as_array().unwrap().as_slice() else {
+            panic!("one note: {listed}");
+        };
+        assert_eq!(
+            (
+                &question["line"],
+                &question["text"],
+                &question["note"],
+                &question["to_agent"],
+                &question["by"]
+            ),
+            (
+                &json!(3),
+                &json!("The quick brown fox."),
+                &json!("Is this right?"),
+                &json!(true),
+                &json!("user")
+            )
+        );
+        let id = question["id"].as_u64().unwrap();
+
+        // Answered with a change, which waits for the user, with why.
+        let answered = bridge
+            .answer_note(NoteAnswer {
+                id,
+                text: "Foxes are not that quick.".to_owned(),
+                change: Some(("quick".to_owned(), "swift".to_owned())),
+                expected_revision: None,
+            })
+            .unwrap();
+        let proposal = answered["proposal"].as_u64().unwrap();
+        let proposals = bridge.proposals().unwrap();
+        assert_eq!(proposals["proposals"][0]["note"], json!(id));
+        assert_eq!(
+            proposals["proposals"][0]["reason"],
+            json!("Foxes are not that quick.")
+        );
+        assert_eq!(bridge.state().unwrap().proposals, 1);
+        let listed = bridge.notes(false).unwrap();
+        assert_eq!(listed["notes"][0]["proposals"], json!([proposal]));
+        assert_eq!(
+            listed["notes"][0]["answers"],
+            json!([{ "by": "agent", "text": "Foxes are not that quick." }])
+        );
+        assert!(
+            bridge
+                .read_source(Some(3), Some(3))
+                .unwrap()
+                .contains("quick")
+        );
+
+        // A reason given with a proposal of the agent's own.
+        let mut change = replace("lazy", "busy", None);
+        change.propose = true;
+        change.reason = Some("livelier".to_owned());
+        let other = bridge.change(change).unwrap()["proposal"].as_u64().unwrap();
+        let proposals = bridge.proposals().unwrap();
+        let reasons: Vec<&Value> = proposals["proposals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|listed| &listed["reason"])
+            .collect();
+        assert_eq!(
+            reasons,
+            [&json!("Foxes are not that quick."), &json!("livelier")]
+        );
+        bridge.withdraw_proposal(other).unwrap();
+
+        // Notes of the agent's own; resolved, they are listed on request.
+        let left = bridge
+            .add_note(NewNote {
+                text: "A source?".to_owned(),
+                anchor: NoteAnchor::Text("lazy dog".to_owned()),
+                expected_revision: None,
+            })
+            .unwrap();
+        assert_eq!(left["line"], json!(6));
+        let on_line = NewNote {
+            text: "x".to_owned(),
+            anchor: NoteAnchor::Line(40),
+            expected_revision: None,
+        };
+        assert!(bridge.add_note(on_line).is_err());
+        bridge.resolve_note(id).unwrap();
+        assert!(bridge.resolve_note(99).is_err());
+        let open = bridge.notes(false).unwrap();
+        assert_eq!(open["notes"].as_array().unwrap().len(), 1);
+        let all = bridge.notes(true).unwrap();
+        assert_eq!(all["notes"].as_array().unwrap().len(), 2);
+        // None of it is in the text.
+        assert!(!bridge.read_source(None, None).unwrap().contains("source?"));
     }
 
     /// Three small pages, the second of which is a figure.

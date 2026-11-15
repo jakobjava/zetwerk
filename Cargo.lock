@@ -9638,9 +9638,11 @@ name = "zetwerk-app"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "hayagriva",
  "notify",
  "pollster",
  "rayon",
+ "serde_json",
  "tiny-skia 0.12.0",
  "typst",
  "typst-layout",

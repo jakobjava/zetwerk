@@ -9,6 +9,7 @@
 //!   compile at a time and always prefers the newest snapshot it was given.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -97,8 +98,12 @@ pub struct CompileOutput {
 
 /// A background thread that compiles snapshots.
 pub struct Compiler {
-    requests: Option<Sender<(u64, ProjectWorld)>>,
+    requests: Option<Sender<(u64, u64, ProjectWorld)>>,
     results: Receiver<CompileOutput>,
+    /// How many compiles were asked for, and the number of the last one
+    /// that is answered (or was overtaken by one that is).
+    asked: AtomicU64,
+    answered: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -110,8 +115,10 @@ impl Compiler {
     /// regardless. `wake` is called from the compile thread whenever a
     /// result is ready to be collected with [`Compiler::poll`].
     pub fn spawn(threads: usize, wake: impl Fn() + Send + 'static) -> std::io::Result<Self> {
-        let (request_tx, request_rx) = mpsc::channel::<(u64, ProjectWorld)>();
+        let (request_tx, request_rx) = mpsc::channel::<(u64, u64, ProjectWorld)>();
         let (result_tx, result_rx) = mpsc::channel();
+        let answered = Arc::new(AtomicU64::new(0));
+        let done = Arc::clone(&answered);
         let thread = thread::Builder::new()
             .name("zetwerk-compile".into())
             .spawn(move || {
@@ -126,7 +133,7 @@ impl Compiler {
                     while let Ok(newer) = request_rx.try_recv() {
                         request = newer;
                     }
-                    let (revision, world) = request;
+                    let (number, revision, world) = request;
                     let start = Instant::now();
                     let compiled = match &pool {
                         Some(pool) => pool.install(|| compile(&world)),
@@ -142,12 +149,16 @@ impl Compiler {
                     if result_tx.send(output).is_err() {
                         break;
                     }
+                    // Only now: whoever sees this finds the result there.
+                    done.store(number, Ordering::Release);
                     wake();
                 }
             })?;
         Ok(Self {
             requests: Some(request_tx),
             results: result_rx,
+            asked: AtomicU64::new(0),
+            answered,
             thread: Some(thread),
         })
     }
@@ -158,8 +169,17 @@ impl Compiler {
         if let Some(requests) = &self.requests {
             // Sending only fails if the thread is gone, which `poll`
             // callers notice as results no longer arriving.
-            let _ = requests.send((revision, world));
+            let number = self.asked.fetch_add(1, Ordering::AcqRel) + 1;
+            let _ = requests.send((number, revision, world));
         }
+    }
+
+    /// Whether every compile asked for is finished, and its result (or
+    /// that of a newer one) there for [`Compiler::poll`]. Ask before
+    /// polling: what is finished between the two is then not missed.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.answered.load(Ordering::Acquire) == self.asked.load(Ordering::Acquire)
     }
 
     /// The newest finished compile, if any finished since the last call.

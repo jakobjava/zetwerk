@@ -7,13 +7,14 @@
 
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use typst::syntax::{FileId, Source};
 use zetwerk_core::{
     Buffer, DiskError, DiskStatus, Document, History, OpenError, Opened, Replace, StateId,
 };
-use zetwerk_vim::{Edit, Effect, Engine, Host, Place, Seek, Shown as ShownLine};
+use zetwerk_vim::{Edit, Effect, Engine, Host, Place, Reading, Seek, Shown as ShownLine};
 
 use crate::keys::{Key, KeyPress};
 
@@ -50,6 +51,8 @@ pub struct Editor {
     /// What the last key changed by walking the history (see
     /// [`Editor::stepped`]), and the revision of the text it is true of.
     stepped: Option<(u64, Vec<Range<usize>>)>,
+    /// What the text is read as, for searching it on the page.
+    read: crate::reading::Cache,
 }
 
 /// Something that shows the text in rows other than the source pane's:
@@ -114,6 +117,7 @@ impl Editor {
             rows: None,
             top: 0,
             stepped: None,
+            read: crate::reading::Cache::default(),
         };
         Ok((editor, opened))
     }
@@ -121,6 +125,7 @@ impl Editor {
     /// Handles a key press. `shown` is what the user sees the text on.
     pub fn key(&mut self, press: KeyPress, shown: &Shown) -> Typed {
         let before = self.document.revision();
+        let typing = self.engine.mode() == Mode::Insert;
         let history = (self.document.state(), self.document.history().len());
         // Only pages take the place of lines for `j` and `k`: in the
         // source, a line of the text is what they have always gone by.
@@ -140,6 +145,7 @@ impl Editor {
             failure: &mut self.failure,
             rows,
             shown_revision: before,
+            read: &self.read,
         };
         let length = host.document.text().len();
         let effects = self.engine.key(press, &mut host);
@@ -149,13 +155,67 @@ impl Editor {
             // what it was; all that can be off is the cursor.
             self.engine
                 .set_cursor(self.engine.cursor(), self.document.text());
-        } else if matches!(shown, Shown::Pages(_)) && self.document.text().len() < length {
-            self.tidy_equation();
+        } else if matches!(shown, Shown::Pages(_)) && self.stepped.is_none() {
+            // Not after an undo or a redo, which bring back what was
+            // there: nothing is tidied away from that or made of it, or
+            // redo would lead nowhere.
+            if self.document.text().len() < length {
+                self.tidy_equation();
+            }
+            if self.document.revision() != before || typing != (self.engine.mode() == Mode::Insert)
+            {
+                self.spell_out_names();
+            }
         }
         Typed {
             effects,
             changed: self.document.revision() != before,
         }
+    }
+
+    /// After a key on a page: letters typed together in the equation the
+    /// cursor is in that name nothing become the letters they are, each
+    /// by itself (`xy` becomes `x y`). Typst reads them as one name and
+    /// refuses the equation for it; whoever types them means a product.
+    /// The word still being typed is left: it may become `alpha`.
+    fn spell_out_names(&mut self) {
+        let typing = self.engine.mode() == Mode::Insert;
+        let source = &self.document.buffer().0;
+        let mut cursor = self.engine.cursor();
+        let Some(equation) = crate::typst_text::equation_at(source, cursor.saturating_sub(1))
+        else {
+            return;
+        };
+        // Only in an equation that is one. Where a `$` is missing or
+        // one too many, Typst reads the text between equations as
+        // equations, and the words there are no products of letters.
+        if !crate::typst_text::is_whole_equation(source, &equation) {
+            return;
+        }
+        let names = crate::typst_text::unknown_names(source, &equation, typing.then_some(cursor));
+        if names.is_empty() {
+            return;
+        }
+        let text = source.text();
+        let mut replaces = Vec::new();
+        // From the last: the bytes before it stay where they are.
+        for name in names.into_iter().rev() {
+            let Some(word) = text.get(name.clone()) else {
+                continue;
+            };
+            let spelled = crate::typst_text::spelled_out(word);
+            if name.end <= cursor {
+                cursor += spelled.len() - word.len();
+            } else if name.start < cursor {
+                cursor = name.start;
+            }
+            replaces.push(Replace::new(name, spelled.as_str()));
+        }
+        if let Err(err) = self.document.edit(&replaces, true) {
+            self.failure = Some(err.to_string());
+            return;
+        }
+        self.engine.set_cursor(cursor, self.document.text());
     }
 
     /// After something was deleted on a page: takes from the equation
@@ -170,7 +230,8 @@ impl Editor {
             let Some(equation) = crate::typst_text::equation_at(source, cursor) else {
                 return;
             };
-            if cursor <= equation.start {
+            if cursor <= equation.start || !crate::typst_text::is_whole_equation(source, &equation)
+            {
                 return;
             }
             let mut left = crate::typst_text::empty_scripts(source, &equation);
@@ -229,6 +290,7 @@ impl Editor {
             failure: &mut self.failure,
             rows: RowsOf::Pages(None),
             shown_revision: before,
+            read: &self.read,
         };
         self.engine.replace(&mut host, edits);
         match self.failure.take() {
@@ -272,10 +334,29 @@ impl Editor {
         self.engine.share(&other.engine);
     }
 
+    /// The Vim that edits the text, to ask what it did.
+    #[must_use]
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    /// What the text is read as on a page (see [`crate::reading`]).
+    #[must_use]
+    pub fn reading(&self) -> Arc<Reading> {
+        self.read
+            .get(self.document.revision(), &self.document.buffer().0)
+    }
+
     /// Whether no command is under way; see [`Engine::is_idle`].
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.engine.is_idle()
+    }
+
+    /// What can follow the keys typed so far; see [`Engine::following`].
+    #[must_use]
+    pub fn following(&self) -> Option<zetwerk_vim::Following> {
+        self.engine.following()
     }
 
     /// Counts the changes made to the text.
@@ -400,6 +481,7 @@ impl Editor {
             failure: &mut self.failure,
             rows,
             shown_revision,
+            read: &self.read,
         };
         ask(&mut self.engine, &host)
     }
@@ -638,6 +720,7 @@ impl Editor {
             failure: &mut self.failure,
             rows: RowsOf::Pages(None),
             shown_revision,
+            read: &self.read,
         };
         for key in keys.chain([press]) {
             self.engine.key(key, &mut host);
@@ -687,6 +770,8 @@ struct DocumentHost<'a> {
     rows: RowsOf<'a>,
     /// The revision of the text those rows are of.
     shown_revision: u64,
+    /// What the text is read as, kept between keys.
+    read: &'a crate::reading::Cache,
 }
 
 /// How often what a deletion left in an equation is cleared away: what
@@ -763,6 +848,12 @@ impl Host for DocumentHost<'_> {
 
     fn object(&self, name: char, at: usize, around: bool) -> Option<Range<usize>> {
         crate::typst_text::object(&self.document.buffer().0, name, at, around)
+    }
+
+    fn reading(&self) -> Option<Arc<Reading>> {
+        let source = &self.document.buffer().0;
+        matches!(self.rows, RowsOf::Pages(_))
+            .then(|| self.read.get(self.document.revision(), source))
     }
 
     fn expand(&self, at: usize) -> Option<(Range<usize>, String, usize)> {

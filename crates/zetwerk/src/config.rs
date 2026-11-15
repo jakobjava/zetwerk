@@ -274,6 +274,12 @@ fn path() -> Option<PathBuf> {
     Some(base.join("zetwerk/config.toml"))
 }
 
+/// Where the user's own starters for new documents are: the Typst files
+/// in `templates` beside the settings.
+pub fn templates() -> Option<PathBuf> {
+    path().map(|settings| settings.with_file_name("templates"))
+}
+
 /// Reads the settings. A file that is not there is no settings; one that
 /// cannot be read or understood is no settings and a complaint, to be
 /// shown to the user: the document should open all the same.

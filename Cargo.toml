@@ -36,6 +36,8 @@ typst-svg = "=0.15.1"
 typst-pdf = "=0.15.1"
 typst-ide = "=0.15.1"
 typst-syntax = "=0.15.1"
+# The version Typst reads bibliographies with, for Hayagriva files.
+hayagriva = "=0.10.1"
 comemo = "0.5.1"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd", "png-format"] }
 lexopt = "0.3"

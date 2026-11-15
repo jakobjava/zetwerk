@@ -354,6 +354,12 @@ fn quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// What means something in running text: what is typed for a setting
+/// of words is written with a backslash before each of these.
+const MARKS: &[char] = &[
+    '\\', '[', ']', '#', '$', '*', '_', '`', '<', '>', '@', '~', '/', '=', '-', '+',
+];
+
 /// What was typed for a setting, as it is written in the rule; `None`
 /// if it is nothing the setting can be.
 fn typed_value(free: Free, typed: &str) -> Option<String> {
@@ -371,15 +377,21 @@ fn typed_value(free: Free, typed: &str) -> Option<String> {
             (fine && known).then(|| format!("{number}{}", if own.is_empty() { unit } else { own }))
         }
         Free::Text => Some(quoted(typed)),
-        // Between brackets, with those of its own made harmless.
-        Free::Words => Some(format!(
-            "[{}]",
-            typed
-                .replace('\\', "\\\\")
-                .replace('[', "\\[")
-                .replace(']', "\\]")
-                .replace('#', "\\#")
-        )),
+        // Between brackets, with every mark that means something in
+        // running text made to mean nothing: a dollar sign there began
+        // an equation that never ended, and the document was no more.
+        Free::Words => {
+            let mut written = String::with_capacity(typed.len() + 2);
+            written.push('[');
+            for c in typed.chars() {
+                if MARKS.contains(&c) {
+                    written.push('\\');
+                }
+                written.push(c);
+            }
+            written.push(']');
+            Some(written)
+        }
         Free::Count => typed
             .parse::<usize>()
             .ok()
@@ -394,11 +406,21 @@ fn listed(setting: &Setting, written: &str) -> String {
     let choice = setting.choices.iter().find(|(_, value)| *value == written);
     match choice {
         Some((label, _)) => (*label).to_owned(),
-        None => written
-            .trim_matches('"')
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_owned(),
+        None => match written.strip_prefix('[').and_then(|w| w.strip_suffix(']')) {
+            // Words, as they were typed: without the backslashes that
+            // keep their marks from meaning anything.
+            Some(words) => {
+                let mut shown = String::with_capacity(words.len());
+                let mut chars = words.chars().peekable();
+                while let Some(c) = chars.next() {
+                    let escaped =
+                        c == '\\' && chars.peek().is_some_and(|next| MARKS.contains(next));
+                    shown.extend(if escaped { chars.next() } else { Some(c) });
+                }
+                shown
+            }
+            None => written.trim_matches('"').to_owned(),
+        },
     }
 }
 
@@ -424,7 +446,7 @@ impl Viewer {
             return;
         };
         let source = editor.source();
-        let items = SETTINGS
+        let mut items: Vec<(String, Target)> = SETTINGS
             .iter()
             .enumerate()
             .map(|(row, setting)| {
@@ -436,6 +458,8 @@ impl Viewer {
                 (format!("{}\t{now}", setting.name), Target::Choose(row))
             })
             .collect();
+        // Last, the styles: how headings, links and the rest look.
+        items.push(super::styles::manager_row(source));
         self.open_picker("document", items, chosen.min(SETTINGS.len() - 1));
     }
 
@@ -546,6 +570,50 @@ mod tests {
         assert_eq!(typed_value(Free::Count, "2").as_deref(), Some("2"));
         assert_eq!(typed_value(Free::Count, "many"), None);
         assert_eq!(typed_value(Free::No, "x"), None);
+    }
+
+    #[test]
+    fn what_is_typed_for_a_setting_keeps_the_document_whole() {
+        use std::sync::Arc;
+        use zetwerk_typst::{Environment, FontSet, Project};
+        let env = Environment::new(FontSet::Embedded);
+        for typed in [
+            "Price $5",
+            "a@b.c",
+            "*Draft*",
+            "- 1. = x // y",
+            "`code",
+            "<x>",
+            "\\",
+        ] {
+            let value = typed_value(Free::Words, typed).unwrap_or_default();
+            let text = format!("#set page(header: {value})\nBody.\n");
+            let project = Project::in_memory(
+                Arc::clone(&env),
+                std::path::PathBuf::from("/"),
+                "main.typ",
+                text.clone(),
+            )
+            .unwrap_or_else(|| panic!("a project"));
+            let compiled = zetwerk_typst::compile(&project.snapshot());
+            assert!(
+                compiled.errors.is_empty(),
+                "{text:?}: {:?}",
+                compiled.errors
+            );
+        }
+    }
+
+    #[test]
+    fn words_are_listed_as_they_were_typed() {
+        let head = SETTINGS
+            .iter()
+            .find(|setting| setting.name == "running head")
+            .unwrap_or_else(|| panic!("a running head"));
+        for typed in ["Draft [1]", "Price $5 \\ more", "a@b.c - 2"] {
+            let value = typed_value(Free::Words, typed).unwrap_or_default();
+            assert_eq!(listed(head, &value), typed, "{value}");
+        }
     }
 
     #[test]

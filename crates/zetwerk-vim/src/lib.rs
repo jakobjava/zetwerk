@@ -6,9 +6,14 @@
 //! plain strings.
 
 mod engine;
+pub mod find;
 pub mod keys;
 mod motion;
 mod object;
 mod text;
+mod took;
 
+pub use engine::Following;
 pub use engine::{Edit, Effect, Engine, Format, Host, Mode, Place, Seek, Shown};
+pub use find::{Query, Reading};
+pub use took::Took;

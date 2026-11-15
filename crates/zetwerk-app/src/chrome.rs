@@ -305,6 +305,30 @@ impl Chrome {
     }
 }
 
+impl Chrome {
+    /// What [`Chrome::render`] would make of `markup`, to be typeset on
+    /// another thread: only the text is taken here. The image is not
+    /// kept.
+    pub fn render_apart(
+        &mut self,
+        markup: &str,
+        scale: f64,
+    ) -> impl FnOnce() -> Option<Image> + Send + 'static {
+        self.project.set_main_text(markup);
+        let world = self.project.snapshot();
+        let id = Self::id(markup, scale);
+        move || {
+            let document = zetwerk_typst::compile(&world).document;
+            zetwerk_typst::forget_unused(UNUSED_ROUNDS);
+            let pixmap = zetwerk_render::render_page(document?.pages().first()?, scale);
+            Some(Image {
+                id,
+                pixmap: Arc::new(pixmap),
+            })
+        }
+    }
+}
+
 /// Finds the text item of `frame` that comes last, and notes where it
 /// ends and from where to where its line reaches down, in points.
 fn last_text(

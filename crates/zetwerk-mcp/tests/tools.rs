@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 use zetwerk_mcp::{
-    Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, Output,
-    Place, Selection, Tools, call, serve,
+    Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, NewNote,
+    NoteAnchor, NoteAnswer, Output, Place, Selection, Tools, call, serve,
 };
 
 /// An editor that records the keys it was sent and the changes it was
@@ -15,6 +15,8 @@ use zetwerk_mcp::{
 struct FakeEditor {
     keys: Mutex<Vec<String>>,
     changes: Mutex<Vec<Change>>,
+    notes: Mutex<Vec<NewNote>>,
+    answers: Mutex<Vec<NoteAnswer>>,
 }
 
 const PLAIN: Tools = Tools {
@@ -143,8 +145,8 @@ impl Editor for FakeEditor {
         Ok(json!({ "file": "refs.bib", "sources": [{ "key": "knuth1984" }] }))
     }
 
-    fn add_source(&self, bibtex: &str) -> Result<Value, String> {
-        Ok(json!({ "keys": [bibtex.len()] }))
+    fn add_source(&self, bibtex: &str, anyway: bool) -> Result<Value, String> {
+        Ok(json!({ "keys": [bibtex.len()], "anyway": anyway }))
     }
 
     fn figures(&self) -> Result<Value, String> {
@@ -163,6 +165,32 @@ impl Editor for FakeEditor {
 
     fn check_language(&self) -> Result<Value, String> {
         Ok(json!({ "dictionary": "en_GB", "issues": [{ "line": 1, "text": "teh" }] }))
+    }
+
+    fn notes(&self, include_resolved: bool) -> Result<Value, String> {
+        Ok(json!({ "notes": [{ "id": 1, "line": 4, "to_agent": true }], "all": include_resolved }))
+    }
+
+    fn add_note(&self, note: NewNote) -> Result<Value, String> {
+        let mut notes = self.notes.lock().map_err(|err| err.to_string())?;
+        notes.push(note);
+        Ok(json!({ "id": notes.len() }))
+    }
+
+    fn answer_note(&self, answer: NoteAnswer) -> Result<Value, String> {
+        if answer.id != 1 {
+            return Err(format!("there is no note {}", answer.id));
+        }
+        let proposal = answer.change.as_ref().map(|_| 5);
+        self.answers
+            .lock()
+            .map_err(|err| err.to_string())?
+            .push(answer);
+        Ok(json!({ "answered": 1, "proposal": proposal }))
+    }
+
+    fn resolve_note(&self, id: u64) -> Result<Value, String> {
+        Ok(json!({ "resolved": id }))
     }
 }
 
@@ -345,7 +373,15 @@ fn reading_tools_pass_on_what_was_asked() {
     );
     assert_eq!(
         answer(&socket, "add_source", &json!({ "bibtex": "@book{a,}" })),
-        Ok(json!({ "keys": [9] }))
+        Ok(json!({ "keys": [9], "anyway": false }))
+    );
+    assert_eq!(
+        answer(
+            &socket,
+            "add_source",
+            &json!({ "bibtex": "@book{a,}", "anyway": true })
+        ),
+        Ok(json!({ "keys": [9], "anyway": true }))
     );
     let targets =
         answer(&socket, "list_targets", &json!({})).map(|listed| listed["targets"].clone());
@@ -422,8 +458,9 @@ fn editing_tools_say_what_to_change_and_how() {
         answer(&socket, "edit_source", &edit),
         Ok(json!({ "applied": true, "revision": 8 }))
     );
-    let proposal =
-        json!({ "old_str": "a", "new_str": "b", "replace_all": true, "mode": "propose" });
+    let proposal = json!({
+        "old_str": "a", "new_str": "b", "replace_all": true, "mode": "propose", "reason": "shorter"
+    });
     assert_eq!(
         answer(&socket, "edit_source", &proposal),
         Ok(json!({ "applied": false, "revision": 8 }))
@@ -448,12 +485,16 @@ fn editing_tools_say_what_to_change_and_how() {
         what,
         expected_revision,
         propose,
+        reason: None,
     };
     assert_eq!(
         editor.changes.lock().map(|changes| changes.clone()).ok(),
         Some(vec![
             change(replace("fox", "cat", false), Some(7), false),
-            change(replace("a", "b", true), None, true),
+            Change {
+                reason: Some("shorter".to_owned()),
+                ..change(replace("a", "b", true), None, true)
+            },
             change(ChangeKind::Insert("x".to_owned()), None, false),
             change(ChangeKind::ReplaceSelection("y".to_owned()), None, false),
             change(moving(12, Direction::Up), Some(7), false),
@@ -478,6 +519,94 @@ fn editing_tools_say_what_to_change_and_how() {
     assert_eq!(
         answer(&socket, "withdraw_proposal", &json!({ "id": 4 })),
         Err("there is no proposal 4".to_owned())
+    );
+}
+
+#[test]
+fn notes_are_listed_left_answered_and_resolved() {
+    let (_scratch_socket, socket) = socket("notes");
+    let editor = Arc::new(FakeEditor::default());
+    let _server = serve(&socket, Arc::clone(&editor) as Arc<dyn Editor>, PLAIN)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    assert_eq!(
+        answer(&socket, "list_notes", &json!({})).map(|listed| listed["all"].clone()),
+        Ok(json!(false))
+    );
+    let all = json!({ "include_resolved": true });
+    assert_eq!(
+        answer(&socket, "list_notes", &all).map(|listed| listed["all"].clone()),
+        Ok(json!(true))
+    );
+
+    // A note goes on text, or on a line; on one of them.
+    let on_text = json!({ "note": "Cite this.", "anchor_text": "fox" });
+    assert_eq!(
+        answer(&socket, "add_note", &on_text),
+        Ok(json!({ "id": 1 }))
+    );
+    let on_line = json!({ "note": "Too long.", "line": 7, "expected_revision": 7 });
+    assert_eq!(
+        answer(&socket, "add_note", &on_line),
+        Ok(json!({ "id": 2 }))
+    );
+    for odd in [
+        json!({ "note": "x" }),
+        json!({ "note": "x", "anchor_text": "fox", "line": 3 }),
+        json!({ "anchor_text": "fox" }),
+    ] {
+        assert!(answer(&socket, "add_note", &odd).is_err(), "{odd}");
+    }
+    assert_eq!(
+        editor.notes.lock().map(|notes| notes.clone()).ok(),
+        Some(vec![
+            NewNote {
+                text: "Cite this.".to_owned(),
+                anchor: NoteAnchor::Text("fox".to_owned()),
+                expected_revision: None,
+            },
+            NewNote {
+                text: "Too long.".to_owned(),
+                anchor: NoteAnchor::Line(7),
+                expected_revision: Some(7),
+            },
+        ])
+    );
+
+    // An answer in words, or with a change; a change is both or none.
+    let words = json!({ "id": 1, "answer": "It is sourced." });
+    assert_eq!(
+        answer(&socket, "answer_note", &words),
+        Ok(json!({ "answered": 1, "proposal": null }))
+    );
+    let changed = json!({
+        "id": 1, "answer": "Shorter:", "old_str": "a", "new_str": "b", "expected_revision": 7
+    });
+    assert_eq!(
+        answer(&socket, "answer_note", &changed),
+        Ok(json!({ "answered": 1, "proposal": 5 }))
+    );
+    let half = json!({ "id": 1, "answer": "x", "old_str": "a" });
+    assert!(answer(&socket, "answer_note", &half).is_err());
+    assert_eq!(
+        answer(&socket, "answer_note", &json!({ "id": 3, "answer": "x" })),
+        Err("there is no note 3".to_owned())
+    );
+    let answered = editor.answers.lock().map(|answers| answers.clone()).ok();
+    assert_eq!(
+        answered.map(|answers| {
+            answers
+                .into_iter()
+                .map(|a| (a.change, a.expected_revision))
+                .collect::<Vec<_>>()
+        }),
+        Some(vec![
+            (None, None),
+            (Some(("a".to_owned(), "b".to_owned())), Some(7))
+        ])
+    );
+    assert_eq!(
+        answer(&socket, "resolve_note", &json!({ "id": 2 })),
+        Ok(json!({ "resolved": 2 }))
     );
 }
 

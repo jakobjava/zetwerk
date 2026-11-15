@@ -98,6 +98,12 @@ impl Service {
                             });
                         }
                         Message::Check(job) => {
+                            // The dictionary goes out before the answers
+                            // do: whoever has them can ask it at once.
+                            checker.prepare(&job.language);
+                            if let Ok(mut shared) = shared.lock() {
+                                *shared = checker.speller();
+                            }
                             let stop = || {
                                 waiting.borrow_mut().extend(request_rx.try_iter());
                                 waiting.borrow().iter().any(|message| match message {
@@ -235,7 +241,10 @@ mod tests {
             (checked.serial, checked.findings.len(), checked.done),
             (1, 1, true)
         );
-        assert_eq!(woken.load(Ordering::SeqCst), 1);
+        // The dictionary is there as soon as the answers are: `z=` on
+        // what was just marked once found none, when the thread had not
+        // yet come round to handing it out.
+        assert!(service.speller().is_some());
         // Once there is a dictionary it can be asked at once.
         let handle = service.handle().unwrap();
         assert!(
@@ -243,6 +252,9 @@ mod tests {
                 .check(job(2, "Good.", Scope::All))
                 .is_some_and(|c| c.findings.is_empty())
         );
+        // Woken once, for the answer that came: by now, for the thread
+        // wakes after it has handed an answer over.
+        assert_eq!(woken.load(Ordering::SeqCst), 1);
         let speller = service.speller().unwrap();
         assert!(speller.suggest("helo", 5).contains(&"hello".to_owned()));
         // Answers asked for by a handle go to the handle alone.

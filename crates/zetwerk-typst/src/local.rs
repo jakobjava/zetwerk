@@ -225,6 +225,15 @@ impl Region {
         self
     }
 
+    /// The byte of the whole text that byte `at` of the text cut down
+    /// to this region (with a lead of `lead` bytes) is; `None` if it is
+    /// in the rules or the lead.
+    #[must_use]
+    pub fn in_whole(&self, at: usize, lead: usize) -> Option<usize> {
+        let kept = at.checked_sub(self.rules + lead)?;
+        Some(self.kept.start.max(self.rules) + kept)
+    }
+
     /// Whether `span` is of a node with one of `numbers`.
     fn has(&self, numbers: Numbers, span: Span) -> Option<bool> {
         if span.is_detached() {
