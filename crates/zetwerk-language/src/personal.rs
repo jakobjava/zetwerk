@@ -29,18 +29,49 @@ fn listed(text: &str) -> BTreeSet<String> {
     words.map(str::to_owned).collect()
 }
 
-/// The words in the file at `path`; none if there is no such file.
-fn read(path: &Path) -> std::io::Result<BTreeSet<String>> {
+/// The text of the file at `path`; empty if there is no such file.
+fn read_text(path: &Path) -> std::io::Result<String> {
     match std::fs::read_to_string(path) {
-        Ok(text) => Ok(listed(&text)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(err) => Err(err),
     }
 }
 
-/// Makes the file at `path` list `words`, all of them or, if that
-/// fails, as it was.
-fn write(path: &Path, words: &BTreeSet<String>) -> std::io::Result<()> {
+/// The words in the file at `path`; none if there is no such file.
+fn read(path: &Path) -> std::io::Result<BTreeSet<String>> {
+    read_text(path).map(|text| listed(&text))
+}
+
+/// `text`, a list of words, made to list `words`: the lines of words no
+/// longer among them are taken out, the words new to it are added at
+/// the end, and every other line (comments, empty ones, the order the
+/// user gave them) stays as it is.
+fn relisted(text: &str, words: &BTreeSet<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut there = BTreeSet::new();
+    for line in text.split_inclusive('\n') {
+        let word = line.trim();
+        if word.is_empty() || word.starts_with('#') || words.contains(word) {
+            out.push_str(line);
+            there.insert(word);
+        }
+    }
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    for word in words.iter().filter(|word| !there.contains(word.as_str())) {
+        out.push_str(word);
+        out.push('\n');
+    }
+    out
+}
+
+/// Makes the file at `path` hold `text`, all of it or, if that fails,
+/// as it was. Where `path` is a link, the file it leads to is written;
+/// who may read and write it stays as it was.
+fn write(path: &Path, text: &str) -> std::io::Result<()> {
+    let path = &path.canonicalize().unwrap_or_else(|_| path.to_owned());
     let directory = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(directory)?;
     let mut name = path.file_name().unwrap_or_default().to_owned();
@@ -48,8 +79,9 @@ fn write(path: &Path, words: &BTreeSet<String>) -> std::io::Result<()> {
     let fresh = directory.join(name);
     let written = (|| {
         let mut file = std::fs::File::create(&fresh)?;
-        for word in words {
-            writeln!(file, "{word}")?;
+        file.write_all(text.as_bytes())?;
+        if let Ok(old) = std::fs::metadata(path) {
+            file.set_permissions(old.permissions())?;
         }
         file.sync_all()?;
         std::fs::rename(&fresh, path)?;
@@ -94,13 +126,17 @@ impl Personal {
         &mut self,
         change: impl FnOnce(&mut BTreeSet<String>) -> bool,
     ) -> std::io::Result<bool> {
-        let mut words = match &self.path {
-            Some(path) => read(path)?,
-            None => (*self.words).clone(),
+        let (text, mut words) = match &self.path {
+            Some(path) => {
+                let text = read_text(path)?;
+                let words = listed(&text);
+                (text, words)
+            }
+            None => (String::new(), (*self.words).clone()),
         };
         let changed = change(&mut words);
         if let (true, Some(path)) = (changed, &self.path) {
-            write(path, &words)?;
+            write(path, &relisted(&text, &words))?;
         }
         self.words = Arc::new(words);
         Ok(changed)
@@ -205,5 +241,46 @@ mod tests {
     #[test]
     fn comments_and_empty_lines_are_no_words() {
         assert_eq!(listed("# mine\n\n  Typst  \nzetwerk\n").len(), 2);
+    }
+
+    #[test]
+    fn what_the_user_wrote_in_the_list_stays_as_it_was() {
+        // `zg` rewrote the list as its words alone, sorted: the user's
+        // comments and order were lost, and a link to a list kept with
+        // the user's other settings became a file of its own.
+        let directory = scratch("kept");
+        let own = "# names\nZetwerk\n\n# terms of the trade\nkerning\nTypst";
+        let kept = directory.join("dotfiles-words.txt");
+        std::fs::write(&kept, own).unwrap();
+        let path = directory.join("words.txt");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::os::unix::fs::symlink(&kept, &path).unwrap();
+        }
+        #[cfg(not(unix))]
+        std::fs::copy(&kept, &path).unwrap();
+        let (mut personal, _) = Personal::open(path.clone());
+        assert!(personal.add("ligature").unwrap());
+        let added = format!("{own}\nligature\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), added);
+        assert!(personal.remove("kerning").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# names\nZetwerk\n\n# terms of the trade\nTypst\nligature\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(std::fs::symlink_metadata(&path).unwrap().is_symlink());
+            assert_eq!(
+                std::fs::read_to_string(&kept).unwrap(),
+                std::fs::read_to_string(&path).unwrap()
+            );
+            let mode = std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(directory);
     }
 }
