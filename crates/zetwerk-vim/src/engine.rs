@@ -91,6 +91,16 @@ pub trait Host {
         None
     }
 
+    /// Where typing begun at the start of a shown line goes (with `end`:
+    /// at its end), `at` being the byte its first place begins with (its
+    /// last one ends with): before (behind) marks there that show as
+    /// nothing and would take what is typed in, as the dollar signs of
+    /// an equation the line begins (ends) with. `I` and `A` ask.
+    fn line_edge(&self, at: usize, end: bool) -> usize {
+        let _ = end;
+        at
+    }
+
     /// Where and what to put into the text to begin a new paragraph (or
     /// item of a list) below the one byte `at` is in, or above it: the
     /// byte, the text, and how far into that text the cursor goes. `o`
@@ -3941,8 +3951,8 @@ impl Engine {
                     self.cursor = stop.end;
                 }
             }
-            'I' => self.cursor = line.start,
-            'A' => self.cursor = line.end,
+            'I' => self.cursor = host.line_edge(line.start, false),
+            'A' => self.cursor = host.line_edge(line.end, true),
             'o' | 'O' => {
                 let Some((at, with, within)) = host.open(self.cursor, c == 'o') else {
                     return c;

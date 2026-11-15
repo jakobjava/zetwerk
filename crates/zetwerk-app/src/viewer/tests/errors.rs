@@ -117,9 +117,10 @@ fn a_rule_broken_with_pages_on_screen_says_the_page_is_behind() {
 #[test]
 fn a_name_typed_behind_a_hash_and_left_is_taken_out_from_the_page() {
     let (mut viewer, directory) = editing("Some words.\n");
-    press(&mut viewer, "gsgs");
+    // Typed where the source is shown: on a page `#` asks what to put
+    // in, and what is left of it is text (see `names.rs`).
     viewer.editor.as_mut().unwrap().set_cursor(5);
-    press(&mut viewer, "i#xyz <Esc>");
+    press(&mut viewer, "i#xyz <Esc>gsgs");
     assert_ne!(problems(&mut viewer), Vec::<String>::new());
     let status = said(&viewer);
     assert!(
@@ -478,8 +479,8 @@ fn what_is_wrong_is_one_sentence_in_the_panel() {
 fn the_margin_says_what_is_wrong_in_the_same_words() {
     let text = "#set page(width: 300pt, height: 300pt)\nSome words.\n";
     let (mut viewer, directory) = editing(text);
-    press(&mut viewer, "gsgs");
-    press(&mut viewer, "/words<CR>i#xyz <Esc>");
+    // Typed where the source is shown (see above).
+    press(&mut viewer, "/words<CR>i#xyz <Esc>gsgs");
     landed(&mut viewer);
     assert_eq!(viewer.text(), Some(&*text.replace("words", "#xyz words")));
     let _ = viewer.scene(&|_| false);

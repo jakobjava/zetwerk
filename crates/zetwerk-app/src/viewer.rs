@@ -3196,6 +3196,7 @@ mod tests {
     #[path = "keys.rs"]
     mod keyboard;
     mod left_behind;
+    mod names;
     mod panels;
     mod parts;
     mod speed;

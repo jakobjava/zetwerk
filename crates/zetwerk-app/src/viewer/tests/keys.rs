@@ -50,7 +50,14 @@ fn deleting_on_a_page_never_cuts_markup_in_two() {
         ("ab $x$ e.\n", "x$", "d2h", "a$x$ e.\n"),
         ("ab $x$ e.\n", "x$", "X", "ab$x$ e.\n"),
         ("one *two* three.\n", "one", "dft", "*wo* three.\n"),
-        ("one *two* three.\n", "one", "ctwX<Esc>", "X*wo* three.\n"),
+        // (A letter typed against the star would make it a character:
+        // the function says it then.)
+        (
+            "one *two* three.\n",
+            "one",
+            "ctwX<Esc>",
+            "X#strong[wo] three.\n",
+        ),
         ("one *two* three.\n", "one", "vfwd", "*o* three.\n"),
         ("a $x + y$ b.\n", "a $", "dfx", "$ + y$ b.\n"),
         ("Hello *world* foo.\n", "world", "d2w", "Hello **foo.\n"),

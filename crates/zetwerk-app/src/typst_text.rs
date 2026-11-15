@@ -665,11 +665,28 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         // Over the quotation mark that ends text in an equation.
         Ground::Str if c == '"' && ends_text() && is_in_equation(source, at) => return None,
         Ground::Str if matches!(c, '"' | '\\') => return plain(format!("\\{c}")),
+        // What cannot be in the name of a label ends the label: it goes
+        // behind it, a blank too. In it, the label would be left open.
+        Ground::Name
+            if !(typst::syntax::is_id_continue(c) || matches!(c, ':' | '.'))
+                && let Some(end) = label_around(source, at) =>
+        {
+            let (range, with, within) =
+                typed(source, end, c).unwrap_or((end..end, c.to_string(), c.len_utf8()));
+            let rest = text.get(at..range.start)?;
+            let within = rest.len() + within;
+            return Some((at..range.end, format!("{rest}{with}"), within));
+        }
         Ground::Str | Ground::Name | Ground::Raw => return plain(c.to_string()),
         // A dollar sign typed in an equation ends it: the cursor goes
         // behind the one that closes it, as over one right behind it.
         Ground::Math if c == '$' => {
             let equation = equation_at(source, at)?;
+            // In one with nothing in it yet, the sign again is the sign
+            // itself, as in a price: `$$5` shows "$5".
+            if equation == (at.saturating_sub(1)..at + 1) {
+                return Some((equation, "\\$".to_owned(), 2));
+            }
             let rest = text.get(at..equation.end)?;
             let over = rest.len() > 1 && rest.ends_with('$');
             return (over && is_whole_equation(source, &equation))
@@ -690,6 +707,41 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         Ground::Math | Ground::Code => return None,
     }
     let escaped = || plain(format!("\\{c}"));
+    // A label put in with nothing in it, left with something that cannot
+    // be in its name: it goes, and that is typed in its place.
+    if text.get(at.saturating_sub(1)..at + 1) == Some("<>")
+        && !before[..at - 1].ends_with('\\')
+        && !(typst::syntax::is_id_continue(c) || matches!(c, ':' | '.'))
+    {
+        let (range, with, within) =
+            typed(source, at + 1, c).unwrap_or((at + 1..at + 1, c.to_string(), c.len_utf8()));
+        if range.start == at + 1 {
+            return Some((at - 1..range.end, with, within));
+        }
+    }
+    // Before strong text a letter would make its first mark a character
+    // like any other: the function says it, then.
+    if c.is_alphanumeric()
+        && let Some((range, function)) = set_off_from(source, at)
+    {
+        let body = text.get(range.start + 1..range.end - 1)?;
+        return Some((range, format!("{c}#{function}[{body}]"), c.len_utf8()));
+    }
+    // Behind a reference, and behind the full stop that ends a sentence
+    // with one, what would be more of its name is text: the reference was
+    // chosen from the list, or stood there, and is whole.
+    let reference = behind.is_some_and(|leaf| {
+        leaf.kind() == SyntaxKind::RefMarker
+            || (leaf.kind() == SyntaxKind::Text
+                && leaf.leaf_text().chars().all(|c| matches!(c, '.' | ':'))
+                && leaf.prev_sibling().is_some_and(|reference| {
+                    matches!(reference.kind(), SyntaxKind::Ref | SyntaxKind::RefMarker)
+                        && reference.range().end == leaf.range().start
+                }))
+    });
+    if reference && typst::syntax::is_id_continue(c) {
+        return escaped();
+    }
     match behind.map(|leaf| leaf.kind()) {
         // After `#`, a name says what is meant; anything else, that the
         // sign itself is.
@@ -700,21 +752,6 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
             return Some((at - 1..at, with, within + 2));
         }
         Some(SyntaxKind::Hash) => return None,
-        // The names of code and of what is referred to go on.
-        Some(SyntaxKind::Ident) if matches!(c, '_' | '[' | '(') => return None,
-        // Unless the name is that of a label there, and no other label's
-        // begins with it and `c`: the reference is whole, and `c` is text
-        // behind it.
-        Some(SyntaxKind::RefMarker)
-            if (c.is_alphanumeric() || matches!(c, '_' | '-'))
-                && behind.is_some_and(|marker| {
-                    let name = text[marker.range()].trim_start_matches('@');
-                    text.contains(&format!("<{name}>")) && !text.contains(&format!("<{name}{c}"))
-                }) =>
-        {
-            return escaped();
-        }
-        Some(SyntaxKind::RefMarker) if c == '_' => return None,
         // Behind a call (a footnote, a table), `(` would call what it
         // gives.
         Some(SyntaxKind::RightParen | SyntaxKind::RightBracket | SyntaxKind::RightBrace)
@@ -746,17 +783,160 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
     }
     let line = before.rfind('\n').map_or(0, |found| found + 1);
     let begins_line = before[line..].trim().is_empty();
-    match c {
+    let meant = match c {
         // An equation begun is one closed: a dollar sign alone takes all
         // that follows it in its paragraph for mathematics.
         '$' if last != Some('\\') => Some((at..at, "$$".to_owned(), 1)),
-        '*' | '_' | '`' | '<' | '[' | ']' | '\\' | '~' => escaped(),
-        '@' if last.is_some_and(char::is_alphanumeric) => escaped(),
-        // Two of them begin a comment; one before a line, a term.
+        // What `#` and `@` begin is asked for from a list (see
+        // [`hash_asked`]): until something is chosen from it, what is
+        // typed is shown as typed, and stays so where nothing is.
+        '*' | '_' | '`' | '<' | '[' | ']' | '\\' | '~' | '@' | '#' => escaped(),
+        // Two of them begin a comment; one before a line, a term. Behind
+        // the star that ends strong text, one would end a comment.
         '/' if begins_line || (before.ends_with('/') && !before.ends_with("\\/")) => escaped(),
+        '/' if before.ends_with('*') && !before.ends_with("\\*") => escaped(),
         '=' | '-' | '+' if goes_on(text, at) => escaped(),
+        // So do a number and a full stop with a blank behind them: a
+        // numbered list.
+        ' ' if numbered(text, at) => Some((at - 1..at, "\\. ".to_owned(), 3)),
         _ => None,
+    };
+    sealed(source, at, c, meant)
+}
+
+/// Whether the line of byte `at` of `text`, up to it, is a number and a
+/// full stop, and goes on a paragraph begun on the line before it.
+fn numbered(text: &str, at: usize) -> bool {
+    let line = text[..at].rfind('\n').map_or(0, |found| found + 1);
+    let begun = &text[line..at];
+    let indent = begun.len() - begun.trim_start().len();
+    let number = begun.trim_start().strip_suffix('.');
+    number.is_some_and(|number| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
+        && goes_on(text, line + indent)
+}
+
+/// What typing `c` at byte `at` of `source` puts in, `meant` being what
+/// it does apart from code that may stand right before: there, what
+/// would be read as more of that code (a letter behind `#sym.alpha`, a
+/// bracket behind a call) comes behind a semicolon, which ends the code
+/// and shows as nothing.
+fn sealed(
+    source: &Source,
+    at: usize,
+    c: char,
+    meant: Option<(Range<usize>, String, usize)>,
+) -> Option<(Range<usize>, String, usize)> {
+    let text = source.text();
+    let Some(code) = code_behind(source, at) else {
+        return meant;
+    };
+    let (range, with, within) = meant
+        .clone()
+        .unwrap_or((at..at, c.to_string(), c.len_utf8()));
+    if range != (at..at) {
+        return meant;
     }
+    // A semicolon there already: what is typed goes behind it.
+    if code.end == at && text[at..].starts_with(';') {
+        return Some((at..at + 1, format!(";{with}"), 1 + within));
+    }
+    if !goes_on_code(text.get(code.start..at)?, &with) {
+        return meant;
+    }
+    let between = text.get(code.end..at)?;
+    Some((
+        code.end..at,
+        format!(";{between}{with}"),
+        1 + between.len() + within,
+    ))
+}
+
+/// Whether `then`, put right behind `code` in running text (a `#` and an
+/// expression, maybe a full stop), would be read as more of the
+/// expression.
+#[must_use]
+pub fn goes_on_code(code: &str, then: &str) -> bool {
+    let joined = format!("{code}{then}");
+    let read = typst::syntax::parse(&joined);
+    let mut read = read.children();
+    let expression = code.trim_end_matches('.').len();
+    match (read.next(), read.next()) {
+        (Some(hash), Some(read)) => {
+            hash.kind() == SyntaxKind::Hash && hash.len() + read.len() > expression
+        }
+        _ => false,
+    }
+}
+
+/// The code put into running text that ends at byte `at` of `source`, or
+/// one full stop before it (`#x.`): from its `#` to its end.
+fn code_behind(source: &Source, at: usize) -> Option<Range<usize>> {
+    let text = source.text();
+    let end = if text.get(..at)?.ends_with('.') {
+        at - 1
+    } else {
+        at
+    };
+    let mut node = LinkedNode::new(source.root()).leaf_at(end, Side::Before)?;
+    while let Some(parent) = node
+        .parent()
+        .filter(|parent| parent.kind() != SyntaxKind::Markup)
+    {
+        node = parent.clone();
+    }
+    if node.range().end != end || node.kind() == SyntaxKind::Hash {
+        return None;
+    }
+    let hash = node
+        .prev_sibling()
+        .filter(|hash| hash.kind() == SyntaxKind::Hash && hash.range().end == node.range().start)?;
+    Some(hash.range().start..end)
+}
+
+/// The strong or emphasised text that begins at byte `at` of `source`
+/// with its mark and is closed, and the function that writes it so.
+fn set_off_from(source: &Source, at: usize) -> Option<(Range<usize>, &'static str)> {
+    let mark = LinkedNode::new(source.root()).leaf_at(at, Side::After)?;
+    let marked = mark.parent()?;
+    let (kind, function) = match marked.kind() {
+        SyntaxKind::Strong => (SyntaxKind::Star, "strong"),
+        SyntaxKind::Emph => (SyntaxKind::Underscore, "emph"),
+        _ => return None,
+    };
+    let closed = mark.kind() == kind && marked.range().start == at && closing(marked, kind) > 0;
+    closed.then(|| (marked.range(), function))
+}
+
+/// The end of the label that byte `at` of `source` is in.
+fn label_around(source: &Source, at: usize) -> Option<usize> {
+    let (chain, _) = containing(source, at);
+    let label = chain
+        .last()
+        .filter(|node| node.kind() == SyntaxKind::Label)?;
+    Some(label.range().end)
+}
+
+/// The byte of the backslash of the `\#` in running text that what
+/// stands between it and byte `at` of `source` is typed behind, to ask
+/// for what to put in: a name (letters, digits, `_`, `-` and full stops,
+/// beginning with a letter), or nothing yet. Typed on a page, `#` is
+/// written so (see [`typed`]): until something is chosen, it is what was
+/// typed.
+#[must_use]
+pub fn hash_asked(source: &Source, at: usize) -> Option<usize> {
+    let text = source.text();
+    let before = text.get(..at)?;
+    let sign = before
+        .trim_end_matches(|c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .len();
+    let name = &before[sign..];
+    let hash = sign.checked_sub(2)?;
+    if !before[..sign].ends_with("\\#") || name.starts_with(|c: char| !c.is_alphabetic()) {
+        return None;
+    }
+    let escape = LinkedNode::new(source.root()).leaf_at(hash, Side::After)?;
+    let written = escape.kind() == SyntaxKind::Escape && escape.range() == (hash..sign);
+    (written && ground(source, hash) == Ground::Markup).then_some(hash)
 }
 
 /// Where the label ends that stands behind an equation, byte `at` of
@@ -1404,6 +1584,43 @@ pub fn equation_at(source: &Source, at: usize) -> Option<Range<usize>> {
         .map(LinkedNode::range)
 }
 
+/// Where typing begun at the start of a line of a page goes (with `end`:
+/// at its end), `at` being the byte the first thing it shows begins with
+/// (the last ends with): before (behind) an equation in the line that
+/// only its dollar sign parts from there. The page puts what is typed
+/// there beside the equation, not in it. An equation that stands by
+/// itself is all of its line: typing goes into it.
+#[must_use]
+pub fn line_edge(source: &Source, at: usize, end: bool) -> usize {
+    let text = source.text();
+    let inside = if end { at.saturating_sub(1) } else { at };
+    let Some(equation) = equation_at(source, inside) else {
+        return at;
+    };
+    let body = text
+        .get(equation.start + 1..equation.end.saturating_sub(1))
+        .unwrap_or("");
+    let alone = body.starts_with(char::is_whitespace) && body.ends_with(char::is_whitespace);
+    if alone || at <= equation.start || at >= equation.end {
+        return at;
+    }
+    if end
+        && text
+            .get(at..equation.end)
+            .is_some_and(|rest| rest.trim() == "$")
+    {
+        equation.end
+    } else if !end
+        && text
+            .get(equation.start..at)
+            .is_some_and(|lead| lead.trim() == "$")
+    {
+        equation.start
+    } else {
+        at
+    }
+}
+
 /// The equation that begins at byte `start`, as whoever wrote it sees
 /// it. That is as Typst reads it, unless something in it that is not
 /// closed (a string, say) takes in what comes after its paragraph, to
@@ -1494,6 +1711,18 @@ pub fn deleted_on_page(source: &Source, range: &Range<usize>) -> Vec<Range<usize
             kept(&child, range, math, found);
         }
     }
+    // Never half of a character written with a backslash (`\#`): the
+    // backslash left alone would take what follows it.
+    let root = LinkedNode::new(source.root());
+    let escape = |at: usize, side: Side| {
+        let leaf = root.leaf_at(at, side)?;
+        let escape = leaf.range();
+        (leaf.kind() == SyntaxKind::Escape && escape.start < at && at < escape.end)
+            .then_some(escape)
+    };
+    let start = escape(range.start, Side::After).map_or(range.start, |escape| escape.start);
+    let end = escape(range.end, Side::Before).map_or(range.end, |escape| escape.end);
+    let range = &(start..end);
     let mut found = Vec::new();
     kept(&LinkedNode::new(source.root()), range, false, &mut found);
     found.sort_unstable();
@@ -1566,11 +1795,19 @@ fn scripts_in(node: &LinkedNode, text: &str, end: usize, found: &mut Vec<Range<u
 /// What Backspace takes at byte `at` of `source` where it is in a place
 /// of an equation that nothing was filled into: the mark that raises or
 /// lowers nothing, with its brackets; a call all of whose arguments are
-/// empty.
+/// empty. And anywhere a character written with a backslash, whole.
 #[must_use]
 pub fn unmake(source: &Source, at: usize) -> Option<(Range<usize>, String)> {
     let text = source.text();
     let gone = |range: Range<usize>| Some((range, String::new()));
+    // A character written with a backslash (`\#`) goes whole: the
+    // backslash left alone would take what follows it.
+    let behind = LinkedNode::new(source.root()).leaf_at(at, Side::Before);
+    if let Some(escape) = behind.filter(|leaf| {
+        leaf.kind() == SyntaxKind::Escape && leaf.range().end == at && leaf.len() > 1
+    }) {
+        return gone(escape.range());
+    }
     // The last row of a table, if nothing is in it: the cursor goes to
     // the end of the cell before it.
     if let Some(table) = table_at(source, at)
@@ -2337,7 +2574,8 @@ pub const TEXT_INSERTS: &[Insert] = &[
     block_of("terms", "", "/ |: "),
     in_line("footnote", "fn", "#footnote[|]"),
     in_line("link", "link", "#link(\"|\")[]"),
-    in_line("reference", "", "@|"),
+    // Shown as itself until what it refers to is chosen from the list.
+    in_line("reference", "", "\\@|"),
     in_line("label", "", "<|>"),
     in_line("citation", "", "#cite(<|>)"),
     block_of("code", "code", "```|\n```"),
@@ -2661,8 +2899,10 @@ mod tests {
         assert_eq!(typing("a |", 'b'), None);
         // An address is no reference; a reference is one.
         assert_eq!(typing("me|", '@').as_deref(), Some("me\\@|"));
-        assert_eq!(typing("see |", '@'), None);
-        assert_eq!(typing("see @fig|", '_'), None);
+        // What a reference is to is chosen from a list: until then, it
+        // is what was typed.
+        assert_eq!(typing("see |", '@').as_deref(), Some("see \\@|"));
+        assert_eq!(typing("see @fig|", '_').as_deref(), Some("see @fig\\_|"));
         // No comments by accident.
         assert_eq!(typing("a /|", '/').as_deref(), Some("a /\\/|"));
         assert_eq!(typing("a |", '/'), None);
@@ -2670,18 +2910,133 @@ mod tests {
         assert_eq!(typing("one\n\n|", '='), None);
         assert_eq!(typing("one\n|two", '=').as_deref(), Some("one\n\\=|two"));
         assert_eq!(typing("- one\n|", '-'), None);
+        // A numbered list where a paragraph begins, not in one.
+        assert_eq!(typing("one\n\n1.|", ' '), None);
+        assert_eq!(typing("one\n12.|", ' ').as_deref(), Some("one\n12\\. |"));
+        assert_eq!(typing("one\nab.|", ' '), None);
     }
 
     #[test]
     fn the_hash_asks_or_is_itself() {
-        assert_eq!(typing("a |", '#'), None);
+        assert_eq!(typing("a |", '#').as_deref(), Some("a \\#|"));
         assert_eq!(typing("a #|", 'f'), None);
         assert_eq!(typing("number #|", '1').as_deref(), Some("number \\#1|"));
         assert_eq!(typing("a #|", ' ').as_deref(), Some("a \\# |"));
         assert_eq!(typing("a #|", '*').as_deref(), Some("a \\#\\*|"));
         // What the sign begins is begun behind it.
         assert_eq!(typing("a #|", '$').as_deref(), Some("a \\#$|$"));
-        assert_eq!(typing("#my|", '_'), None);
+        assert_eq!(typing("#my|", '_').as_deref(), Some("#my\\_|"));
+    }
+
+    #[test]
+    fn what_is_typed_behind_a_name_is_not_more_of_it() {
+        // Code put into the text: a semicolon ends it, and shows as
+        // nothing.
+        assert_eq!(
+            typing("a #sym.alpha|", 'b').as_deref(),
+            Some("a #sym.alpha;b|")
+        );
+        assert_eq!(
+            typing("a #sym.alpha|", '(').as_deref(),
+            Some("a #sym.alpha;(|")
+        );
+        assert_eq!(
+            typing("a #sym.alpha|", '-').as_deref(),
+            Some("a #sym.alpha;-|")
+        );
+        assert_eq!(
+            typing("a #sym.alpha.|", 'b').as_deref(),
+            Some("a #sym.alpha;.b|")
+        );
+        assert_eq!(
+            typing("#datetime.today().display().|", 'x').as_deref(),
+            Some("#datetime.today().display();.x|")
+        );
+        assert_eq!(typing("a #5|", 'p').as_deref(), Some("a #5;p|"));
+        assert_eq!(typing("a #sym.alpha;|b", 'c'), None);
+        assert_eq!(
+            typing("a #sym.alpha|;b", 'c').as_deref(),
+            Some("a #sym.alpha;c|b")
+        );
+        assert_eq!(
+            typing("a #sym.alpha|;b", ' ').as_deref(),
+            Some("a #sym.alpha; |b")
+        );
+        // What is not read as more of it is typed as it is.
+        assert_eq!(typing("a #sym.alpha|", ' '), None);
+        assert_eq!(typing("a #sym.alpha|", '.'), None);
+        assert_eq!(typing("a #f()|", 'x'), None);
+        assert_eq!(typing("a #strong[b]|", 'x'), None);
+        // A reference, and one that ends a sentence.
+        assert_eq!(
+            typing("see @intro|", 's').as_deref(),
+            Some("see @intro\\s|")
+        );
+        assert_eq!(typing("see @intro|", '.'), None);
+        assert_eq!(
+            typing("see @intro.|", 'x').as_deref(),
+            Some("see @intro.\\x|")
+        );
+        assert_eq!(typing("see @intro. |", 'x'), None);
+        // In a label, what cannot be in a name ends it.
+        assert_eq!(typing("a <in|>", ' ').as_deref(), Some("a <in> |"));
+        assert_eq!(typing("a <in|>", '*').as_deref(), Some("a <in>\\*|"));
+        assert_eq!(typing("a <in|>", 't').as_deref(), Some("a <int|>"));
+        assert_eq!(typing("a <in|>", ':').as_deref(), Some("a <in:|>"));
+        // One with nothing in it goes.
+        assert_eq!(typing("a <|> b", ' ').as_deref(), Some("a  | b"));
+        assert_eq!(typing("a <|>", 'x'), None);
+    }
+
+    #[test]
+    fn a_letter_before_strong_text_keeps_its_marks() {
+        assert_eq!(
+            typing("one |*two* three", 'X').as_deref(),
+            Some("one X|#strong[two] three")
+        );
+        assert_eq!(
+            typing("one |_two_ three", 'X').as_deref(),
+            Some("one X|#emph[two] three")
+        );
+        assert_eq!(typing("one |*two* three", ' '), None);
+        // Not one that is not closed: no marks to keep.
+        assert_eq!(typing("one |*two", 'X'), None);
+        // Behind it, a slash would end a comment that was never begun.
+        assert_eq!(typing("one *two*|", '/').as_deref(), Some("one *two*\\/|"));
+    }
+
+    #[test]
+    fn a_dollar_sign_typed_twice_is_itself() {
+        assert_eq!(typing("costs |", '$').as_deref(), Some("costs $|$"));
+        assert_eq!(typing("costs $|$", '$').as_deref(), Some("costs \\$|"));
+        // Behind something in the equation, it ends the equation (it is
+        // typed over the one that closes it).
+        assert_eq!(typing("a $x|$ b", '$'), None);
+    }
+
+    #[test]
+    fn a_hash_typed_asks_until_something_is_chosen() {
+        let asked = |text: &str| {
+            let at = text.find('|')?;
+            hash_asked(&source(&text.replacen('|', "", 1)), at)
+        };
+        assert_eq!(asked("a \\#|"), Some(2));
+        assert_eq!(asked("a \\#sym.al|"), Some(2));
+        assert_eq!(asked("word\\#foot|"), Some(4));
+        // Not what is no name, nor a sign that is not written so.
+        assert_eq!(asked("a \\#1|"), None);
+        assert_eq!(asked("a \\# x|"), None);
+        assert_eq!(asked("a #sym|"), None);
+        assert_eq!(asked("a \\\\#x|"), None);
+        assert_eq!(asked("$\\#x|$"), None);
+        // Backspace takes the sign whole, as it shows.
+        let unmade = |text: &str| {
+            after(text, |source, at| {
+                unmake(source, at).map(|(range, with)| (range, with, 0))
+            })
+        };
+        assert_eq!(unmade("a \\#|").as_deref(), Some("a |"));
+        assert_eq!(unmade("a \\#x|"), None);
     }
 
     #[test]
