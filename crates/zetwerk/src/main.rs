@@ -34,7 +34,8 @@ works on that document without a window, unless a window has it open.
 Settings are read from ~/.config/zetwerk/config.toml:
   [ai]
   edit_mode = \"live\"      or \"propose\": agents' changes wait for you
-  save = false            whether agents may write the file
+  save = false            whether agents may write the file (unset: only
+                          where no window shows it)
   [view]
   layout = \"split\"        or \"source\", \"page\"
   slides = false          one page at a time, whole
@@ -240,10 +241,12 @@ fn run() -> Result<(), String> {
         // Without a runtime directory, or if the socket cannot be set up,
         // the window works as usual; agents just cannot reach it.
         server = zetwerk_mcp::socket_path().and_then(|socket| {
-            let editor = Arc::new(Bridge::new(handle.clone()));
+            let save = agents_save(&config.ai, true);
+            let editor = Arc::new(Bridge::new(handle.clone()).offering(true, save));
             let tools = zetwerk_mcp::Tools {
-                save: config.ai.save,
+                save,
                 development: args.dev,
+                headless: false,
             };
             zetwerk_mcp::serve(&socket, editor, tools).ok()
         });
@@ -418,11 +421,14 @@ fn mcp(args: &Args) -> Result<(), String> {
     let options = options(args, &config, path, font_set, None)?;
     match headless::spawn(&options) {
         Ok((handle, thread)) => {
-            let editor = Arc::new(Bridge::new(handle.clone()));
-            // There is no window to save in: the agent may.
+            // There is no window to save in: the agent may, unless the
+            // user said agents may not.
+            let save = agents_save(&config.ai, false);
+            let editor = Arc::new(Bridge::new(handle.clone()).offering(false, save));
             let tools = zetwerk_mcp::Tools {
-                save: true,
+                save,
                 development: false,
+                headless: true,
             };
             let served = zetwerk_mcp::serve_stdio(editor, tools);
             handle.send(Request::Quit);
@@ -442,6 +448,13 @@ fn mcp(args: &Args) -> Result<(), String> {
         }
         Err(headless::OpenError::Other(why)) => Err(why),
     }
+}
+
+/// Whether agents are given `save`: as the settings say; where they say
+/// nothing, only where no window shows the document (`window` false),
+/// for there nobody else can save it.
+fn agents_save(ai: &config::Ai, window: bool) -> bool {
+    ai.save.unwrap_or(!window)
 }
 
 /// `zetwerk call`: calls one tool of the window and prints its answer.
@@ -555,6 +568,21 @@ mod tests {
         parse(lexopt::Parser::from_args(line.iter().copied()))
             .unwrap_or_else(|why| panic!("{why}"))
             .unwrap_or_else(|| panic!("help was asked for"))
+    }
+
+    #[test]
+    fn agents_save_where_the_settings_say_and_else_only_without_a_window() {
+        let ai = |save| config::Ai {
+            save,
+            ..config::Ai::default()
+        };
+        assert!(!agents_save(&ai(None), true));
+        assert!(agents_save(&ai(None), false));
+        assert!(
+            !agents_save(&ai(Some(false)), false),
+            "save = false holds headless too"
+        );
+        assert!(agents_save(&ai(Some(true)), true));
     }
 
     #[test]

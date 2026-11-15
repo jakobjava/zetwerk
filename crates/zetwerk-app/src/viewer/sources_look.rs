@@ -31,6 +31,11 @@ pub(super) struct Kept {
     /// The pairs of sources the user wants both of, though they seem
     /// to be one.
     apart: HashSet<(String, String)>,
+    /// The revision of the text when the file was last written: `u`
+    /// right after that says how the file's change is taken back.
+    pub(super) written_at: Option<u64>,
+    /// Sources agents proposed, waiting for the user's word.
+    pub(super) proposed: Vec<super::sources_proposed::Proposed>,
 }
 
 impl Default for Kept {
@@ -40,6 +45,8 @@ impl Default for Kept {
             order: Order::default(),
             pending: None,
             apart: HashSet::new(),
+            written_at: None,
+            proposed: Vec::new(),
         }
     }
 }
@@ -302,7 +309,10 @@ impl Viewer {
             "undo" => self.undo_sources(false),
             "undo!" => self.undo_sources(true),
             "redo" => self.redo_sources(),
-            _ => Err(format!("not a command: bib {what}")),
+            _ => self
+                .broken_bib_command(what, rest)
+                .or_else(|| self.proposed_bib_command(what, rest))
+                .unwrap_or_else(|| Err(format!("not a command: bib {what}"))),
         }
     }
 
@@ -329,12 +339,17 @@ impl Viewer {
             command("+ import a file", "bib import"),
             command("… sort, narrow, twice, undo", "bib view"),
         ];
+        // What agents propose, and what cannot be read, first.
+        items.extend(self.proposed_rows());
+        items.extend(super::sources_broken::unreadable_rows(&sources));
         let head = items.len();
+        let clashing = super::sources_broken::clashing(&sources.entries);
         for entry in &shown {
             let open = Target::Command(format!("bib open {}", entry.key));
-            let mark = match cited(entry) {
-                0 => " · unused".to_owned(),
-                count => format!(" · {count}×"),
+            let mark = match (clashing.get(entry.key.as_str()), cited(entry)) {
+                (Some(count), _) => format!(" · {count} sources clash: cited by one key"),
+                (None, 0) => " · unused".to_owned(),
+                (None, count) => format!(" · {count}×"),
             };
             items.push((format!("{}{mark}\t{}", entry.key, entry.line()), open));
         }

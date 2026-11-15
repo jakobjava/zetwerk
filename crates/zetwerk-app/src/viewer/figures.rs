@@ -557,8 +557,19 @@ impl Viewer {
             items.push((format!("{}\t{now}", asked.typing), Target::Nothing));
         }
         let back = format!("figures {number} on {what}");
+        let source = editor.source().clone();
         let free = (!asked.typing.is_empty()).then_some(set);
         self.open_picker_for(asked.title, items, chosen.unwrap_or(0), back, free);
+        // What is typed is offered as itself where it can be that: a
+        // file by a name with an ending (there or not: one that is not
+        // is said to be missing, not taken for one like it).
+        let what = what.to_owned();
+        self.picker_accepts(move |typed| match what.as_str() {
+            "file" => typed
+                .rsplit_once('.')
+                .is_some_and(|(name, _)| !name.is_empty()),
+            _ => changes(&source, &figure, &what, typed).is_ok(),
+        });
         Ok(())
     }
 

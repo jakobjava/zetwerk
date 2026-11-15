@@ -670,6 +670,9 @@ impl Viewer {
                 }
                 _ => self.alert("how many, please: :columns 2"),
             },
+            ("lang", lang) if typst_text::is_language(lang) && !self.knows_language(lang) => {
+                self.offer_dictionaries(lang, "lang");
+            }
             ("lang", lang) if typst_text::is_language(lang) => {
                 let lang = lang.to_ascii_lowercase();
                 self.set("text", "lang", &quoted(&lang), &format!("language: {lang}"));

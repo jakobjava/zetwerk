@@ -8,6 +8,7 @@
 use std::fmt::Write;
 use std::ops::Range;
 
+pub mod broken;
 pub mod found;
 pub mod same;
 pub mod yaml;
@@ -285,6 +286,11 @@ pub fn parse(text: &str) -> Vec<Entry> {
         let Some(end) = closing(text, open + 1, opened, closed) else {
             continue;
         };
+        // One left open runs on into the next: it is not read, and the
+        // next is (see `broken`).
+        if broken::runs_on(&text[start..end]) {
+            continue;
+        }
         from = end;
         if kind.is_empty() || matches!(kind.as_str(), "comment" | "string" | "preamble") {
             continue;

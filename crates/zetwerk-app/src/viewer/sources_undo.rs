@@ -222,6 +222,30 @@ impl Viewer {
         if self.file_changed(path) {
             self.edited = Some(Edited::Command);
         }
+        self.sources_kept.written_at = Some(self.revision);
+    }
+
+    /// `u` right after the bibliography file was changed, with nothing
+    /// typed since: `u` does not take that back, and would take back
+    /// something else unsaid. It says so instead, once. Returns whether
+    /// it took the key.
+    pub(super) fn bib_undo_key(&mut self, press: crate::keys::KeyPress) -> bool {
+        let plain_u = press.key == crate::keys::Key::Char('u') && !press.ctrl && !press.alt;
+        let Some(editor) = &self.editor else {
+            return false;
+        };
+        let idle = editor.mode() == crate::editor::Mode::Normal && editor.is_idle();
+        if !plain_u || !idle || self.picker.is_some() {
+            return false;
+        }
+        if self.sources_kept.written_at.take() != Some(self.revision) {
+            return false;
+        }
+        self.alert(
+            "the last change was to the bibliography file, which u does not take back: \
+             :bib undo does  (u again takes back the text's last change)",
+        );
+        true
     }
 }
 

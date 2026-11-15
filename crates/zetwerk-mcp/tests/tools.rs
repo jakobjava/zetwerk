@@ -24,6 +24,7 @@ struct FakeEditor {
 const PLAIN: Tools = Tools {
     save: false,
     development: false,
+    headless: false,
 };
 
 const PNG: &[u8] = b"\x89PNG not really";
@@ -53,6 +54,10 @@ impl Editor for FakeEditor {
             proposals: 0,
             command: None,
             problems: vec!["thesis.typ:1:1: error: nope".to_owned()],
+            window: true,
+            saves: "user".to_owned(),
+            open_questions: 1,
+            unanswered_notes: 0,
         })
     }
 
@@ -251,6 +256,7 @@ fn document_tools_answer() {
     );
     assert_eq!(reported.compiled_revision, Some(6));
     assert_eq!(reported.problems.len(), 1);
+    assert_eq!((reported.window, reported.open_questions), (true, 1));
 
     // The default size applies, and an oversized request is limited.
     let page = call(&socket, "render_page", arguments(&json!({ "page": 2 })));
@@ -294,6 +300,7 @@ fn development_tools_are_only_offered_on_request() {
     let tools = Tools {
         save: false,
         development: true,
+        headless: false,
     };
     let _server = serve(&development, Arc::clone(&editor) as Arc<dyn Editor>, tools)
         .unwrap_or_else(|err| panic!("server starts: {err}"));
@@ -522,6 +529,12 @@ fn editing_tools_say_what_to_change_and_how() {
         answer(&socket, "withdraw_proposal", &json!({ "id": 4 })),
         Err("there is no proposal 4".to_owned())
     );
+    // Several at once; and one of them is to be named.
+    assert_eq!(
+        answer(&socket, "withdraw_proposal", &json!({ "ids": [5, 6] })),
+        Err("there is no proposal 5".to_owned())
+    );
+    assert!(answer(&socket, "withdraw_proposal", &json!({})).is_err());
 }
 
 #[test]
@@ -623,6 +636,7 @@ fn saving_is_only_offered_on_request() {
     let tools = Tools {
         save: true,
         development: false,
+        headless: false,
     };
     let _server = serve(&saving, Arc::new(FakeEditor::default()), tools)
         .unwrap_or_else(|err| panic!("server starts: {err}"));
@@ -746,4 +760,20 @@ fn an_agent_is_put_to_work_in_the_window_of_its_document() {
     assert_eq!(of("/home/someone/thesis.typ"), Ok(older));
     assert_eq!(of("/home/someone/notes.typ"), Ok(newer));
     assert!(of("/home/someone/other.typ").is_err());
+}
+
+#[test]
+fn where_there_is_no_window_the_agent_is_told_the_saves_are_its_own() {
+    let (_scratch_socket, socket) = socket("headless");
+    let tools = Tools {
+        save: true,
+        development: false,
+        headless: true,
+    };
+    let _server = serve(&socket, Arc::new(FakeEditor::default()), tools)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    let tools = described(&socket);
+    let save = tools.iter().find(|(name, _)| name == "save");
+    let said = save.map_or("", |(_, said)| said.as_str());
+    assert!(said.contains("no window"), "{said}");
 }

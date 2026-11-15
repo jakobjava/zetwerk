@@ -145,6 +145,8 @@ pub(super) struct Start {
     /// The place to fill in the cursor was put on: what is typed there
     /// takes its place.
     blank: Option<Range<usize>>,
+    /// Whether the window has no document: no page is shown then.
+    nothing: bool,
 }
 
 /// The places to fill in of `text`, in order: what stands between `‹`
@@ -176,6 +178,58 @@ fn is_blank(text: &str, range: &Range<usize>) -> bool {
 /// Whether `a` and `b` name the same file.
 fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+/// How many files of a folder are looked at for the documents in it.
+const FOLDER_SEEN: usize = 400;
+/// Files longer than this are not read for what they include.
+const READ_LONGEST: u64 = 1 << 20;
+
+/// The Typst files in `folder` (not below it), the documents first and
+/// then the files they include or import, each with the name of one
+/// that includes it; by name within each.
+fn documents_in(folder: &Path) -> Vec<(PathBuf, Option<String>)> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .take(FOLDER_SEEN)
+        .map(|entry| entry.path().canonicalize().unwrap_or_else(|_| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ending| ending == "typ"))
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+    // Which file names which, as `include "…"` or `import "…"`.
+    let mut part_of: Vec<Option<String>> = vec![None; files.len()];
+    for including in &files {
+        let small = std::fs::metadata(including).is_ok_and(|meta| meta.len() <= READ_LONGEST);
+        let Some(text) = small
+            .then(|| std::fs::read_to_string(including).ok())
+            .flatten()
+        else {
+            continue;
+        };
+        let name = including.file_name().unwrap_or_default().to_string_lossy();
+        for word in ["include \"", "import \""] {
+            for (at, _) in text.match_indices(word) {
+                let rest = &text[at + word.len()..];
+                let Some(named) = rest.split('"').next().filter(|named| !named.contains('\n'))
+                else {
+                    continue;
+                };
+                let path = including.parent().unwrap_or(folder).join(named);
+                for (file, part) in files.iter().zip(part_of.iter_mut()) {
+                    if file != including && part.is_none() && same_file(file, &path) {
+                        *part = Some(name.clone().into_owned());
+                    }
+                }
+            }
+        }
+    }
+    let mut found: Vec<(PathBuf, Option<String>)> = files.into_iter().zip(part_of).collect();
+    found.sort_by_key(|(_, part)| part.is_some());
+    found
 }
 
 /// How many characters of a folder are shown: the list cuts what is
@@ -294,6 +348,7 @@ impl Viewer {
         match opening {
             Opening::Start => {
                 "no document".clone_into(&mut self.file);
+                self.start.nothing = true;
                 self.open_start_list();
             }
             Opening::New => self.open_starters(),
@@ -303,6 +358,12 @@ impl Viewer {
                 }
             }
         }
+    }
+
+    /// Whether the window has no document: the empty page of nothing is
+    /// not shown behind the list of documents.
+    pub(super) fn shows_no_document(&self) -> bool {
+        self.start.nothing && self.editor.is_none()
     }
 
     /// The document the user chose to open in place of this one, and
@@ -468,21 +529,39 @@ impl Viewer {
         beside.unwrap_or_else(|| self.project.root_dir().to_owned())
     }
 
-    /// The documents opened last, and "new document…" behind them.
+    /// The documents of the folder (those that include others first),
+    /// the documents opened last elsewhere, and "new document…" behind
+    /// them.
     fn open_start_list(&mut self) {
         let now = SystemTime::now();
         let current = self.editor.as_ref().map(|editor| editor.path().to_owned());
         let listed = self.state_dir.as_deref().map(recent).unwrap_or_default();
-        let mut items: Vec<(String, Target)> = listed
+        let not_shown = |path: &Path| !current.as_deref().is_some_and(|now| same_file(now, path));
+        let mut items: Vec<(String, Target)> = Vec::new();
+        let here = documents_in(&self.folder());
+        for (path, part_of) in &here {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let opened = listed.iter().find(|(other, _)| same_file(other, path));
+            let what = match (part_of, opened) {
+                (Some(main), _) => format!("part of {main}"),
+                (None, Some((_, when))) => ago(*when, now),
+                (None, None) => "here".to_owned(),
+            };
+            if not_shown(path) {
+                let open = Target::Command(format!("open {}", path.display()));
+                items.push((format!("{name}\t{what}"), open));
+            }
+        }
+        let elsewhere = listed
             .into_iter()
-            .filter(|(path, _)| !current.as_deref().is_some_and(|now| same_file(now, path)))
-            .map(|(path, when)| {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let within = path.parent().map(shown).unwrap_or_default();
-                let label = format!("{name}   {within}\t{}", ago(when, now));
-                (label, Target::Command(format!("open {}", path.display())))
-            })
-            .collect();
+            .filter(|(path, _)| not_shown(path))
+            .filter(|(path, _)| !here.iter().any(|(other, _)| same_file(other, path)));
+        items.extend(elsewhere.map(|(path, when)| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let within = path.parent().map(shown).unwrap_or_default();
+            let label = format!("{name}   {within}\t{}", ago(when, now));
+            (label, Target::Command(format!("open {}", path.display())))
+        }));
         items.push((
             format!("new document…\tin {}", shown(&self.folder())),
             Target::Command("recent new".to_owned()),
@@ -968,7 +1047,7 @@ mod tests {
         assert!(viewer.message.is_some());
         // `:recent` brings the list back; "new document…" asks for a name.
         press(&mut viewer, ":recent<CR>");
-        press(&mut viewer, "<Down><CR>");
+        press(&mut viewer, "new document<CR>");
         assert!(viewer.picker.is_some());
         press(&mut viewer, "draft<CR>");
         let made = directory.join("draft.typ");
@@ -999,6 +1078,46 @@ mod tests {
         // The document being edited is not opened again.
         viewer.execute("open main.typ");
         assert_eq!(viewer.take_wanted_document(), None);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn the_start_shows_no_page_and_the_documents_of_its_folder() {
+        let directory = directory("= Book\n#include \"part.typ\"\n");
+        let folder = directory.canonicalize().unwrap();
+        std::fs::write(directory.join("part.typ"), "Part.\n").unwrap();
+        std::fs::write(directory.join("other.typ"), "Other.\n").unwrap();
+        let state = directory.join("state");
+        let mut viewer = starting(&directory, &state);
+        let listed: Vec<String> = viewer
+            .picker
+            .as_ref()
+            .unwrap()
+            .listing()
+            .1
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            listed[..3],
+            [
+                "main.typ\there",
+                "other.typ\there",
+                "part.typ\tpart of main.typ"
+            ],
+            "{listed:?}"
+        );
+        assert!(listed[3].starts_with("new document…"), "{listed:?}");
+        press(&mut viewer, "<CR>");
+        let wanted = viewer.take_wanted_document();
+        assert_eq!(wanted, Some((folder.join("main.typ"), false)));
+        // Nothing is drawn of the page of no document.
+        compile(&mut viewer);
+        let scene = viewer.scene(&|_| false);
+        assert!(scene.wanted.is_empty(), "{} tiles", scene.wanted.len());
+        // An agent is told there is no document, and what to do.
+        let refused = viewer.lines(None, None).unwrap_err();
+        assert!(refused.contains("no document is open"), "{refused}");
         let _ = std::fs::remove_dir_all(directory);
     }
 }

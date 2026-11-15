@@ -51,7 +51,14 @@ pub(super) struct Picker {
     /// Where what is typed may be taken as it is (it is none of the
     /// items): the command it is handed to, which it is put behind.
     free: Option<String>,
+    /// What may be typed for `free`; where nothing says, anything.
+    accepts: Option<Accepts>,
+    /// Whether the last item is what was typed, offered as itself.
+    offered: bool,
 }
+
+/// What may be typed for a list that takes what is typed.
+type Accepts = Box<dyn Fn(&str) -> bool + Send>;
 
 /// Where an entry of a list leads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +178,15 @@ pub(super) fn cut(text: &str, columns: usize) -> String {
         shown.push('…');
     }
     shown
+}
+
+/// What an item of a list is, and (behind a tab) what it is now, each
+/// cut where long: the second has what the first leaves of a row of a
+/// hundred characters, so that what is said of a starter is said whole.
+fn columns(label: &str) -> (String, String) {
+    let (name, now) = label.split_once('\t').unwrap_or((label, ""));
+    let room = 100 - name.chars().count().min(60);
+    (cut(name, 70), cut(now, room))
 }
 
 /// The things of the insert menu that go with `typed`, each with how
@@ -656,6 +672,8 @@ impl Viewer {
             chosen,
             back: None,
             free: None,
+            accepts: None,
+            offered: false,
         });
     }
 
@@ -674,6 +692,15 @@ impl Viewer {
         if let Some(picker) = &mut self.picker {
             picker.back = Some(back);
             picker.free = free;
+        }
+    }
+
+    /// Makes only what `accepts` be offered as typed in the list that is
+    /// up: what it refuses is not offered as itself, and the items like
+    /// it come first.
+    pub(super) fn picker_accepts(&mut self, accepts: impl Fn(&str) -> bool + Send + 'static) {
+        if let Some(picker) = &mut self.picker {
+            picker.accepts = Some(Box::new(accepts));
         }
     }
 
@@ -830,12 +857,7 @@ impl Viewer {
                 .iter()
                 .skip(first)
                 .take(LIST_ROWS)
-                .map(|item| {
-                    // What it is, and (behind a tab) what it is now.
-                    let label = &picker.items[*item].0;
-                    let (name, now) = label.split_once('\t').unwrap_or((label, ""));
-                    (cut(name, 70), cut(now, 40))
-                })
+                .map(|item| columns(&picker.items[*item].0))
                 .collect();
             let title = format!("{}: {}\u{2588}", picker.title, picker.query);
             let chosen = picker.chosen.saturating_sub(first);
@@ -880,7 +902,14 @@ impl Viewer {
 
 impl Picker {
     /// Narrows the list to what the query is found in, best first.
+    /// Where the list takes what is typed, and that is none of its items
+    /// exactly, it is offered as itself first: an item that is only like
+    /// it is not what was typed ("no" is not "none").
     fn narrow(&mut self) {
+        if self.offered {
+            self.items.pop();
+            self.offered = false;
+        }
         let mut ranked: Vec<(i32, usize)> = self
             .items
             .iter()
@@ -890,6 +919,22 @@ impl Picker {
         ranked.sort_by_key(|(score, index)| (std::cmp::Reverse(*score), *index));
         self.shown = ranked.into_iter().map(|(_, index)| index).collect();
         self.chosen = 0;
+        let Some(command) = &self.free else {
+            return;
+        };
+        let typed = self.query.trim();
+        let listed = self.items.iter().any(|(label, _)| {
+            let name = label.split('\t').next().unwrap_or(label);
+            name == typed || name.split("  ").next() == Some(typed)
+        });
+        let fits = self.accepts.as_ref().is_none_or(|accepts| accepts(typed));
+        if !typed.is_empty() && !listed && fits {
+            let take = Target::Command(format!("{command}{typed}"));
+            self.items
+                .push((format!("use \u{201c}{typed}\u{201d}"), take));
+            self.offered = true;
+            self.shown.insert(0, self.items.len() - 1);
+        }
     }
 
     /// Where the chosen entry leads, if one is chosen.
@@ -922,5 +967,17 @@ mod tests {
         assert!(score("Main result", "res") > score("Preserved", "res"));
         assert!(score("Proof", "pro") > score("Approximation", "pro"));
         assert!(score("anything", "").is_some());
+    }
+
+    #[test]
+    fn what_is_said_of_an_item_is_cut_only_where_the_row_is_full() {
+        let report = "report\ttitle page, contents, chapters, bibliography";
+        assert_eq!(
+            columns(report).1,
+            "title page, contents, chapters, bibliography"
+        );
+        let long = format!("{}\t{}", "n".repeat(80), "w".repeat(80));
+        let (name, now) = columns(&long);
+        assert_eq!((name.chars().count(), now.chars().count()), (71, 41));
     }
 }

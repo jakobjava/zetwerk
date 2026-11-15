@@ -47,6 +47,8 @@ pub struct Added {
     pub keys: Vec<String>,
     /// Those that were there already, and not added again.
     pub there: Vec<There>,
+    /// Where they were proposed and not added: the proposal's number.
+    pub proposal: Option<u64>,
 }
 
 /// A source that was there already.
@@ -349,21 +351,14 @@ impl Viewer {
     }
 
     /// Adds the sources in `text` (BibTeX, RIS or CSL-JSON) for an agent:
-    /// those that are there already only if `anyway`.
+    /// those that are there already only if `anyway`. Where agents only
+    /// propose changes, they are proposed: nothing is written until the
+    /// user takes them (see `sources_proposed`).
     ///
     /// # Errors
     ///
-    /// If agents only propose changes, `text` holds no source, or the
-    /// file cannot be read or written.
+    /// If `text` holds no source, or the file cannot be read or written.
     pub fn agent_add_sources_checked(&mut self, text: &str, anyway: bool) -> Result<Added, String> {
-        if self.agent_edits == AgentEdits::Propose {
-            return Err(
-                "the user reviews what agents change (edit_mode = \"propose\"): a source \
-                 cannot be proposed. Ask the user to add it (:bib), or to let agents \
-                 change things (:agents live)."
-                    .to_owned(),
-            );
-        }
         let (found, _) = found::read(text);
         if found.is_empty() {
             return Err(
@@ -372,8 +367,22 @@ impl Viewer {
                     .to_owned(),
             );
         }
+        if self.agent_edits == AgentEdits::Propose {
+            return Ok(self.propose_sources(text, anyway, &found));
+        }
+        self.add_agents_sources(text, &found, anyway)
+    }
+
+    /// Adds the sources `found` in `text` for an agent, as
+    /// [`Viewer::agent_add_sources_checked`] does.
+    pub(super) fn add_agents_sources(
+        &mut self,
+        text: &str,
+        found: &[Found],
+        anyway: bool,
+    ) -> Result<Added, String> {
         let which = if anyway { Which::All } else { Which::New };
-        let added = self.add_found(&found, text, which, "added by an agent")?;
+        let added = self.add_found(found, text, which, "added by an agent")?;
         let name = self.sources().ok().and_then(|sources| {
             let name = sources.path.file_name()?;
             Some(name.to_string_lossy().into_owned())

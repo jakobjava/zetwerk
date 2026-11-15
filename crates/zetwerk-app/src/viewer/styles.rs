@@ -114,7 +114,10 @@ impl Viewer {
             self.notice(told);
         }
         let chosen = chosen.min(items.len() - 1);
-        self.open_picker_for("styles", items, chosen, "doc".to_owned(), None);
+        // Escape leads back to the row of the document manager it came
+        // of.
+        let back = format!("doc {}", super::manager::STYLES_ROW);
+        self.open_picker_for("styles", items, chosen, back, None);
     }
 
     /// What style `row` can be, as listed and as written: its own
@@ -174,6 +177,36 @@ impl Viewer {
         }
         let free = (style.typed != Typed::No).then(|| format!("styles set {row} "));
         self.open_picker_for(style.name, items, chosen, format!("styles {row}"), free);
+        self.style_accepts(row);
+    }
+
+    /// The families of the fonts there are that style `row` can be, as
+    /// listed.
+    fn style_fonts(&self, row: usize) -> Vec<String> {
+        let choices = self.style_choices(row).into_iter();
+        let fonts = choices.filter(|(label, value)| *value == format!("\"{label}\""));
+        fonts.map(|(label, _)| label).collect()
+    }
+
+    /// Makes the list that is up offer as typed only what style `row`
+    /// can be: what it cannot be is not offered, and what is like it
+    /// comes first.
+    fn style_accepts(&mut self, row: usize) {
+        let Some(style) = STYLES.get(row) else {
+            return;
+        };
+        let typed = style.typed;
+        let font = matches!(typed, Typed::Font | Typed::MathFont);
+        let fonts = if font {
+            self.style_fonts(row)
+        } else {
+            Vec::new()
+        };
+        self.picker_accepts(move |text| {
+            let text = text.trim();
+            style_text::typed_value(typed, text).is_some()
+                && (!font || fonts.iter().any(|family| family.eq_ignore_ascii_case(text)))
+        });
     }
 
     /// Makes style `row` what was typed for it, if it can be that.
@@ -181,12 +214,60 @@ impl Viewer {
         let Some(style) = STYLES.get(row) else {
             return;
         };
-        if let Some(value) = style_text::typed_value(style.typed, typed) {
-            self.apply_style(row, Some(&value), typed.trim());
+        let typed = typed.trim();
+        let font = matches!(style.typed, Typed::Font | Typed::MathFont);
+        let fonts = if font {
+            self.style_fonts(row)
         } else {
-            self.open_styles(row);
-            self.alert(format!("{} cannot be {typed}", style.name));
+            Vec::new()
+        };
+        let installed = fonts
+            .iter()
+            .any(|family| family.eq_ignore_ascii_case(typed));
+        match style_text::typed_value(style.typed, typed) {
+            Some(value) if !font || installed => {
+                return self.apply_style(row, Some(&value), typed);
+            }
+            _ => {}
         }
+        // What it cannot be: why, and what is nearest to it.
+        let (why, names) = match style.typed {
+            Typed::Colour => (
+                format!("\u{201c}{typed}\u{201d} is no colour: a name or as #1f3a68"),
+                style_text::NAMED_COLOURS
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect(),
+            ),
+            Typed::Font | Typed::MathFont => (
+                format!("no font \u{201c}{typed}\u{201d} is installed for this"),
+                fonts,
+            ),
+            Typed::Length(unit) => (
+                format!(
+                    "{} cannot be {typed}: a number and a unit, as 2{unit}",
+                    style.name
+                ),
+                Vec::new(),
+            ),
+            _ => (format!("{} cannot be {typed}", style.name), Vec::new()),
+        };
+        let names = super::manager::nearest(typed, names);
+        if names.is_empty() {
+            self.open_styles(row);
+            return self.alert(why);
+        }
+        let items = names
+            .into_iter()
+            .map(|name| {
+                let set = Target::Command(format!("styles set {row} {name}"));
+                (name, set)
+            })
+            .collect();
+        let free = Some(format!("styles set {row} "));
+        self.open_picker_for(style.name, items, 0, format!("styles {row}"), free);
+        self.style_accepts(row);
+        self.alert(format!("{why}: the nearest are listed"));
     }
 
     /// Makes style `row` be `value` (as written in its rule; `None`: as

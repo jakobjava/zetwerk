@@ -593,7 +593,7 @@ fn on_note(note: &Note, cursor: usize) -> bool {
     !note.detached && (note.range.contains(&cursor) || note.range.start == cursor)
 }
 
-const NOT_EDITING: &str = "this window only shows the document; it has no notes";
+const NOT_EDITING: &str = super::agent::NOT_EDITING;
 
 impl Viewer {
     /// Reads the stored notes of the file being edited, the first time
@@ -1344,6 +1344,29 @@ impl Viewer {
         self.note_index(id)?;
         self.resolve_note(id, Author::Agent);
         Ok(())
+    }
+
+    /// How many questions for agents wait for an answer (none was
+    /// given, or the user said more since), and how many notes of the
+    /// user's nobody has answered: told to an agent with the state of
+    /// the editor, so that it need not ask for the notes to know.
+    pub fn notes_waiting(&mut self) -> (usize, usize) {
+        self.notes_ready();
+        let open = self
+            .notes
+            .all
+            .iter()
+            .filter(|note| !note.resolved && note.by == Author::User);
+        let (mut questions, mut unanswered) = (0, 0);
+        for note in open {
+            let last = note.answers.last().map(|(by, _)| *by);
+            if note.to_agent && last != Some(Author::Agent) {
+                questions += 1;
+            } else if !note.to_agent && last.is_none() {
+                unanswered += 1;
+            }
+        }
+        (questions, unanswered)
     }
 
     /// The number the next proposal gets: those made from then on are a
