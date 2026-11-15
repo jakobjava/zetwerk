@@ -26,6 +26,7 @@ pub mod notes;
 mod palette;
 mod pointer;
 pub mod refer;
+mod refused;
 mod slides;
 mod sources;
 mod sources_add;
@@ -880,6 +881,8 @@ pub struct Viewer {
     /// What is beside the pages: tags for what they show as nothing, and
     /// the compiler's complaints (see [`margin`]).
     margin: margin::Margin,
+    /// What is kept of a text Typst refuses (see [`refused`]).
+    refused: refused::Refused,
     /// Where the cursor is drawn in the source pane or the lens, in device
     /// pixels: how far across, and its top and bottom.
     caret_at: Option<(f64, f64, f64)>,
@@ -993,6 +996,7 @@ impl Viewer {
             language: language::Language::default(),
             notes: notes::Notes::default(),
             margin: margin::Margin::default(),
+            refused: refused::Refused::default(),
             caret_at: None,
             planned: HashMap::new(),
             shown: HashMap::new(),
@@ -1580,6 +1584,7 @@ impl Viewer {
             self.edited = Some(Edited::Command);
         }
         self.margin_compiled(&output.world);
+        self.refused_compiled(&output.world);
     }
 
     /// The user turned the wheel or dragged on the touchpad, by this many
@@ -1650,7 +1655,7 @@ impl Viewer {
         if self.grid.is_some() {
             return self.grid_key(press);
         }
-        if self.start_key(press) || self.margin_key(press) {
+        if self.start_key(press) || self.refused_key(press) || self.margin_key(press) {
             return;
         }
         if self.editor.is_some() {
@@ -1994,6 +1999,7 @@ impl Viewer {
             || self.settings_command(command)
             || self.language_command(command)
             || self.notes_command(command)
+            || self.refused_command(command)
         {
             return;
         }
@@ -2116,7 +2122,8 @@ impl Viewer {
         editor.set_cursor(range.start);
         let (is_error, message) = (*is_error, message.clone());
         if is_error {
-            self.alert(format!("error: {message}"));
+            let said = refused::for_writer(&message);
+            self.alert(format!("error: {said}  · :why"));
         } else {
             self.notice(format!("warning: {message}"));
         }
@@ -2189,6 +2196,7 @@ impl Viewer {
         self.hints(&mut scene, has);
         self.assist_panels(&mut scene, has);
         self.margin_panel(&mut scene, has);
+        self.refused_panel(&mut scene, has);
         scene
     }
 
@@ -2705,6 +2713,9 @@ impl Viewer {
                 1 => first.clone(),
                 count => format!("{first}  (+{} more)", count - 1),
             });
+        // Said plainly where the text is refused: where, and that the
+        // page is behind it.
+        let problem = self.refused_status().or(problem);
         // What the compiler makes of half a word is not worth reading:
         // its complaints wait until typing is over. Not in an equation:
         // there the page shows what is typed only once it is one.
@@ -3025,6 +3036,7 @@ mod tests {
     use crate::keys;
 
     mod cursor;
+    mod errors;
     mod files;
     mod left_behind;
     mod speed;
