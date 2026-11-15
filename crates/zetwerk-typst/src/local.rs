@@ -544,6 +544,18 @@ fn extent(position: Point, item: &FrameItem) -> (f64, f64) {
     }
 }
 
+/// How far right of `item` the first text in it begins, at any depth.
+fn first_text(item: &FrameItem) -> Option<Abs> {
+    match item {
+        FrameItem::Text(_) => Some(Abs::zero()),
+        FrameItem::Group(group) => group
+            .frame
+            .items()
+            .find_map(|(at, inner)| Some(at.x + first_text(inner)?)),
+        _ => None,
+    }
+}
+
 /// The element whose beginning or end `item` marks, if it marks one.
 fn tagged(item: &FrameItem) -> Option<Location> {
     match item {
@@ -711,6 +723,18 @@ pub fn splice(
     let behind = region
         .beside(page, old.items.end..count, true)
         .zip(region.beside(from, new.items.end..usize::MAX, true));
+    // The paragraph behind begins where it did: what it follows may
+    // change how it is set (indented behind a paragraph, not behind a
+    // list), and it is not put in.
+    if let Some(((on_page, _), (typeset, _))) = behind {
+        let x = |frame: &Frame, index: usize| {
+            let (at, item) = frame.items().nth(index)?;
+            Some(at.x + first_text(item)?)
+        };
+        if x(page, on_page) != x(from, typeset) {
+            return Err(Refusal::ReadOtherwise);
+        }
+    }
     let (moved_from, moved_by) = if let Some(((index, on_page), (_, typeset))) = behind {
         (Some(index), typeset + down - on_page)
     } else {

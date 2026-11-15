@@ -274,7 +274,15 @@ fn compare_with_whole(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
         if untouched.is_some_and(|old| hash128(&old.frame) == hash128(&page.frame)) {
             continue;
         }
-        let kind = if breaks_elsewhere(&local, &right) {
+        let ends = (index > 0, index + 1 < whole.pages().len());
+        let near = local.len() == right.len()
+            && local
+                .iter()
+                .zip(&right)
+                .all(|(a, b)| (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1 && a.2 == b.2);
+        let kind = if near {
+            "glyphs stand a tenth of a point apart".to_owned()
+        } else if breaks_elsewhere(&local, &right, ends) {
             "the page breaks elsewhere".to_owned()
         } else if local.len() == right.len() {
             let moved = local.iter().zip(&right).filter(|(a, b)| a != b).count();
@@ -315,10 +323,13 @@ fn compare_with_whole(viewer: &mut Viewer, tally: &mut Tally, case: &dyn Fn() ->
 /// only as a page that breaks elsewhere does, which the whole puts right:
 /// lines come or go at its top or foot, and all between them is the same,
 /// moved up or down by as much. What comes or goes is of no place of the
-/// text that the page shows elsewhere.
+/// text that the page shows elsewhere. `ends` says whether a page comes
+/// before this one and whether one comes after it: lines come or go only
+/// at an end that meets another page.
 fn breaks_elsewhere(
     here: &[(i64, i64, Option<usize>)],
     there: &[(i64, i64, Option<usize>)],
+    ends: (bool, bool),
 ) -> bool {
     use std::collections::{BTreeSet, HashMap};
     let mut shifts: HashMap<i64, usize> = HashMap::new();
@@ -353,7 +364,9 @@ fn breaks_elsewhere(
         here_set.difference(&moved).collect(),
         moved.difference(&here_set).collect(),
     );
-    let outside = |glyph: &&(i64, i64, Option<usize>)| glyph.1 < top || glyph.1 > foot;
+    let outside = |glyph: &&(i64, i64, Option<usize>)| {
+        (ends.0 && glyph.1 < top) || (ends.1 && glyph.1 > foot)
+    };
     let bytes = |glyphs: &[&(i64, i64, Option<usize>)]| -> BTreeSet<usize> {
         glyphs.iter().filter_map(|glyph| glyph.2).collect()
     };
@@ -795,7 +808,9 @@ fn walks(seeds: usize, steps: usize) {
             // What a part shows has to be what the whole shows; what is
             // worked out on a line, and where pages break, is only told
             // of (see `report`).
-            let part = !kind.contains("predict") && !kind.contains("breaks elsewhere");
+            let part = !kind.contains("predict")
+                && !kind.contains("breaks elsewhere")
+                && !kind.contains("a tenth of a point apart");
             let strict = name != "chapters" && part;
             if strict || kind.starts_with("said to be") {
                 wrong.push(format!("{name}: {count}× {kind}; first: {case}"));

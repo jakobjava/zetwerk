@@ -394,3 +394,13 @@ fn what_is_worked_out_from_where_it_stands_is_typeset_whole() {
     );
     assert_eq!(after_keys(&text, "$y", true, "a^2"), None);
 }
+
+#[test]
+fn a_paragraph_behind_a_list_item_turned_text_is_typeset_whole() {
+    // `-` alone is an item of a list; `-**` is a paragraph, and the
+    // article indents the paragraph behind it as it does not behind a
+    // list: it stood where it was. The typist found it: seed 2014,
+    // `O<Esc>o<Esc>o-<C-b>` in the article.
+    let text = ARTICLE.replacen("<eq-weyl>\n\n", "<eq-weyl>\n\n-\n\n", 1);
+    assert_eq!(after_keys(&text, "<eq-weyl>\n\n-", true, "a<C-b>"), None);
+}
