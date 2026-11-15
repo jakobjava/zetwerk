@@ -416,11 +416,8 @@ impl Viewer {
             ("pdf" | "png" | "svg" | "pdf!" | "png!" | "svg!", argument) => {
                 self.export_command(name, argument);
             }
-            ("figure!", argument) if !argument.is_empty() => {
-                self.export_command(name, argument);
-            }
             // `:figure` alone is for the figure's card (see `figures`).
-            ("figure", argument) if !argument.is_empty() => {
+            ("figure" | "figure!", argument) if !argument.is_empty() => {
                 self.export_command(name, argument);
             }
             _ => return false,

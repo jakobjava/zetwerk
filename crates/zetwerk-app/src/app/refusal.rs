@@ -97,8 +97,8 @@ impl Refusal {
     }
 
     /// Handles `event`. Returns whether the window is to go.
-    pub(super) fn event(&mut self, event: WindowEvent) -> bool {
-        match event {
+    pub(super) fn event(&mut self, event: &WindowEvent) -> bool {
+        match *event {
             WindowEvent::CloseRequested | WindowEvent::KeyboardInput { .. } => return true,
             WindowEvent::Resized(size) => {
                 self.config.width = size.width.max(1);

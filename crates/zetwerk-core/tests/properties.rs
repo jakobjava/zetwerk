@@ -298,7 +298,7 @@ impl Session {
         let mut states = vec![String::new(); self.doc().history().len()];
         for (old, new) in map.iter().enumerate() {
             if let Some(new) = new {
-                states[*new as usize] = self.model.states[old].clone();
+                states[*new as usize].clone_from(&self.model.states[old]);
             }
         }
         self.model.states = states;

@@ -231,7 +231,7 @@ impl ApplicationHandler<Event> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         if let Some(refusal) = &mut self.refusal {
-            if refusal.event(event) {
+            if refusal.event(&event) {
                 event_loop.exit();
             }
             return;

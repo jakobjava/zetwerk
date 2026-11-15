@@ -48,13 +48,12 @@ fn worker(directory: &Path) {
     for line in 0.. {
         let end = document.text().len();
         let edit = format!("line {line} of a document that grows\n");
-        match document.edit(&[Replace::insert(end, edit)], false) {
-            Ok(_) => writeln!(out, "edit {}", document.text().len()).unwrap(),
-            Err(_) => {
-                // Refused: the text is as it was.
-                assert_eq!(document.text().len(), end);
-                refused += 1;
-            }
+        if document.edit(&[Replace::insert(end, edit)], false).is_ok() {
+            writeln!(out, "edit {}", document.text().len()).unwrap();
+        } else {
+            // Refused: the text is as it was.
+            assert_eq!(document.text().len(), end);
+            refused += 1;
         }
         if line % 4 == 3 {
             match document.save(false) {

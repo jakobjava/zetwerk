@@ -32,7 +32,8 @@ pub struct Document<B: Buffer> {
     journal: Journal,
     /// Where the journal is.
     journal_path: PathBuf,
-    _lock: Lock,
+    /// Held, not read: the file is locked while it lives.
+    lock: Lock,
     /// The state whose text is in the file, if any state's is.
     saved: Option<StateId>,
     /// Every state that was ever in the file, with the hash of its bytes
@@ -266,7 +267,7 @@ fn replay(records: &[Record]) -> Option<Replayed> {
     let mut history = History::new();
     let mut text: Option<String> = None;
     let mut saved = None;
-    let mut saves = Vec::new();
+    let mut held = Vec::new();
     let mut used = 0;
     for record in records {
         // A record that does not fit what came before ends the replay:
@@ -276,7 +277,7 @@ fn replay(records: &[Record]) -> Option<Replayed> {
             break;
         }
         if let Record::Saved { state, hash } = record {
-            note_save(&mut saves, (*state, *hash));
+            note_save(&mut held, (*state, *hash));
         }
         used += 1;
     }
@@ -284,7 +285,7 @@ fn replay(records: &[Record]) -> Option<Replayed> {
         history,
         text: text?,
         saved,
-        saves,
+        saves: held,
         complete: used == records.len(),
     })
 }
@@ -373,11 +374,11 @@ fn replay_salvaged(records: &[Record], file: Option<&FileContents>) -> Option<Re
         return None;
     };
     let mut history = History::new();
-    let mut saves = Vec::new();
+    let mut seen = Vec::new();
     let mut snapshot = ROOT;
     let text = match file {
         Some(file) => {
-            saves.push((ROOT, file.hash));
+            seen.push((ROOT, file.hash));
             let mut base = file.text.clone();
             if let Some(replace) = difference(&base, text) {
                 let changes = change::perform(&mut base, &[replace]).ok()?;
@@ -430,7 +431,7 @@ fn replay_salvaged(records: &[Record], file: Option<&FileContents>) -> Option<Re
             }
             Record::Saved { state, hash } => {
                 if let Some(&state) = ids.get(state) {
-                    note_save(&mut saves, (state, *hash));
+                    note_save(&mut seen, (state, *hash));
                 }
                 true
             }
@@ -439,12 +440,11 @@ fn replay_salvaged(records: &[Record], file: Option<&FileContents>) -> Option<Re
             break;
         }
     }
-    let saved = saves.last().copied();
     Some(Replayed {
         history,
         text,
-        saved,
-        saves,
+        saved: seen.last().copied(),
+        saves: seen,
         complete: false,
     })
 }
@@ -490,12 +490,12 @@ fn opposite(direction: Direction) -> Direction {
 }
 
 /// The shortest journal that describes `history` at its current state:
-/// `saves` are the states that were once in the file, `saved` the one
+/// `held` are the states that were once in the file, `saved` the one
 /// that is in it now.
 fn compact(
     history: &History,
     text: &str,
-    saves: &[(StateId, Hash)],
+    held: &[(StateId, Hash)],
     saved: Option<(StateId, Hash)>,
 ) -> Vec<Record> {
     let mut records = Vec::new();
@@ -526,7 +526,7 @@ fn compact(
         }
     }
     // Before the snapshot, which ends what they say about the file now.
-    for &(state, hash) in saves {
+    for &(state, hash) in held {
         if saved != Some((state, hash)) && history.contains(state) {
             records.push(Record::Saved { state, hash });
         }
@@ -940,8 +940,8 @@ fn thin_history(
     saves: &[(StateId, Hash)],
 ) -> (History, Vec<Option<StateId>>) {
     let first_recent = history.len().saturating_sub(recent) as StateId;
-    let saved: std::collections::HashSet<StateId> = saves.iter().map(|(state, _)| *state).collect();
-    history.thinned(|state| state >= first_recent || saved.contains(&state))
+    let held: std::collections::HashSet<StateId> = saves.iter().map(|(state, _)| *state).collect();
+    history.thinned(|state| state >= first_recent || held.contains(&state))
 }
 
 /// `saves` with the states' ids as `map` (from [`History::thinned`]) has
@@ -1103,7 +1103,7 @@ impl<B: Buffer> Document<B> {
             history: found.history,
             journal,
             journal_path,
-            _lock: lock,
+            lock,
             saved: found.saved,
             saves: found.saves,
             disk_hash: file_hash,
@@ -1413,7 +1413,7 @@ impl<B: Buffer> Document<B> {
         self.path = to;
         self.journal = journal;
         self.journal_path = journal_path;
-        self._lock = lock;
+        self.lock = lock;
         self.saved = Some(state);
         self.saves = saves;
         self.disk_hash = Some(hash);
@@ -1473,7 +1473,7 @@ impl<B: Buffer> Document<B> {
         self.path = to;
         self.journal = journal;
         self.journal_path = journal_path;
-        self._lock = lock;
+        self.lock = lock;
         Ok(left)
     }
 
@@ -1500,20 +1500,20 @@ impl<B: Buffer> Document<B> {
     /// by old id, the new id of each state that stayed.
     pub fn thin(&mut self, recent: usize) -> Result<Vec<Option<StateId>>, DocumentError> {
         let (history, map) = thin_history(&self.history, recent, &self.saves);
-        let saves = renumber(&self.saves, &map);
+        let renumbered = renumber(&self.saves, &map);
         let saved = self
             .saved
             .and_then(|state| map.get(usize::try_from(state).ok()?).copied()?);
         let records = compact(
             &history,
             self.buffer.text(),
-            &saves,
+            &renumbered,
             saved.zip(self.disk_hash),
         );
         self.journal =
             Journal::create(&self.journal_path, &records).map_err(DocumentError::Journal)?;
         self.history = history;
-        self.saves = saves;
+        self.saves = renumbered;
         self.saved = saved;
         Ok(map)
     }
