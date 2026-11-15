@@ -2709,10 +2709,13 @@ impl Viewer {
         // its complaints wait until typing is over. Not in an equation:
         // there the page shows what is typed only once it is one.
         let typing = editing.is_some_and(|editing| editing.mode == editor::Mode::Insert);
-        let in_equation = self.editor.as_ref().is_some_and(|editor| {
-            crate::typst_text::equation_at(editor.source(), editor.cursor()).is_some()
-        });
-        let problem = problem.filter(|_| !typing || in_equation);
+        // Asked only where it matters: it is looked for from the root.
+        let in_equation = || {
+            self.editor.as_ref().is_some_and(|editor| {
+                crate::typst_text::equation_at(editor.source(), editor.cursor()).is_some()
+            })
+        };
+        let problem = problem.filter(|_| !typing || in_equation());
         let (left, alert) = match (&command, &self.message, &problem) {
             (Some(command), ..) => (command.as_str(), false),
             (None, Some(message), _) => (message.text.as_str(), message.alert),

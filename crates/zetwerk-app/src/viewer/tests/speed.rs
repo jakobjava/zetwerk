@@ -426,6 +426,43 @@ fn frame_parts(viewer: &mut Viewer, held: &mut HashSet<TextureId>) -> String {
     parts
 }
 
+/// What some of what a key or a frame asks for takes on the text of
+/// `viewer`, in milliseconds: the state shown in the status line, the
+/// equation the cursor is in, and the pages wrapped as a document again
+/// (as a part typeset by itself is put in).
+fn what_parts_of_a_key_ask(viewer: &Viewer) -> String {
+    let timed_ms = |work: &dyn Fn()| {
+        median(
+            (0..9)
+                .map(|_| {
+                    let started = Instant::now();
+                    work();
+                    started.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect(),
+        )
+    };
+    let state = timed_ms(&|| {
+        let _ = viewer.state();
+    });
+    let equation = timed_ms(&|| {
+        if let Some(editor) = &viewer.editor {
+            let _ = crate::typst_text::equation_at(editor.source(), editor.cursor());
+        }
+    });
+    let wrapped = timed_ms(&|| {
+        if let Some(document) = &viewer.document {
+            let pages: typst::ecow::EcoVec<Page> = document.pages().iter().cloned().collect();
+            let info = typst::model::Document::info(document.as_ref()).clone();
+            let _ = PagedDocument::new(pages, info);
+        }
+    });
+    format!(
+        "the state: {state:.2} ms; the equation at the cursor: {equation:.2} ms; \
+         the pages wrapped as a document again: {wrapped:.2} ms"
+    )
+}
+
 #[test]
 #[ignore = "a measurement: prints where frames go"]
 fn where_a_frame_goes() {
@@ -464,6 +501,7 @@ fn where_a_frame_goes() {
             .collect(),
     );
     println!("forgetting what is unused: {forget:.2} ms; a status line anew: {status:.2} ms");
+    println!("{}", what_parts_of_a_key_ask(&viewer));
     let page = viewer.cursor_page.get();
     let (document, world) = (
         viewer.document.clone().unwrap(),
