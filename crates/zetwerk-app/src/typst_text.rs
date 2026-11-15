@@ -16,6 +16,7 @@ mod shown;
 mod slots;
 
 pub use shown::{join, letters, put_over, raw_blank};
+pub use shown::{parted, pieces};
 pub use slots::{Around, Enclosure, enclosing, has_rules, slot_name, spot_name};
 
 /// The innermost node at byte `at` of `source` and its ancestors, from
@@ -431,9 +432,31 @@ pub fn line_break(source: &Source, at: usize) -> (Range<usize>, String) {
             (line, String::new())
         };
     }
+    // Text set off ends with its paragraph: it is closed before the
+    // break and begun again behind it.
+    let (chain, _) = containing(source, at);
+    // At the start of a heading the heading stays one, and moves down:
+    // the break goes before its mark, not between it and its text.
+    let line = text[..at].rfind('\n').map_or(0, |found| found + 1);
+    let mark = text[line..at].trim();
+    if chain.iter().any(|node| node.kind() == SyntaxKind::Heading)
+        && !mark.is_empty()
+        && mark.bytes().all(|b| b == b'=')
+    {
+        return (line..at, format!("\n\n{}", &text[line..at]));
+    }
+    let marks: String = chain
+        .iter()
+        .filter_map(|node| match node.kind() {
+            SyntaxKind::Strong => Some('*'),
+            SyntaxKind::Emph => Some('_'),
+            _ => None,
+        })
+        .collect();
+    let closing: String = marks.chars().rev().collect();
     match list_item(source, at.saturating_sub(1)) {
-        Some((indent, marker)) => put(&format!("\n{indent}{marker} ")),
-        None => put("\n\n"),
+        Some((indent, marker)) => put(&format!("{closing}\n{indent}{marker} {marks}")),
+        None => put(&format!("{closing}\n\n{marks}")),
     }
 }
 
@@ -567,7 +590,26 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         Some(SyntaxKind::Hash) => return None,
         // The names of code and of what is referred to go on.
         Some(SyntaxKind::Ident) if matches!(c, '_' | '[' | '(') => return None,
+        // Unless the name is that of a label there, and no other label's
+        // begins with it and `c`: the reference is whole, and `c` is text
+        // behind it.
+        Some(SyntaxKind::RefMarker)
+            if (c.is_alphanumeric() || matches!(c, '_' | '-'))
+                && behind.is_some_and(|marker| {
+                    let name = text[marker.range()].trim_start_matches('@');
+                    text.contains(&format!("<{name}>")) && !text.contains(&format!("<{name}{c}"))
+                }) =>
+        {
+            return escaped();
+        }
         Some(SyntaxKind::RefMarker) if c == '_' => return None,
+        // Behind a call (a footnote, a table), `(` would call what it
+        // gives.
+        Some(SyntaxKind::RightParen | SyntaxKind::RightBracket | SyntaxKind::RightBrace)
+            if c == '(' =>
+        {
+            return escaped();
+        }
         // Behind strong text a letter would make its last mark a
         // character like any other: the function says it, then.
         Some(SyntaxKind::Star | SyntaxKind::Underscore) if c.is_alphanumeric() => {

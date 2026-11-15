@@ -3134,6 +3134,7 @@ mod tests {
     mod left_behind;
     mod panels;
     mod speed;
+    mod typing;
     mod typist;
 
     /// A viewer in an 800×620 window showing `pages` A4 pages.

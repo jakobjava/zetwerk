@@ -190,6 +190,26 @@ pub trait Host {
         None
     }
 
+    /// Whether bytes `range` of the text go from one part of what the
+    /// host shows that is typed into by itself to another: from a cell
+    /// of a table to the next, from a footnote to the text it is in.
+    /// Backspace and Delete in insert mode take nothing across that.
+    fn parted(&self, range: Range<usize>) -> bool {
+        let _ = range;
+        false
+    }
+
+    /// What deleting bytes `range` of the text takes, `with` put where
+    /// the first of it was: the parts of it that go, in the order of the
+    /// text and apart from each other. A host that shows pages keeps the
+    /// marks whose partners stay (the one that closes strong text, say),
+    /// which would otherwise make all that follows something else.
+    /// `None` where nothing may go.
+    fn pieces(&self, range: Range<usize>, with: &str) -> Option<Vec<Range<usize>>> {
+        let _ = with;
+        Some(vec![range])
+    }
+
     /// A text object of the host's language around byte `at`, named by
     /// the key after `i` (the inside) or `a` (`around`: all of it). The
     /// host says which keys those are; `None` for all others, and where
@@ -2557,6 +2577,9 @@ impl Engine {
                     return horizontal(to, Kind::Inclusive);
                 }
                 let (to, ok) = motion::word_forward(text, pos, count, big, operating);
+                let to = self.past_unshown(pos, to, host, |at| {
+                    motion::word_forward(text, at, 1, big, false).0
+                });
                 if !ok && !operating && to == pos {
                     self.wanted_column = None;
                     return None;
@@ -2579,10 +2602,16 @@ impl Engine {
             }
             'b' | 'B' => {
                 let (to, ok) = motion::word_backward(text, pos, count, c == 'B');
+                let to = self.past_unshown(pos, to, host, |at| {
+                    motion::word_backward(text, at, 1, c == 'B').0
+                });
                 horizontal(self.partial(text, to, ok)?, Kind::Exclusive)
             }
             'e' | 'E' => {
                 let (to, ok) = motion::word_end(text, pos, count, c == 'E', false);
+                let to = self.past_unshown(pos, to, host, |at| {
+                    motion::word_end(text, at, 1, c == 'E', false).0
+                });
                 if operating {
                     // Unlike `b` and `ge`, a pending operator is applied to
                     // however far `e` got.
@@ -2682,6 +2711,36 @@ impl Engine {
             kind: Kind::Linewise,
             column: Column::Keep,
         }
+    }
+
+    /// Where a word motion from byte `from` that got to `to` leads where
+    /// the host shows pages: on past the marks of strong or emphasised
+    /// text that show as nothing (the star that closes it), which are no
+    /// word there, by `step` from each. Only for the cursor itself, and
+    /// where it stands on what the host shows: then the host knows what
+    /// that is.
+    fn past_unshown(
+        &self,
+        from: usize,
+        to: usize,
+        host: &impl Host,
+        step: impl Fn(usize) -> usize,
+    ) -> usize {
+        let cursor_only = self.pending.operator.is_none() && !self.selecting();
+        if !self.rows_first || !cursor_only || host.stop(from, Seek::At).is_none() {
+            return to;
+        }
+        let text = Text(host.text());
+        let mut to = to;
+        for _ in 0..8 {
+            let mark = matches!(text.char_at(to), Some('*' | '_'));
+            let next = step(to);
+            if !mark || host.stop(to, Seek::At).is_some() || next == to {
+                break;
+            }
+            to = next;
+        }
+        to
     }
 
     /// What to make of a word motion that got to `to`. If it got as far as
@@ -2844,6 +2903,13 @@ impl Engine {
         match operator {
             Operator::Yank => {
                 let mut yanked = selected;
+                if !linewise && let Some(pieces) = host.pieces(start..end, "") {
+                    // Not the marks whose partners are not taken along.
+                    yanked = pieces
+                        .into_iter()
+                        .filter_map(|piece| host.text().get(piece))
+                        .collect();
+                }
                 if linewise && !yanked.ends_with('\n') {
                     yanked.push('\n');
                 }
@@ -2865,7 +2931,21 @@ impl Engine {
                     self.undo_block = None;
                     return self.reset_pending();
                 }
-                let mut deleted = selected;
+                let whole = start..end;
+                let pieces = if linewise {
+                    Some(vec![whole])
+                } else {
+                    host.pieces(start..end, "")
+                };
+                let Some(pieces) = pieces.filter(|pieces| !pieces.is_empty()) else {
+                    // It would leave the text other than it shows.
+                    (self.undo_cursor, self.undo_block) = (None, None);
+                    return self.fail();
+                };
+                let mut deleted: String = pieces
+                    .iter()
+                    .filter_map(|piece| host.text().get(piece.clone()))
+                    .collect();
                 if linewise && !deleted.ends_with('\n') {
                     deleted.push('\n');
                 }
@@ -2875,7 +2955,9 @@ impl Engine {
                     linewise,
                 });
                 self.store(deleted, linewise, true);
-                self.edit(host, start..end, "");
+                for piece in pieces.into_iter().rev() {
+                    self.edit(host, piece, "");
+                }
                 let text = Text(host.text());
                 if linewise {
                     let line = if start >= text.len() {
@@ -2915,11 +2997,23 @@ impl Engine {
                     }
                     self.edit(host, start..content_end, "");
                 } else {
+                    let Some(pieces) = host.pieces(start..end, "") else {
+                        (self.undo_cursor, self.undo_block) = (None, None);
+                        return self.fail();
+                    };
+                    if pieces.len() != 1 || pieces[0] != (start..end) {
+                        changed = pieces
+                            .iter()
+                            .filter_map(|piece| host.text().get(piece.clone()))
+                            .collect();
+                    }
                     let nothing = changed.is_empty() && nothing_selected;
                     if !nothing && !host.text().is_empty() {
                         self.store(changed, false, true);
                     }
-                    self.edit(host, start..end, "");
+                    for piece in pieces.into_iter().rev() {
+                        self.edit(host, piece, "");
+                    }
                 }
                 self.cursor = start;
                 self.enter_insert(1, host.text());
@@ -3057,11 +3151,27 @@ impl Engine {
             self.cursor = Text(host.text()).first_non_blank(at);
         } else {
             let text = Text(host.text());
-            let at = if after && !text.line_is_empty(self.cursor) {
-                text.next(self.cursor)
-            } else {
-                self.cursor
+            // On a page, behind or before what the cursor is on there:
+            // not into the middle of an escaped sign or a reference.
+            let shown = host
+                .stop(self.cursor, Seek::Before)
+                .filter(|stop| stop.start <= self.cursor && self.cursor < stop.end);
+            let at = match shown {
+                Some(stop) if self.rows_first => {
+                    if after {
+                        stop.end
+                    } else {
+                        stop.start
+                    }
+                }
+                _ if after && !text.line_is_empty(self.cursor) => text.next(self.cursor),
+                _ => self.cursor,
             };
+            // Not where it would leave the text other than it shows
+            // (see `Host::pieces`): strong text left open, say.
+            if self.rows_first && host.pieces(at..at, &inserted).is_none() {
+                return self.fail();
+            }
             self.edit(host, at..at, &inserted);
             self.took = Some(Took::Put(at..at + inserted.len()));
             let text = Text(host.text());
@@ -3092,31 +3202,43 @@ impl Engine {
         self.record_selection(Text(host.text()));
         self.mode = Mode::Normal;
         self.reset_pending();
-        let replaced = host.text().get(range.clone()).unwrap_or("").to_owned();
         let mut inserted = register.text.clone();
         if linewise_selection && !register.linewise {
             inserted.push('\n');
         } else if !linewise_selection && register.linewise {
             inserted.insert(0, '\n');
         }
-        self.edit(host, range.clone(), &inserted);
-        self.took = Some(Took::Put(range.start..range.start + inserted.len()));
+        // Marks whose partners are not selected stay (see `Host::pieces`).
+        let pieces = if linewise_selection || register.linewise {
+            Some(vec![range.clone()])
+        } else {
+            host.pieces(range.clone(), &inserted)
+        };
+        let Some(pieces) = pieces else {
+            return self.fail();
+        };
+        let replaced: String = pieces
+            .iter()
+            .filter_map(|piece| host.text().get(piece.clone()))
+            .collect();
+        let start = pieces.first().map_or(range.start, |piece| piece.start);
+        for piece in pieces.iter().skip(1).rev() {
+            self.edit(host, piece.clone(), "");
+        }
+        let first = pieces.first().cloned().unwrap_or(start..start);
+        self.edit(host, first, &inserted);
+        self.took = Some(Took::Put(start..start + inserted.len()));
         if keep {
             self.store(replaced, linewise_selection, true);
         }
         let text = Text(host.text());
         let landed = if register.linewise {
-            let line = if linewise_selection {
-                range.start
-            } else {
-                range.start + 1
-            };
+            let line = if linewise_selection { start } else { start + 1 };
             text.first_non_blank(line.min(text.len()))
         } else if inserted.contains('\n') && !linewise_selection {
-            range.start
+            start
         } else {
-            text.prev(range.start + register.text.len())
-                .max(range.start)
+            text.prev(start + register.text.len()).max(start)
         };
         self.cursor = clamp(text, landed, false);
         self.wanted_column = None;
@@ -3664,6 +3786,7 @@ impl Engine {
 
     /// What a key other than Escape and the cursor keys does in insert
     /// mode. Returns whether it did anything.
+    #[allow(clippy::too_many_lines, reason = "one arm per key")]
     fn insert_apply(&mut self, press: KeyPress, host: &mut impl Host) -> bool {
         let text = Text(host.text());
         match (press.key, press.ctrl) {
@@ -3682,6 +3805,9 @@ impl Engine {
                     to = motion::word_backward(text, to, 1, false).0.max(start);
                 }
                 let to = self.stop_at_insert_start(host.text(), to);
+                if host.parted(to..self.cursor) {
+                    return false;
+                }
                 self.insert_delete(to, host);
             }
             (Key::Char('u'), true) => {
@@ -3742,8 +3868,12 @@ impl Engine {
                     let between = text.0.get(self.cursor..shown.start);
                     between.is_some_and(|between| between.contains('\n'))
                 };
-                if shown.as_ref().is_some_and(apart) {
-                    return false;
+                if let Some(shown) = shown.as_ref().filter(|shown| apart(shown)) {
+                    // At the end of a paragraph: the next one is joined
+                    // to it, as a word processor does.
+                    return self
+                        .join_apart(self.cursor, self.cursor, shown.start, host)
+                        .is_some();
                 }
                 let next = text.next(self.cursor);
                 let behind = shown.unwrap_or(self.cursor..next);
@@ -3751,7 +3881,13 @@ impl Engine {
                 if behind.is_empty() || behind.end > text.len() || next >= text.len() {
                     return false;
                 }
-                self.edit(host, behind, "");
+                // Nor what is in another cell, or out of a footnote.
+                if host.parted(self.cursor..behind.start) || host.parted(behind.clone()) {
+                    return false;
+                }
+                if self.delete_pieces(host, behind).is_none() {
+                    return false;
+                }
             }
             (Key::Text(number), _) => {
                 let Some((replaced, with, within)) = self.texts.get(number as usize).cloned()
@@ -3858,10 +3994,40 @@ impl Engine {
             // What the host shows before the cursor goes, not the markup
             // that may stand between it and the cursor.
             let before = Text(host.text()).prev(self.cursor);
+            // A blank typed at the end of a line shows as nothing there;
+            // it is still what goes first.
+            let text = Text(host.text());
+            let blank = matches!(text.char_at(before), Some(' ' | '\t'))
+                && text
+                    .0
+                    .get(self.cursor..text.line_end(self.cursor))
+                    .is_some_and(|rest| rest.trim().is_empty());
+            if !blank
+                && let Some(stop) = host.stop(before, Seek::Before)
+                && stop.end < self.cursor
+            {
+                let between = host.text().get(stop.end..self.cursor).unwrap_or("");
+                if between.contains('\n') {
+                    // At the start of a paragraph: it is joined to the
+                    // one before, as a word processor does. What that
+                    // one shows last is not taken.
+                    let Some(gone) = self.join_apart(stop.start, stop.end, self.cursor, host)
+                    else {
+                        return false;
+                    };
+                    self.cursor -= gone.len().min(self.cursor);
+                    self.insert_start = place(host.text(), self.cursor);
+                    return true;
+                }
+                if host.parted(stop.end..self.cursor) || host.parted(stop) {
+                    return false;
+                }
+            }
             // So does a symbol written with several letters that stood
             // there before typing began: it shows as one thing. What
             // was just typed goes letter by letter, as it came.
-            if let Some(stop) = host.stop(before, Seek::Before)
+            if !blank
+                && let Some(stop) = host.stop(before, Seek::Before)
                 && (stop.end < self.cursor
                     || (stop.end == self.cursor && self.stood_before_insert(host.text(), &stop)))
             {
@@ -3873,11 +4039,18 @@ impl Engine {
                     return true;
                 }
                 if to == stop.start {
-                    self.edit(host, stop.clone(), "");
+                    if self.delete_pieces(host, stop.clone()).is_none() {
+                        return false;
+                    }
                     self.cursor = stop.start;
                     return true;
                 }
             }
+        }
+        // Not the mark that opens a cell or a footnote, from inside it.
+        let text = Text(host.text());
+        if !self.replacing && host.parted(text.prev(self.cursor)..self.cursor) {
+            return false;
         }
         if self.pairs && !self.replacing {
             // Between a pair with nothing in it: both go.
@@ -3922,6 +4095,53 @@ impl Engine {
         true
     }
 
+    /// Delete at the end of a paragraph, Backspace at the start of one,
+    /// where the host shows pages: the paragraph byte `at` is in and the
+    /// next are joined, where what is shown last of the one ends at
+    /// `end`, what is shown first of the other begins at `next`, and
+    /// between those and where the two are parted stand only marks that
+    /// show as nothing. Lines of one paragraph lose the line break that
+    /// parts them. Nothing is joined that would turn the marks of strong
+    /// or emphasised text into characters. Returns the bytes that went.
+    fn join_apart(
+        &mut self,
+        at: usize,
+        end: usize,
+        next: usize,
+        host: &mut impl Host,
+    ) -> Option<Range<usize>> {
+        let text = host.text();
+        let between = text.get(end..next)?;
+        let quiet = |from: usize, to: usize| {
+            // Not out of an equation or a string either.
+            let shows_nothing = text.get(from..to).is_some_and(|between| {
+                !between.contains(['\n', '$', '"'])
+                    && !between.contains("//")
+                    && !between.contains("/*")
+            });
+            from <= to && shows_nothing && !host.parted(from..to)
+        };
+        let joined = host.join(at, false).and_then(|(range, with)| {
+            // Blanks typed behind the end of the paragraph stay: they
+            // were typed to part it from what is joined to it.
+            let typed = range.start < end && text.get(range.start..end)?.trim().is_empty();
+            let start = if typed { end } else { range.start };
+            let fits = with.is_empty() && start < range.end;
+            (fits && quiet(end, start) && quiet(range.end, next)).then_some(start..range.end)
+        });
+        let lines = between.trim().is_empty() && between.matches('\n').count() == 1;
+        let gone = joined.or_else(|| (lines && !host.parted(end..next)).then_some(end..next))?;
+        let left = text[..gone.start].chars().next_back();
+        let right = text[gone.end..].chars().next();
+        let mark = |c: Option<char>| matches!(c, Some('*' | '_'));
+        let letter = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+        if (mark(left) && letter(right)) || (letter(left) && mark(right)) {
+            return None;
+        }
+        self.edit(host, gone.clone(), "");
+        Some(gone)
+    }
+
     /// Whether bytes `stop` of `text`, which end at the cursor, are more
     /// than one character and were there before this insert began.
     fn stood_before_insert(&self, text: &str, stop: &Range<usize>) -> bool {
@@ -3957,8 +4177,24 @@ impl Engine {
 
     /// Deletes from `to` up to the cursor.
     fn insert_delete(&mut self, to: usize, host: &mut impl Host) {
-        self.edit(host, to..self.cursor, "");
-        self.cursor = to;
+        if self.delete_pieces(host, to..self.cursor).is_some() {
+            self.cursor = to;
+        }
+    }
+
+    /// Deletes bytes `range` of the text as the host says it goes (see
+    /// [`Host::pieces`]). Returns the text that went, or `None` if
+    /// nothing could.
+    fn delete_pieces(&mut self, host: &mut impl Host, range: Range<usize>) -> Option<String> {
+        let pieces = host.pieces(range, "")?;
+        let taken = pieces
+            .iter()
+            .filter_map(|piece| host.text().get(piece.clone()))
+            .collect();
+        for piece in pieces.into_iter().rev() {
+            self.edit(host, piece, "");
+        }
+        Some(taken)
     }
 
     fn leave_insert(&mut self, host: &mut impl Host) {
