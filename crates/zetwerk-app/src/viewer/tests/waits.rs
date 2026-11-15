@@ -210,29 +210,56 @@ fn the_status_line_counts_the_seconds_only_while_a_compile_runs() {
 }
 
 #[test]
-fn a_slow_part_turns_parts_off_until_a_whole_compile_says_otherwise() {
+fn a_document_that_always_takes_long_is_said_to_only_beyond_its_usual() {
+    let (mut viewer, directory) = editing("Some text.\n");
+    viewer.stats.compile_ms = 3000.0;
+    viewer.compiling(Some(ago(4)), None);
+    assert_eq!(viewer.compile_words(Instant::now()), None);
+    press(&mut viewer, "<C-c>");
+    assert!(!viewer.take_stop());
+    viewer.compiling(Some(ago(7)), None);
+    let words = viewer.compile_words(Instant::now()).unwrap_or_default();
+    assert!(words.starts_with("typesetting 7 s"), "{words}");
+    press(&mut viewer, "<C-c>");
+    assert!(viewer.take_stop());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// How many parts were typeset, or begun to be, on this thread.
+fn parts_begun() -> usize {
+    super::local::PARTS_TYPESET.get()
+}
+
+#[test]
+fn a_slow_part_is_not_waited_for_and_turns_parts_off_until_a_whole_compile_says_otherwise() {
     // Typed into a heading: the page is not worked out, a part is
     // typeset.
     let (mut viewer, directory) = editing("= Title\n\nMore.\n");
-    // Every part is slow by this budget.
+    // No part is in time by this budget.
     viewer.waiting.part_budget = Duration::ZERO;
+    let begun = parts_begun();
     press(&mut viewer, "AA");
-    assert_eq!(viewer.stats.local, 1, "{:?}", viewer.declined);
-    // The next key does not typeset one, and says why the page waits.
-    press(&mut viewer, "B");
-    assert_eq!(viewer.stats.local, 1);
+    assert_eq!((parts_begun() - begun, viewer.stats.local), (1, 0));
     let declined = viewer.declined.clone().unwrap_or_default();
-    assert!(declined.contains("to typeset by itself"), "{declined}");
+    assert!(declined.contains("takes longer than 0 ms"), "{declined}");
+    // The next key does not begin one, and says why the page waits.
+    press(&mut viewer, "B");
+    assert_eq!(parts_begun() - begun, 1);
+    let declined = viewer.declined.clone().unwrap_or_default();
+    assert!(
+        declined.contains("to typeset by itself: the page waits"),
+        "{declined}"
+    );
     // A whole compile within the budget: the cause is gone.
-    viewer.waiting.part_budget = Duration::from_secs(1);
+    viewer.waiting.part_budget = Duration::from_secs(10);
     compile(&mut viewer);
     press(&mut viewer, "C");
-    assert_eq!(viewer.stats.local, 2, "{:?}", viewer.declined);
+    assert_eq!((parts_begun() - begun, viewer.stats.local), (2, 1));
     // Slow again, and the whole not within the budget: off, and tried
     // again later.
     viewer.waiting.part_budget = Duration::ZERO;
     press(&mut viewer, "D");
-    assert_eq!(viewer.stats.local, 3, "{:?}", viewer.declined);
+    assert_eq!((parts_begun() - begun, viewer.stats.local), (3, 1));
     let (revision, world) = viewer.snapshot();
     let compiled = zetwerk_typst::compile(&world);
     viewer.compiled(CompileOutput {
@@ -242,12 +269,44 @@ fn a_slow_part_turns_parts_off_until_a_whole_compile_says_otherwise() {
         duration: Duration::from_secs(5),
     });
     press(&mut viewer, "E");
-    assert_eq!(viewer.stats.local, 3);
+    assert_eq!(parts_begun() - begun, 3);
     if let Some(slow) = viewer.waiting.slow_part.as_mut() {
         slow.at = ago(3600);
     }
+    viewer.waiting.part_budget = Duration::from_secs(10);
     press(&mut viewer, "F");
-    assert_eq!(viewer.stats.local, 4, "{:?}", viewer.declined);
+    assert_eq!((parts_begun() - begun, viewer.stats.local), (4, 2));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn the_key_that_makes_a_long_loop_does_not_wait_for_it() {
+    // Before, the part was typeset on the window's thread: the key that
+    // made the loop long waited for all of it (2.1 s for two million
+    // rounds). Now it waits no longer than the budget.
+    let text = "= Sum\n\nZeros 000000 here.\n\nThe sum is #{let t = 0; for i in range(3) { t += i }; t}.\n";
+    let (mut viewer, directory) = editing(text);
+    viewer.waiting.part_budget = Duration::from_millis(100);
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(text.find("000000").unwrap_or(0));
+    }
+    press(&mut viewer, "yiw");
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(text.find("(3)").unwrap_or(0) + 1);
+    }
+    let started = Instant::now();
+    press(&mut viewer, "p");
+    let took = started.elapsed();
+    assert!(
+        viewer
+            .text()
+            .is_some_and(|text| text.contains("range(3000000)")),
+        "{:?}",
+        viewer.text()
+    );
+    assert!(took < Duration::from_millis(1000), "the key took {took:?}");
+    let declined = viewer.declined.clone().unwrap_or_default();
+    assert!(declined.contains("takes longer than 100 ms"), "{declined}");
     let _ = std::fs::remove_dir_all(directory);
 }
 

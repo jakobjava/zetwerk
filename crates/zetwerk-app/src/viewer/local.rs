@@ -237,7 +237,7 @@ impl Viewer {
         let alone = world.with_text(cut);
         #[cfg(test)]
         PARTS_TYPESET.set(PARTS_TYPESET.get() + 1);
-        let compiled = zetwerk_typst::compile(&alone);
+        let compiled = self.compile_part(&alone)?;
         let Some(typeset) = compiled.document else {
             let first = compiled.errors.first();
             // An equation Typst refuses is shown as it is written; with

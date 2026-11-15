@@ -216,22 +216,64 @@ impl Worker {
     /// so that the one that took its place is not slowed down by it. Off
     /// the window's thread, and only where the system has `renice`.
     fn lower(&self) {
-        let threads = self.shared.lock().threads.clone();
-        if threads.is_empty() {
-            return;
-        }
-        let _ = thread::Builder::new()
-            .name("zetwerk-renice".into())
-            .spawn(move || {
-                let _ = std::process::Command::new("renice")
-                    .args(["-n", "19", "-p"])
-                    .args(&threads)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            });
+        lower(self.shared.lock().threads.clone());
     }
+}
+
+/// Gives `threads` (as the system numbers them) the lowest priority.
+fn lower(threads: Vec<String>) {
+    if threads.is_empty() {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("zetwerk-renice".into())
+        .spawn(move || {
+            let _ = std::process::Command::new("renice")
+                .args(["-n", "19", "-p"])
+                .args(&threads)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        });
+}
+
+/// Compiles `world` as [`compile`] does, but on a thread of its own, and
+/// waits for it no longer than `limit`: for what is compiled where
+/// somebody waits, the window's thread. `None` if it took longer; it then
+/// runs on to its end at the lowest priority, and what it makes is
+/// dropped. Typst cannot be stopped, so that is all that can be done.
+#[must_use]
+pub fn compile_within(world: &ProjectWorld, limit: Duration) -> Option<Compiled> {
+    let main = typst::World::main(world);
+    let Ok(source) = typst::World::source(world, main) else {
+        return Some(compile(world));
+    };
+    let copy = world.with_text(source);
+    let (sender, receiver) = mpsc::channel();
+    let number = Arc::new(Mutex::new(None));
+    let own = Arc::clone(&number);
+    let spawned = thread::Builder::new()
+        .name("zetwerk-part".into())
+        .spawn(move || {
+            *own.lock().unwrap_or_else(PoisonError::into_inner) = thread_number();
+            let _ = sender.send(compile(&copy));
+        });
+    if spawned.is_err() {
+        return Some(compile(world));
+    }
+    let compiled = receiver.recv_timeout(limit).ok();
+    if compiled.is_none() {
+        lower(
+            number
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .into_iter()
+                .collect(),
+        );
+    }
+    compiled
 }
 
 /// The number the system knows the calling thread by, where it says so.
@@ -692,6 +734,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn what_takes_too_long_is_not_waited_for() {
+        let world = project("quick").snapshot();
+        let compiled = compile_within(&world, Duration::from_secs(30));
+        assert!(compiled.is_some_and(|compiled| compiled.document.is_some()));
+        let started = Instant::now();
+        assert!(compile_within(&slow(SLOW * 2), Duration::from_millis(20)).is_none());
+        assert!(started.elapsed() < Duration::from_millis(300));
+    }
+
     /// A text that takes long to compile: a loop of `rounds` rounds.
     fn slow(rounds: usize) -> ProjectWorld {
         project(&format!(
@@ -787,8 +839,13 @@ mod tests {
             .unwrap_or_else(|| panic!("a text waits"));
         assert_eq!(at, since + Duration::from_secs(40));
         assert!(!compiler.overtake(since + Duration::from_secs(39)));
-        // Without the overtaking, the newer text is compiled after.
-        assert_eq!(wait_for(&mut compiler).revision, 3);
+        // Without the overtaking, the newer text is compiled after it.
+        let mut last = wait_for(&mut compiler).revision;
+        while last != 3 {
+            last = wait_for(&mut compiler).revision;
+        }
+        assert!(compiler.is_idle());
+        assert_eq!(compiler.abandoned(), 0);
     }
 
     #[test]

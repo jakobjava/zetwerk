@@ -12,14 +12,15 @@
 //!   itself after a while (see [`zetwerk_typst::Bounds`]); where too many
 //!   are given up on already, the status line says what the text waits
 //!   for, and how long it has.
-//! - **Parts typeset by themselves** (see `local.rs`) are typeset on the
-//!   window's thread, with every key that needs one. One that took longer
-//!   than [`PART_BUDGET`] (a heavy rule before it, a big table) turns
-//!   them off for the document: the page then waits for the whole, as it
-//!   does where a part cannot be typeset, and keys do not. A whole
-//!   compile within the budget says the cause is gone; else parts are
-//!   tried again after [`PARTS_AGAIN`], twice as long after every part
-//!   that was slow again.
+//! - **Parts typeset by themselves** (see `local.rs`) are typeset for
+//!   the window's thread, with every key that needs one, and waited for
+//!   no longer than [`PART_BUDGET`]. One that takes longer (a heavy rule
+//!   before it, a long loop just closed) is given up on, runs on aside at
+//!   the lowest priority, and turns parts off for the document: the page
+//!   then waits for the whole, as it does where a part cannot be
+//!   typeset, and keys do not. A whole compile within the budget says
+//!   the cause is gone; else parts are tried again after
+//!   [`PARTS_AGAIN`], twice as long after every part that was slow again.
 
 use std::time::{Duration, Instant};
 
@@ -27,18 +28,21 @@ use super::{Mode, Viewer, editor};
 use crate::keys::{Key, KeyPress};
 
 /// A compile is said to run long, and can be stopped, once it has run
-/// this long. A one-character change of a three-hundred-page document
-/// compiles in 0.4 s, on battery in about twice that (see
-/// `tests/waits.rs`): anything that is still at it after this has
-/// something in it that takes long.
+/// this long, and twice as long as the last one took. A change of three
+/// hundred pages of the article compiles in 0.3–0.9 s on this laptop,
+/// 2.5 s with the machine busy with builds in a test build (see
+/// `tests/waits.rs`), opening them takes 2–9 s: anything that is still
+/// at it after this, and twice its usual, has something in it that takes
+/// long, or is a document opened.
 pub(super) const LONG: Duration = Duration::from_secs(2);
 
-/// A part typeset by itself that takes longer than this costs every key
-/// that needs one as much. A part of the article and of fifty pages of
-/// it takes 8–30 ms, on battery and with the machine busy up to three
-/// times that; with a loop of 200 000 rounds before the text 220 ms, of
-/// two million 2.1 s (see `tests/waits.rs`).
-pub(super) const PART_BUDGET: Duration = Duration::from_millis(150);
+/// A part typeset by itself that takes longer than this is not waited
+/// for, and would cost every key that needs one as much. A part of the
+/// article takes 8–15 ms, of three hundred pages of it 30–150 ms (with
+/// the machine busy with builds, in a test build); with a loop of
+/// 200 000 rounds before the text 220–260 ms, of two million 2.1–2.7 s,
+/// with a heavy `#let` 0.8 s (see `tests/waits.rs`).
+pub(super) const PART_BUDGET: Duration = Duration::from_millis(250);
 
 /// How long parts are left off after one was slow, the first time.
 const PARTS_AGAIN: Duration = Duration::from_secs(60);
@@ -97,6 +101,14 @@ fn seconds(duration: Duration) -> u64 {
 }
 
 impl Viewer {
+    /// How long a compile has to run to be said to run long: see
+    /// [`LONG`].
+    fn long(&self) -> Duration {
+        LONG.max(Duration::from_secs_f64(
+            (self.stats.compile_ms * 2.0 / 1000.0).clamp(0.0, 3600.0),
+        ))
+    }
+
     /// The window says what compiles: since when the compile under way
     /// runs, and since when the text waits for one given up on. Returns
     /// whether the status line is to say something else for it now.
@@ -111,9 +123,9 @@ impl Viewer {
     #[must_use]
     pub fn compiling_at(&self, now: Instant) -> Option<Instant> {
         let since = self.waiting.compiling.or(self.waiting.held)?;
-        let ran = now.saturating_duration_since(since);
-        Some(if ran < LONG {
-            since + LONG
+        let (ran, long) = (now.saturating_duration_since(since), self.long());
+        Some(if ran < long {
+            since + long
         } else {
             since + Duration::from_secs(seconds(ran) + 1)
         })
@@ -134,9 +146,12 @@ impl Viewer {
             return self.notice("nothing is being typeset");
         };
         self.waiting.stopped = Some((self.revision, ran));
+        let page = match self.document {
+            Some(_) => "the page is of the text before",
+            None => "no page until it is typeset",
+        };
         self.alert(format!(
-            "typesetting stopped after {} s: the page is of the text before; \
-             u undoes the change, :why says more",
+            "typesetting stopped after {} s: {page}; u undoes the change, :why says more",
             seconds(ran)
         ));
     }
@@ -152,9 +167,9 @@ impl Viewer {
             Some(editor) => editor.mode() == editor::Mode::Normal,
             None => self.mode == Mode::Normal,
         };
-        let now = Instant::now();
+        let (now, long) = (Instant::now(), self.long());
         let long = |since: Option<Instant>| {
-            since.is_some_and(|since| now.saturating_duration_since(since) >= LONG)
+            since.is_some_and(|since| now.saturating_duration_since(since) >= long)
         };
         if !normal {
             return false;
@@ -178,7 +193,7 @@ impl Viewer {
             ));
         }
         if let Some(since) = self.waiting.compiling
-            && now.saturating_duration_since(since) >= LONG
+            && now.saturating_duration_since(since) >= self.long()
         {
             return Some(format!("typesetting {} s, Ctrl-C stops  ", ran(since)));
         }
@@ -210,7 +225,7 @@ impl Viewer {
         }
         let since = self.waiting.compiling.or(self.waiting.held)?;
         let ran = Instant::now().saturating_duration_since(since);
-        (ran >= LONG).then(|| {
+        (ran >= self.long()).then(|| {
             format!(
                 "the text has been typesetting for {} s: something in it takes long; \
                  Ctrl-C stops it, and the page stays as it is",
@@ -244,6 +259,24 @@ impl Viewer {
             self.waiting.slow_part = None;
         }
         done
+    }
+
+    /// Typesets a part (see `local.rs`), waiting for it no longer than
+    /// the budget: a part that takes longer is given up on, runs on to
+    /// its end aside, and turns parts off (see
+    /// [`Viewer::typeset_locally_in_time`]). Without this, the key that
+    /// closes a long loop waits for all of it.
+    pub(super) fn compile_part(
+        &self,
+        alone: &zetwerk_typst::ProjectWorld,
+    ) -> Result<zetwerk_typst::Compiled, String> {
+        let budget = self.waiting.part_budget;
+        zetwerk_typst::compile_within(alone, budget).ok_or_else(|| {
+            format!(
+                "the part takes longer than {} ms to typeset by itself",
+                budget.as_millis()
+            )
+        })
     }
 
     /// A whole compile took `took`: within what a part may take, no part
