@@ -942,3 +942,27 @@ fn what_is_typed_behind_a_labelled_equation_leaves_it_its_label() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn deleting_back_from_an_equation_keeps_the_brackets_around_it() {
+    // An equation at the start of a cell of a table, a footnote or a
+    // caption: deleting back from it took the bracket the cell begins
+    // with, which shows as nothing, and the document was not typeset.
+    for (text, keys) in [
+        ("#table(columns: 2, [$p_1$], [$q$])\n", "i<C-w><Esc>"),
+        ("#table(columns: 2, [$p_1$], [$q$])\n", "i<BS><BS><Esc>"),
+        ("#table(columns: 2, [$p_1$], [$q$])\n", "db"),
+        ("A#footnote[$s$ in it] b.\n", "i<C-w><Esc>"),
+        ("#figure(rect(), caption: [$r^2$ end])\n", "d0"),
+    ] {
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "gsgs");
+        if let Some(editor) = viewer.editor.as_mut() {
+            editor.set_cursor(text.find('$').unwrap_or(0) + 1);
+        }
+        press(&mut viewer, keys);
+        assert_eq!(viewer.text(), Some(text), "{keys}");
+        settled(&mut viewer);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

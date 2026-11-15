@@ -1281,8 +1281,9 @@ pub fn is_whole_equation(source: &Source, equation: &Range<usize>) -> bool {
 }
 
 /// What a deletion of bytes `range` of `source` on a page takes: all of
-/// it but the dollar signs of an equation it takes only a part of, and
-/// the quotation marks of text in one. Those show as nothing; one taken
+/// it but the dollar signs of an equation it takes only a part of, the
+/// quotation marks of text in one, and the brackets of content. Those
+/// show as nothing; one taken
 /// with what is shown beside it would leave the other to run on into
 /// the text behind it. The parts that go, from the last; none if only
 /// such marks were to go.
@@ -1298,10 +1299,16 @@ pub fn deleted_on_page(source: &Source, range: &Range<usize>) -> Vec<Range<usize
         if apart || all {
             return;
         }
-        // So are the quotation marks of text in an equation.
+        // So are the quotation marks of text in an equation, and the
+        // brackets around what a call is given (a cell of a table, a
+        // footnote, a caption) that an equation may begin or end.
         let closed = match node.kind() {
             SyntaxKind::Equation => closing(node, SyntaxKind::Dollar) > 0,
             SyntaxKind::Str => math && bytes.len() >= 2 && node.leaf_text().ends_with('"'),
+            SyntaxKind::ContentBlock => {
+                node.children().next_back().map(|last| last.kind())
+                    == Some(SyntaxKind::RightBracket)
+            }
             _ => false,
         };
         if closed {
