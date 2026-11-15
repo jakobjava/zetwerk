@@ -199,6 +199,21 @@ impl Project {
         self.sources.insert(source.id(), source);
     }
 
+    /// Makes `source`, the text of the file at `path` in the project
+    /// directory, what the editor owns in place of the file `old`, which
+    /// is read from disk again from now on: for a text the editor goes on
+    /// with under another name. If `old` was the main file, the new one
+    /// is.
+    pub fn renamed(&mut self, old: FileId, source: Source, path: &Path) {
+        self.sources.remove(&old);
+        self.external.forget(old);
+        if old == self.main {
+            self.main = source.id();
+            self.main_path = std::path::absolute(path).ok();
+        }
+        self.sources.insert(source.id(), source);
+    }
+
     /// Where the main file is on disk; `None` for an in-memory project.
     #[must_use]
     pub fn main_path(&self) -> Option<&Path> {

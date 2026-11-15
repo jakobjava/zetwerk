@@ -32,6 +32,38 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.commit()
 }
 
+/// Writes `bytes` over the file at `path`, which must exist, in place, and
+/// forces them to disk. Unlike [`write_atomically`] a crash can leave the
+/// file cut short; it is for a file whose directory takes no new file.
+pub fn write_in_place(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    file.write_all(bytes)?;
+    file.set_len(bytes.len() as u64)?;
+    file.sync_all()
+}
+
+/// Gives the file at `from` the name `to` as well, never writing over
+/// anything at `to` ([`io::ErrorKind::AlreadyExists`]). Where the two
+/// names cannot share the file (another file system), `to` is made a
+/// complete copy, with the same permissions, before this returns.
+pub fn link_or_copy(from: &Path, to: &Path) -> io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Err(err),
+        Err(_) => {}
+    }
+    let bytes = std::fs::read(from)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(to)?;
+    let copied = file
+        .write_all(&bytes)
+        .and_then(|()| file.set_permissions(std::fs::metadata(from)?.permissions()))
+        .and_then(|()| file.sync_all());
+    if copied.is_err() {
+        let _ = std::fs::remove_file(to);
+    }
+    copied
+}
+
 /// The temporary files an interrupted [`write_atomically`] to `path` can
 /// have left next to it: regular files named `.<file name>.<six characters>`.
 ///

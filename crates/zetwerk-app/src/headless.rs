@@ -54,10 +54,18 @@ pub(crate) fn open(
     options: &Options,
 ) -> Result<(Project, Editor, zetwerk_core::Opened), String> {
     open_document(env, options).map_err(|err| match err {
-        OpenError::AlreadyOpen => format!(
-            "{} is open in another zetwerk already",
-            options.path.display()
-        ),
+        OpenError::AlreadyOpen => {
+            // The window that has it says so, and asks for attention.
+            let asked = match zetwerk_core::knock(&options.path, &options.state_dir) {
+                Ok(()) => "; that window was asked to come forward",
+                Err(_) => "",
+            };
+            format!(
+                "{} is open in another zetwerk window already{asked}: go on there, or close \
+                 it there to open it here",
+                options.path.display()
+            )
+        }
         OpenError::Other(why) => why,
     })
 }

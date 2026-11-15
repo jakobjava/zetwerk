@@ -5,6 +5,7 @@
 //! should look like. That keeps the whole behaviour of the program testable
 //! without opening a window.
 
+mod again;
 pub mod agent;
 mod aids;
 mod assist;
@@ -28,6 +29,7 @@ mod pointer;
 pub mod refer;
 mod refused;
 mod registers;
+mod saving;
 mod slides;
 mod sources;
 mod sources_add;
@@ -1044,9 +1046,11 @@ impl Viewer {
             .into_owned();
         self.opened.push(editor.file());
         let restored = editor.restored();
+        let remarks = editor.remarks().to_vec();
         self.editor = Some(editor);
         self.panes = Panes::Split;
         self.announce(opened, restored);
+        self.announce_remarks(&remarks);
         self.arrange();
         self
     }
@@ -2231,7 +2235,12 @@ impl Viewer {
         match editor.save(overwrite) {
             Ok(()) => {
                 let lines = editor.text().matches('\n').count();
-                self.notice(format!("{} written, {lines} lines", self.file));
+                let how = if editor.wrote_in_place() {
+                    ", over the file in place: its directory takes no new file"
+                } else {
+                    ""
+                };
+                self.notice(format!("{} written, {lines} lines{how}", self.file));
                 true
             }
             Err(DiskError::ChangedOnDisk) => {

@@ -195,18 +195,28 @@ impl<'a> Reader<'a> {
 /// `None` if `bytes` is not a journal at all.
 #[must_use]
 pub fn decode(bytes: &[u8]) -> Option<(Vec<Record>, usize)> {
-    let mut rest = bytes.strip_prefix(MAGIC)?;
+    bytes.strip_prefix(MAGIC)?;
+    let mut budget = usize::MAX;
+    Some(records_at(bytes, MAGIC.len(), &mut budget))
+}
+
+/// The whole records that follow each other from byte `at` of `bytes` on,
+/// and where the first that is not whole begins. Checking a record's
+/// checksum takes its length off `budget`; none is checked beyond it.
+fn records_at(bytes: &[u8], at: usize, budget: &mut usize) -> (Vec<Record>, usize) {
+    let mut rest = bytes.get(at..).unwrap_or_default();
     let mut records = Vec::new();
-    let mut valid = MAGIC.len();
+    let mut valid = at;
     while let Some((header, body)) = rest.split_at_checked(8) {
         let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
-        if len > MAX_PAYLOAD {
+        if len > MAX_PAYLOAD || len > *budget {
             break;
         }
         let Some((payload, after)) = body.split_at_checked(len) else {
             break;
         };
+        *budget -= len;
         if crc32fast::hash(payload) != crc {
             break;
         }
@@ -217,12 +227,59 @@ pub fn decode(bytes: &[u8]) -> Option<(Vec<Record>, usize)> {
         valid += 8 + len;
         rest = after;
     }
-    Some((records, valid))
+    (records, valid)
+}
+
+/// Whether `rest`, what follows the last whole record of a journal, is
+/// what a write cut short leaves behind: the beginning of a record, or
+/// nothing. Anything else is damage, and there may be records beyond it.
+#[must_use]
+pub fn is_torn_tail(rest: &[u8]) -> bool {
+    let Some((header, body)) = rest.split_at_checked(8) else {
+        return true;
+    };
+    let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    body.len() < len
+}
+
+/// What can still be read of a journal that cannot be read on from byte
+/// `from`: of the runs of whole records found beyond that byte, the last
+/// that holds a snapshot of the text, from its last snapshot on. Empty if
+/// there is none.
+///
+/// Every place is tried as the start of a record; a checksum that matches
+/// by chance is a chance of one in four billion. No more than a few times
+/// the journal's size is checked, however damaged it is.
+#[must_use]
+pub fn salvage(bytes: &[u8], from: usize) -> Vec<Record> {
+    let mut budget = bytes.len().saturating_mul(4).saturating_add(1 << 20);
+    let mut found = Vec::new();
+    let mut at = from;
+    while at + 8 <= bytes.len() && budget > 0 {
+        let (run, end) = records_at(bytes, at, &mut budget);
+        if run.is_empty() {
+            at += 1;
+            continue;
+        }
+        if let Some(snapshot) = run
+            .iter()
+            .rposition(|record| matches!(record, Record::Snapshot { .. }))
+        {
+            found = run[snapshot..].to_vec();
+        }
+        at = end.max(at + 1);
+    }
+    found
 }
 
 /// A journal file open for appending.
 pub struct Journal {
     file: File,
+    /// How long the journal is: where the next record begins.
+    len: u64,
+    /// Whether what a failed write left at the end could not be taken
+    /// off: nothing more is written then.
+    broken: bool,
     /// When the oldest record not yet forced to disk was written.
     unsynced_since: Option<Instant>,
 }
@@ -240,6 +297,8 @@ impl Journal {
         let file = OpenOptions::new().append(true).open(path)?;
         Ok(Self {
             file,
+            len: contents.len() as u64,
+            broken: false,
             unsynced_since: None,
         })
     }
@@ -249,10 +308,25 @@ impl Journal {
     /// When this returns, the record is with the operating system and
     /// survives the process being killed. It survives a power failure once
     /// [`Journal::sync`] has returned.
+    ///
+    /// A record that cannot be written whole (a full disk) is taken off
+    /// again: left cut short in the middle of the journal, it would end
+    /// the journal there, and every record written after it, once there
+    /// is room again, would be lost.
     pub fn append(&mut self, record: &Record) -> io::Result<()> {
+        if self.broken {
+            return Err(io::Error::other(
+                "the journal could not be put right after a failed write",
+            ));
+        }
+        let bytes = record.encode();
         // One write call per record: a record is either written or not,
         // as far as other readers of the file and a killed process go.
-        self.file.write_all(&record.encode())?;
+        if let Err(err) = self.file.write_all(&bytes) {
+            self.broken = self.file.set_len(self.len).is_err();
+            return Err(err);
+        }
+        self.len += bytes.len() as u64;
         self.unsynced_since.get_or_insert_with(Instant::now);
         Ok(())
     }
@@ -355,6 +429,44 @@ mod tests {
         // Flip a bit in the third record's payload.
         bytes[before + 12] ^= 0x40;
         assert_eq!(decode(&bytes), Some((records[..2].to_vec(), before)));
+    }
+
+    #[test]
+    fn a_torn_tail_is_told_from_damage() {
+        let records = samples();
+        let bytes = encoded(&records);
+        let whole = encoded(&records[..6]).len();
+        for cut in whole..bytes.len() {
+            assert!(is_torn_tail(&bytes[whole..cut]), "cut at {cut}");
+        }
+        let mut damaged = bytes.clone();
+        let before = encoded(&records[..2]).len();
+        damaged[before + 12] ^= 0x40;
+        assert!(!is_torn_tail(&damaged[before..]));
+    }
+
+    #[test]
+    fn what_follows_damage_is_salvaged_from_its_last_snapshot() {
+        let mut records = samples();
+        records.push(Record::Snapshot {
+            state: 2,
+            text: "again".into(),
+        });
+        records.push(Record::Goto { state: 0 });
+        let mut bytes = encoded(&records);
+        let before = encoded(&records[..2]).len();
+        // The length of the third record is damaged: nothing says where
+        // the next one begins.
+        bytes[before] ^= 0x40;
+        let (read, valid) = decode(&bytes).unwrap_or_default();
+        assert_eq!((read.as_slice(), valid), (&records[..2], before));
+        assert_eq!(salvage(&bytes, valid), records[7..].to_vec());
+        // Without a snapshot beyond the damage there is nothing to go on.
+        let mut bytes = encoded(&records[..7]);
+        bytes[before] ^= 0x40;
+        assert_eq!(salvage(&bytes, before), vec![]);
+        // Nor in garbage.
+        assert_eq!(salvage(&[0x55; 4000], 0), vec![]);
     }
 
     #[test]

@@ -831,6 +831,48 @@ impl Editor {
         self.document.save(overwrite)
     }
 
+    /// Whether the last save wrote over the file in place; see
+    /// [`Document::wrote_in_place`].
+    #[must_use]
+    pub fn wrote_in_place(&self) -> bool {
+        self.document.wrote_in_place()
+    }
+
+    /// What opening the file found that is to be said; see
+    /// [`Document::remarks`].
+    #[must_use]
+    pub fn remarks(&self) -> &[String] {
+        self.document.remarks()
+    }
+
+    /// Writes the text to the file at `to` as well. See
+    /// [`Document::write_copy`].
+    pub fn write_copy(&self, to: &Path, overwrite: bool) -> Result<(), DiskError> {
+        self.document.write_copy(to, overwrite)
+    }
+
+    /// Writes the text to the file at `to`, whose Typst file id is `id`,
+    /// and goes on as that file. See [`Document::save_as`].
+    pub fn save_as(&mut self, to: &Path, id: FileId, overwrite: bool) -> Result<(), DiskError> {
+        self.document.save_as(to, overwrite)?;
+        self.named(id);
+        Ok(())
+    }
+
+    /// Moves the file to `to`, whose Typst file id is `id`, with its
+    /// journal. See [`Document::rename`].
+    pub fn rename(&mut self, to: &Path, id: FileId) -> Result<Option<std::io::Error>, DiskError> {
+        let left = self.document.rename(to)?;
+        self.named(id);
+        Ok(left)
+    }
+
+    /// Makes the text that of the file `id`, as Typst names it.
+    fn named(&mut self, id: FileId) {
+        self.document
+            .rebuffer(|old| SourceBuffer(Source::new(id, old.0.text().to_owned())));
+    }
+
     /// Replaces the text with the file's, as one undo step.
     pub fn reload(&mut self) -> Result<(), DiskError> {
         self.document.reload()?;

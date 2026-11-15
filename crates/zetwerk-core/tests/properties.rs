@@ -50,6 +50,8 @@ enum Op {
     /// The process dies and the disk returns the journal with one byte
     /// changed.
     CorruptCrash(Index, u8),
+    /// The history is thinned, keeping this many of the newest states.
+    Thin(usize),
 }
 
 fn text() -> impl Strategy<Value = String> {
@@ -74,6 +76,7 @@ fn op() -> impl Strategy<Value = Op> {
         2 => Just(Op::Crash),
         1 => any::<Index>().prop_map(Op::TornCrash),
         1 => (any::<Index>(), 1..=255_u8).prop_map(|(at, flip)| Op::CorruptCrash(at, flip)),
+        1 => (0..6_usize).prop_map(Op::Thin),
     ]
 }
 
@@ -225,6 +228,7 @@ impl Session {
                 let at = at.index(bytes.len());
                 bytes[at] ^= flip;
             }),
+            Op::Thin(recent) => self.thin(recent),
         }
         self.check();
     }
@@ -283,6 +287,25 @@ impl Session {
                 assert!(!self.doc().is_modified());
             }
         }
+    }
+
+    /// Thins the history: the states that stay keep their texts, the text
+    /// and whether it is saved stay as they are, and so does the history
+    /// after a crash.
+    fn thin(&mut self, recent: usize) {
+        let (text, modified) = (self.text(), self.doc().is_modified());
+        let map = self.doc().thin(recent).unwrap();
+        let mut states = vec![String::new(); self.doc().history().len()];
+        for (old, new) in map.iter().enumerate() {
+            if let Some(new) = new {
+                states[*new as usize].clone_from(&self.model.states[old]);
+            }
+        }
+        self.model.states = states;
+        assert_eq!(self.text(), text);
+        assert_eq!(self.doc().is_modified(), modified);
+        // The journal is thinned too: a crash brings back the same.
+        self.crash();
     }
 
     /// Ends the session without saving and opens the file again.

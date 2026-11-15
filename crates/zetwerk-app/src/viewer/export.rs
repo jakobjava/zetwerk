@@ -178,6 +178,10 @@ pub struct Wanted {
     /// The name of the file, from the document's directory, if not the
     /// usual.
     pub file: Option<String>,
+    /// Whether a file of that name that this window did not write may be
+    /// written over (`:png!`). One it wrote is written over anyway, and
+    /// so is one of the usual name, which is of the document.
+    pub replace: bool,
 }
 
 impl Wanted {
@@ -219,6 +223,7 @@ impl Wanted {
             },
             dpi,
             file: (!file.is_empty()).then(|| file.to_owned()),
+            replace: false,
         })
     }
 }
@@ -480,6 +485,9 @@ pub(super) struct Exports {
     running: Option<String>,
     /// The export that waits for the text to be compiled.
     waiting: Option<Wanted>,
+    /// The files exports of this window were planned to write, which
+    /// they may write again (see [`Wanted::replace`]).
+    written: std::cell::RefCell<std::collections::HashSet<PathBuf>>,
 }
 
 impl Viewer {
@@ -500,8 +508,12 @@ impl Viewer {
     /// `:pdf`, `:png`, `:svg` and `:figure`, with what was typed behind
     /// them.
     pub(super) fn export_command(&mut self, name: &str, argument: &str) {
+        let (name, replace) = match name.strip_suffix('!') {
+            Some(name) => (name, true),
+            None => (name, false),
+        };
         match Wanted::parse(name, argument) {
-            Ok(wanted) => self.begin_export(wanted),
+            Ok(wanted) => self.begin_export(Wanted { replace, ..wanted }),
             Err(why) => self.alert(why),
         }
     }
@@ -653,6 +665,7 @@ impl Viewer {
             }
         };
         let name = self.export_name(&work)?;
+        self.may_write(wanted, &work)?;
         Ok(Job {
             document: export.document,
             world: export.world,
@@ -708,6 +721,36 @@ impl Viewer {
             return Err(format!("{} does not end in .{ending}", path.display()));
         }
         Ok(path)
+    }
+
+    /// Whether `work` may write its files: a file that is there is
+    /// written over only if this window wrote it, if it has the usual
+    /// name, or if `wanted` says so. Those it may write are noted as this
+    /// window's.
+    fn may_write(&self, wanted: &Wanted, work: &Work) -> Result<(), String> {
+        let paths: Vec<&PathBuf> = match work {
+            Work::Pdf { path, .. } => vec![path],
+            Work::Images { files, .. } => files.iter().map(|(_, path)| path).collect(),
+        };
+        let mut written = self.exports.written.borrow_mut();
+        if wanted.file.is_some() && !wanted.replace {
+            let root = self.project.root_dir();
+            let taken = paths.iter().find(|path| {
+                // A folder in the way is not written over anyway.
+                path.symlink_metadata().is_ok_and(|meta| !meta.is_dir())
+                    && !written.contains(**path)
+            });
+            if let Some(taken) = taken {
+                let shown = taken.strip_prefix(root).unwrap_or(taken);
+                return Err(format!(
+                    "{} is there already, and not written by this window: with ! \
+                     after the command it is written over",
+                    shown.display()
+                ));
+            }
+        }
+        written.extend(paths.into_iter().cloned());
+        Ok(())
     }
 
     /// What the files of `work` are called in the status line: their
@@ -1232,9 +1275,10 @@ mod tests {
             PICTURE
         );
 
-        // A file that was there is replaced whole, and that is said.
+        // A file that was there is replaced whole, where that is asked
+        // for, and that is said.
         std::fs::write(directory.join("old.png"), "not a picture").unwrap();
-        press(&mut viewer, ":png 1 old.png<CR>");
+        press(&mut viewer, ":png! 1 old.png<CR>");
         let told = "old.png written, page 1 of 3; it replaced the one that was there";
         assert_eq!(said(&viewer), (told, false));
         assert_eq!(size_of(&directory.join("old.png")), (400, 240));

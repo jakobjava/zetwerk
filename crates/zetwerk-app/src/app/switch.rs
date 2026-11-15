@@ -113,6 +113,14 @@ fn carry_over(from: &Viewer, to: &mut Viewer) {
     to.take_over_from(from);
 }
 
+/// Removes the file at `path`, made by `:new` for a document that could
+/// not be opened, if it is as it was made: empty.
+fn unmake(path: &Path) {
+    if std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == 0) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 impl App {
     /// Opens the document the viewer asks for in place of the one it
     /// shows, if it asks for one. Where it cannot be opened, the viewer
@@ -128,6 +136,9 @@ impl App {
         let path_before = std::mem::replace(&mut self.options.path, path.clone());
         let main_before = std::mem::replace(&mut self.options.main, main);
         if let Err(why) = session.go_to(&self.options, &self.proxy, new) {
+            if new {
+                unmake(&path);
+            }
             self.options.path = path_before;
             self.options.main = main_before;
             session.viewer.not_opened(&path, &why);
@@ -182,6 +193,24 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_file_that_could_not_be_opened_is_not_left_behind() {
+        let directory = std::env::temp_dir().join(format!("zetwerk-unmake-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap_or_else(|err| panic!("{err}"));
+        let (made, written) = (directory.join("new.typ"), directory.join("old.typ"));
+        std::fs::write(&made, "").unwrap_or_else(|err| panic!("{err}"));
+        std::fs::write(&written, "Text.\n").unwrap_or_else(|err| panic!("{err}"));
+        unmake(&made);
+        unmake(&written);
+        assert!(!made.exists());
+        assert!(
+            written.exists(),
+            "a file with text in it is not ours to remove"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn agents_that_only_propose_still_do_in_the_next_document() {

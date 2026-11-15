@@ -27,6 +27,7 @@ use crate::viewer::agent::AgentEdits;
 use crate::viewer::{self, Edited, State, Viewer};
 use crate::watch::FileWatcher;
 
+mod refusal;
 mod switch;
 
 /// How the window should be opened.
@@ -164,6 +165,7 @@ pub fn run(options: Options, ready: impl FnOnce(Handle)) -> Result<(), String> {
         proxy: event_loop.create_proxy(),
         session: None,
         error: None,
+        refusal: None,
     };
     event_loop
         .run_app(&mut app)
@@ -177,6 +179,9 @@ struct App {
     /// Everything that exists while the window does.
     session: Option<Session>,
     error: Option<String>,
+    /// The window that says why there is no session, where nobody would
+    /// read it on standard error.
+    refusal: Option<refusal::Refusal>,
 }
 
 struct Session {
@@ -211,13 +216,26 @@ impl ApplicationHandler<Event> for App {
         match Session::open(&self.options, &self.proxy, event_loop) {
             Ok(session) => self.session = Some(session),
             Err(err) => {
+                // Started without a terminal, standard error is read by
+                // nobody: a window says it.
+                if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                    self.refusal = refusal::Refusal::show(event_loop, &err);
+                }
                 self.error = Some(err);
-                event_loop.exit();
+                if self.refusal.is_none() {
+                    event_loop.exit();
+                }
             }
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        if let Some(refusal) = &mut self.refusal {
+            if refusal.event(&event) {
+                event_loop.exit();
+            }
+            return;
+        }
         let Some(session) = &mut self.session else {
             return;
         };
@@ -256,6 +274,14 @@ impl ApplicationHandler<Event> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(refusal) = &self.refusal {
+            if refusal.until() <= Instant::now() {
+                event_loop.exit();
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(refusal.until()));
+            }
+            return;
+        }
         let Some(session) = &mut self.session else {
             return;
         };
@@ -540,8 +566,18 @@ impl Session {
     }
 
     fn files_changed(&mut self, paths: &[PathBuf]) {
+        if self.viewer.knocked(paths) {
+            self.window
+                .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+        }
         let dependencies = self.viewer.dependencies();
         let mut changed = false;
+        let known = |path: &PathBuf| {
+            self.watcher
+                .as_ref()
+                .map_or_else(|| path.clone(), |watcher| watcher.known_as(path))
+        };
+        let paths: Vec<PathBuf> = paths.iter().map(known).collect();
         for path in paths.iter().filter(|path| dependencies.contains(path)) {
             changed |= self.viewer.file_changed(path);
         }
@@ -553,6 +589,9 @@ impl Session {
     fn watch_dependencies(&mut self) {
         if let Some(watcher) = &mut self.watcher {
             watcher.watch(&self.viewer.dependencies());
+            // And where another start of zetwerk says it wanted a file
+            // that is open here.
+            watcher.watch(&self.viewer.knocks());
         }
     }
 

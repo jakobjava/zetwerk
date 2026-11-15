@@ -533,6 +533,7 @@ impl Editor for Bridge {
             what: What::Pages(pages.map(named_pages).transpose()?),
             dpi: None,
             file: inside(path)?,
+            replace: false,
         })?;
         let [file] = outcome.files.as_slice() else {
             return Err("the PDF did not come out as one file".to_owned());
@@ -560,6 +561,7 @@ impl Editor for Bridge {
             },
             dpi: image.dpi.map(f64::from),
             file: inside(image.path.as_deref())?,
+            replace: false,
         })?;
         let files: Vec<Value> = outcome
             .files

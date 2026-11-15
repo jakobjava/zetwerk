@@ -112,6 +112,11 @@ fn worker(directory: &Path) -> ! {
         if line.is_multiple_of(13) {
             document.sync().unwrap();
         }
+        if line % 97 == 50 {
+            // The journal is written anew, thinned: a kill in the middle
+            // leaves it as it was or thinned.
+            document.thin(40).unwrap();
+        }
     }
 }
 

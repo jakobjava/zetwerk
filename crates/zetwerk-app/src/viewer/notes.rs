@@ -715,6 +715,24 @@ impl Viewer {
         }
     }
 
+    /// The file `old` goes on as `new`, under another name (`:saveas`,
+    /// `:mv`): its notes are the new file's, and kept under its name.
+    pub(super) fn notes_renamed(&mut self, old: FileId, new: FileId) {
+        let loaded = self.notes.loaded.contains(&old);
+        for note in self.notes.all.iter_mut().filter(|note| note.file == old) {
+            note.file = new;
+        }
+        if let Some((file, _)) = &mut self.notes.seen
+            && *file == old
+        {
+            *file = new;
+        }
+        if loaded {
+            self.notes.loaded.push(new);
+            self.save_notes(new);
+        }
+    }
+
     /// Writes the notes of `file` to its store, with what they are about
     /// as it is now.
     fn save_notes(&mut self, file: FileId) {

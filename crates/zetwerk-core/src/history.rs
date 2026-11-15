@@ -395,6 +395,90 @@ impl History {
         }
         line
     }
+
+    /// The history with fewer, coarser steps: each state that `keep` does
+    /// not keep and that has exactly one child is left out, and its child
+    /// takes over its changes. The root, the current state, the states
+    /// where branches part and the ends of branches always stay, and so
+    /// does every text that stays reachable: only the steps in between
+    /// go. Returns the history and, by old id, the new id of each state
+    /// that stayed; the order of the states is kept.
+    #[must_use]
+    pub fn thinned(&self, keep: impl Fn(StateId) -> bool) -> (Self, Vec<Option<StateId>>) {
+        let len = self.nodes.len();
+        let mut children = vec![0_usize; len];
+        let mut only_child = vec![None; len];
+        for (id, node) in self.nodes.iter().enumerate() {
+            if let Some(parent) = node.parent.and_then(|parent| usize::try_from(parent).ok()) {
+                children[parent] += 1;
+                only_child[parent] = Some(id);
+            }
+        }
+        let stays = |id: usize| {
+            id == 0 || id as StateId == self.current || children[id] != 1 || keep(id as StateId)
+        };
+        let mut nodes: Vec<Node> = Vec::with_capacity(len);
+        let mut map = vec![None; len];
+        // The new id of the nearest state that stays, going up from each
+        // state, and the changes from there that a state left out passes
+        // on to its child.
+        let mut anchor: Vec<StateId> = vec![ROOT; len];
+        let mut carried: Vec<Vec<Change>> = vec![Vec::new(); len];
+        for (id, node) in self.nodes.iter().enumerate() {
+            let Some(parent) = node.parent.and_then(|parent| usize::try_from(parent).ok()) else {
+                map[id] = Some(nodes.len() as StateId);
+                anchor[id] = nodes.len() as StateId;
+                nodes.push(Node {
+                    parent: None,
+                    changes: node.changes.clone(),
+                    redo: None,
+                });
+                continue;
+            };
+            let mut changes = std::mem::take(&mut carried[parent]);
+            for change in &node.changes {
+                let merged = changes.last_mut().is_some_and(|last| last.absorb(change));
+                if !merged {
+                    changes.push(change.clone());
+                }
+            }
+            if stays(id) {
+                let new = nodes.len() as StateId;
+                nodes.push(Node {
+                    parent: Some(anchor[parent]),
+                    changes,
+                    redo: None,
+                });
+                map[id] = Some(new);
+                anchor[id] = new;
+            } else {
+                anchor[id] = anchor[parent];
+                carried[id] = changes;
+            }
+        }
+        // Redo leads where it led, to the first state on the way that
+        // stayed.
+        for (id, node) in self.nodes.iter().enumerate() {
+            let (Some(new), Some(mut target)) = (map[id], node.redo) else {
+                continue;
+            };
+            while let Some(at) = usize::try_from(target).ok().filter(|&at| !stays(at)) {
+                let Some(next) = only_child[at] else {
+                    break;
+                };
+                target = next as StateId;
+            }
+            let target = usize::try_from(target).ok().and_then(|at| map[at]);
+            if let Some(node) = usize::try_from(new).ok().and_then(|new| nodes.get_mut(new)) {
+                node.redo = target;
+            }
+        }
+        let current = usize::try_from(self.current)
+            .ok()
+            .and_then(|current| map[current])
+            .unwrap_or(ROOT);
+        (Self { nodes, current }, map)
+    }
 }
 
 #[cfg(test)]
