@@ -178,14 +178,25 @@ fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
-/// `path` as it is shown: from the home directory, where it is in it.
+/// How many characters of a folder are shown: the list cuts what is
+/// longer at its end, where the folder's own name is.
+const SHOWN: usize = 36;
+
+/// `path` as it is shown: from the home directory, where it is in it;
+/// where that is long, its end.
 fn shown(path: &Path) -> String {
     let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
-    match home.and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
+    let whole = match home.and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
         Some(within) if within.as_os_str().is_empty() => "~".to_owned(),
         Some(within) => format!("~/{}", within.display()),
         None => path.display().to_string(),
+    };
+    let count = whole.chars().count();
+    if count <= SHOWN {
+        return whole;
     }
+    let end: String = whole.chars().skip(count + 1 - SHOWN).collect();
+    format!("…{end}")
 }
 
 /// How long ago `then` was, as it is said.
@@ -879,6 +890,18 @@ mod tests {
         assert_eq!(recent(&state).len(), 1);
         let _ = std::fs::remove_dir_all(state);
         let _ = std::fs::remove_dir_all(documents);
+    }
+
+    #[test]
+    fn a_long_folder_is_shown_by_its_end() {
+        let long = Path::new("/srv/projects/university/2026/thesis/chapters/methods");
+        let said = shown(long);
+        assert!(said.ends_with("chapters/methods"), "{said}");
+        assert!(
+            said.starts_with('…') && said.chars().count() == SHOWN,
+            "{said}"
+        );
+        assert_eq!(shown(Path::new("/srv/paper")), "/srv/paper");
     }
 
     #[test]

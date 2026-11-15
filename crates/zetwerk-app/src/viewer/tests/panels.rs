@@ -1,0 +1,267 @@
+//! The lists and panels as a user meets them: every entry of the list of
+//! all there is to do, in documents where it applies and where it does
+//! not; Escape and Enter in each list.
+
+use super::*;
+
+/// A document with a bit of everything the commands act on.
+const RICH: &str = "#set page(width: 300pt, height: 300pt)\n\
+= Introduction <intro>\n\
+Some text with a citation @knuth1984 and a reference to @fig:box.\n\
+\n\
+== Aim\n\
+$ x + y $ <eq:one>\n\
+\n\
+#figure(\n  rect(width: 40pt, height: 20pt),\n  caption: [A box],\n) <fig:box>\n\
+\n\
+#table(columns: 2, [a], [b], [c], [d])\n\
+\n\
+= Methods\n\
+More text.\n\
+\n\
+#bibliography(\"refs.bib\")\n";
+
+const BIB: &str = "@book{knuth1984,\n  author = {Donald E. Knuth},\n  title = {The TeXbook},\n  \
+                   year = {1984},\n}\n";
+
+/// The message the viewer shows, if any.
+fn said(viewer: &Viewer) -> String {
+    viewer
+        .message
+        .as_ref()
+        .map_or_else(String::new, |message| message.text.clone())
+}
+
+/// The commands the list of all there is to do runs, or begins for the
+/// user to finish.
+fn run_commands() -> Vec<&'static str> {
+    palette::entries()
+        .filter_map(|(_, command)| command)
+        .collect()
+}
+
+#[test]
+#[ignore = "exploration: prints what each command says"]
+fn walk_every_command_of_the_list() {
+    for command in run_commands() {
+        for (name, text, page) in [
+            ("rich", RICH, false),
+            ("empty", "", false),
+            ("page", RICH, true),
+        ] {
+            let directory = directory(text);
+            std::fs::write(directory.join("refs.bib"), BIB).unwrap();
+            let (mut viewer, _) = open(&directory);
+            if page {
+                press(&mut viewer, "gsgs");
+            }
+            if let Some(editor) = viewer.editor.as_mut() {
+                editor.set_cursor(text.find("box").unwrap_or(0));
+            }
+            let before = viewer.text().unwrap_or_default().to_owned();
+            viewer.execute(command);
+            let picker = viewer.picker.as_ref().map(|picker| {
+                let (title, shown, _) = picker.listing();
+                format!("[{title} x{}]", shown.len())
+            });
+            let changed = viewer.text().unwrap_or_default() != before;
+            println!(
+                "{command:24} {name:6} {} {} {}",
+                picker.unwrap_or_default(),
+                if changed { "CHANGED" } else { "" },
+                said(&viewer)
+            );
+            press(&mut viewer, "<Esc><Esc>");
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+}
+
+#[test]
+#[ignore = "exploration: escape and keys in every list"]
+fn every_list_closes_with_escape_and_keeps_its_keys() {
+    for command in run_commands() {
+        for (name, text) in [("rich", RICH), ("empty", "")] {
+            let directory = directory(text);
+            std::fs::write(directory.join("refs.bib"), BIB).unwrap();
+            let (mut viewer, _) = open(&directory);
+            if let Some(editor) = viewer.editor.as_mut() {
+                editor.set_cursor(text.find("box").unwrap_or(0));
+            }
+            viewer.execute(command);
+            if viewer.picker.is_none() {
+                let _ = std::fs::remove_dir_all(&directory);
+                continue;
+            }
+            let before = viewer.text().unwrap_or_default().to_owned();
+            // Typed into the list, not the text.
+            press(&mut viewer, "ddxpu");
+            press(&mut viewer, "<BS><BS><BS><BS><BS>");
+            let mut escapes = 0;
+            while viewer.picker.is_some() && escapes < 6 {
+                press(&mut viewer, "<Esc>");
+                escapes += 1;
+            }
+            let after = viewer.text().unwrap_or_default();
+            println!(
+                "{command:24} {name:6} escapes {escapes} {} {}",
+                if viewer.picker.is_some() {
+                    "STILL OPEN"
+                } else {
+                    ""
+                },
+                if after == before { "" } else { "TEXT CHANGED" },
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+}
+
+#[test]
+fn no_two_entries_of_the_list_are_for_the_same_keys() {
+    let mut seen = std::collections::HashSet::new();
+    for (keys, _) in palette::entries() {
+        assert!(seen.insert(keys), "{keys} is in the list twice");
+    }
+}
+
+#[test]
+fn every_command_of_the_list_is_one() {
+    // Those begun for the user to finish end in a blank.
+    let run = run_commands().into_iter();
+    for command in run.filter(|command| !command.is_empty() && !command.ends_with(' ')) {
+        let directory = directory(RICH);
+        std::fs::write(directory.join("refs.bib"), BIB).unwrap();
+        let (mut viewer, _) = open(&directory);
+        viewer.execute(command);
+        let said = said(&viewer);
+        assert!(!said.starts_with("not a command"), "{command}: {said}");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+}
+
+#[test]
+#[ignore = "exploration: Enter on every row of every list, then Escape"]
+fn enter_on_every_row_then_escape() {
+    for command in [
+        "doc",
+        "styles",
+        "bib",
+        "bib view",
+        "figures",
+        "structure",
+        "references",
+        "invisibles",
+        "outline",
+        "labels",
+        "files",
+    ] {
+        let mut row = 0;
+        loop {
+            let directory = directory(RICH);
+            std::fs::write(directory.join("refs.bib"), BIB).unwrap();
+            let (mut viewer, _) = open(&directory);
+            viewer.execute(command);
+            let Some(picker) = &viewer.picker else {
+                break;
+            };
+            let (_, shown, chosen) = picker.listing();
+            if row >= shown.len() {
+                break;
+            }
+            let label = shown[row].to_owned();
+            let before = viewer.text().unwrap_or_default().to_owned();
+            // To the first row, then down to the one wanted.
+            for _ in 0..chosen {
+                press(&mut viewer, "<Up>");
+            }
+            for _ in 0..row {
+                press(&mut viewer, "<Down>");
+            }
+            press(&mut viewer, "<CR>");
+            let after_enter = viewer.text().unwrap_or_default() != before;
+            let then = viewer
+                .picker
+                .as_ref()
+                .map(|picker| picker.listing().0.to_owned());
+            let said_then = said(&viewer);
+            let mut escapes = 0;
+            while viewer.picker.is_some() && escapes < 6 {
+                press(&mut viewer, "<Esc>");
+                escapes += 1;
+            }
+            let changed = viewer.text().unwrap_or_default() != before;
+            println!(
+                "{command:10} {row:2} {:50} -> [{}] {} esc {escapes}{} {}",
+                label.replace('\t', " | "),
+                then.unwrap_or_default(),
+                if after_enter { "CHANGED" } else { "" },
+                if changed { " KEPT" } else { "" },
+                said_then,
+            );
+            let _ = std::fs::remove_dir_all(&directory);
+            row += 1;
+        }
+    }
+}
+
+#[test]
+fn a_setting_of_two_is_turned_to_the_other_at_the_first_enter() {
+    for (row, rule) in [
+        ("orientation", "#set page(flipped: true)"),
+        ("captions stand", "#set figure.caption(position: top)"),
+        ("justified lines", "#set par(justify: true)"),
+    ] {
+        let (mut viewer, directory) = editing("Words.\n");
+        press(&mut viewer, &format!("gD{row}<CR>"));
+        let text = viewer.text().unwrap_or_default();
+        assert!(text.contains(rule), "{row}: {text:?}");
+        // And back, at the next.
+        press(&mut viewer, &format!("{row}<CR>"));
+        assert!(!viewer.text().unwrap_or_default().contains(rule), "{row}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
+fn an_agent_never_changes_the_next_document_by_a_revision_of_the_last() {
+    use super::super::agent::AgentEdits;
+    let (mut before, first) = editing("The old text.\n");
+    let read = before.state().revision;
+    before.set_agent_edits(AgentEdits::Propose);
+    // The window goes to another document, whose text the agent has
+    // never read.
+    let (mut next, second) = editing("The new text.\n");
+    next.take_over_from(&before);
+    assert_eq!(next.agent_edits(), AgentEdits::Propose);
+    next.set_agent_edits(AgentEdits::Live);
+    let refused = next.agent_replace("The", "A", false, Some(read), false);
+    assert!(refused.unwrap_err().contains("revision"));
+    assert_eq!(next.text(), Some("The new text.\n"));
+    // Its own revision is good.
+    let now = next.state().revision;
+    next.agent_replace("The", "A", false, Some(now), false)
+        .unwrap();
+    let _ = std::fs::remove_dir_all(first);
+    let _ = std::fs::remove_dir_all(second);
+}
+
+#[test]
+#[ignore = "exploration: where the lists stand in small windows"]
+fn lists_in_small_windows() {
+    for (ui, window) in [(1.0, (1000, 620)), (1.6, (1000, 620)), (1.6, (700, 500)), (1.0, (500, 400))] {
+        for command in ["help", "styles", "doc", "bib", "recent"] {
+            let (mut viewer, directory) = editing(RICH);
+            std::fs::write(directory.join("refs.bib"), BIB).unwrap();
+            viewer.resize(window, 1.0);
+            viewer.ui = ui;
+            viewer.scale = viewer.display * ui;
+            viewer.arrange();
+            viewer.execute(command);
+            let _ = viewer.scene(&|_| false);
+            let placed = viewer.pointer.placed;
+            println!("{ui} {window:?} {command:8} {placed:?}");
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}

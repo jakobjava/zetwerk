@@ -884,6 +884,14 @@ impl Picker {
         let item = *self.shown.get(self.chosen)?;
         self.items.get(item).map(|(_, target)| target)
     }
+
+    /// The title, what is listed as the query leaves it (best first),
+    /// and which of that is chosen.
+    #[cfg(test)]
+    pub(super) fn listing(&self) -> (&'static str, Vec<&str>, usize) {
+        let shown = self.shown.iter().map(|item| self.items[*item].0.as_str());
+        (self.title, shown.collect(), self.chosen)
+    }
 }
 
 #[cfg(test)]

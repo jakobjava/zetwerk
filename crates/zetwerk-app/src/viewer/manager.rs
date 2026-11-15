@@ -30,6 +30,8 @@ enum Free {
     Words,
     /// A whole number.
     Count,
+    /// A language, as its code of two or three letters (`de`).
+    Language,
 }
 
 /// Something to decide about a document.
@@ -102,7 +104,7 @@ const SETTINGS: &[Setting] = &[
             ("sv  svenska", "\"sv\""),
             ("da  dansk", "\"da\""),
         ],
-        Free::Text,
+        Free::Language,
     ),
     setting(
         "hyphenation",
@@ -392,6 +394,10 @@ fn typed_value(free: Free, typed: &str) -> Option<String> {
             written.push(']');
             Some(written)
         }
+        // Any other is refused by Typst, and the document with it.
+        Free::Language => {
+            typst_text::is_language(typed).then(|| quoted(&typed.to_ascii_lowercase()))
+        }
         Free::Count => typed
             .parse::<usize>()
             .ok()
@@ -471,7 +477,13 @@ impl Viewer {
         let written = typst_text::rule_value(editor.source(), setting.function, setting.key);
         // One of two: the other, at once.
         if let ([one, other], Free::No) = (setting.choices, setting.free) {
-            let now = written.as_deref().unwrap_or(other.1);
+            // Where no rule says, it is what it usually is.
+            let usual = if one.0 == setting.usual {
+                one.1
+            } else {
+                other.1
+            };
+            let now = written.as_deref().unwrap_or(usual);
             let (label, value) = if now == one.1 { other } else { one };
             return self.apply_setting(row, value, label);
         }
@@ -570,6 +582,9 @@ mod tests {
         assert_eq!(typed_value(Free::Count, "2").as_deref(), Some("2"));
         assert_eq!(typed_value(Free::Count, "many"), None);
         assert_eq!(typed_value(Free::No, "x"), None);
+        assert_eq!(typed_value(Free::Language, "DE").as_deref(), Some("\"de\""));
+        assert_eq!(typed_value(Free::Language, "German"), None);
+        assert_eq!(typed_value(Free::Language, "d e"), None);
     }
 
     #[test]

@@ -195,6 +195,17 @@ impl Viewer {
         self.agent_edits = mode;
     }
 
+    /// Takes over from `before`, the viewer of the document this one
+    /// takes the place of in the window, what agents were told: whether
+    /// their changes are proposed only; and the revision and the numbers
+    /// of proposals, which go on counting, so that what an agent read of
+    /// the other document or proposed for it is never taken for this.
+    pub fn take_over_from(&mut self, before: &Viewer) {
+        self.agent_edits = before.agent_edits;
+        self.revision = self.revision.max(before.revision + 1);
+        self.next_proposal = self.next_proposal.max(before.next_proposal);
+    }
+
     /// The changes agents have proposed to the file being edited, in
     /// the order of its text.
     #[must_use]

@@ -664,3 +664,60 @@ fn several_clients_can_talk_at_once() {
         assert_eq!(thread.join().ok(), Some(true));
     }
 }
+
+/// The tools a server offers, each with what it says of itself.
+fn described(socket: &std::path::Path) -> Vec<(String, String)> {
+    use rmcp::ServiceExt;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|err| panic!("{err}"));
+    runtime.block_on(async {
+        let stream = tokio::net::UnixStream::connect(socket)
+            .await
+            .unwrap_or_else(|err| panic!("{err}"));
+        let client = ().serve(stream).await.unwrap_or_else(|err| panic!("{err}"));
+        let tools = client
+            .list_all_tools()
+            .await
+            .unwrap_or_else(|err| panic!("{err}"));
+        let _ = client.cancel().await;
+        tools
+            .into_iter()
+            .map(|tool| {
+                let said = tool.description.unwrap_or_default().into_owned();
+                (tool.name.into_owned(), said)
+            })
+            .collect()
+    })
+}
+
+#[test]
+fn every_tool_says_what_it_does() {
+    let (_scratch_socket, socket) = socket("described");
+    let _server = serve(&socket, Arc::new(FakeEditor::default()), PLAIN)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    let tools = described(&socket);
+    assert!(tools.len() > 20, "{tools:?}");
+    for (name, said) in &tools {
+        assert!(said.len() > 20, "{name} says too little: {said:?}");
+    }
+    let said = |name: &str| {
+        tools
+            .iter()
+            .find(|(tool, _)| tool == name)
+            .map_or("", |(_, said)| said.as_str())
+    };
+    // Each tool's own: the main tool for changing text says how, and
+    // adding a source says nothing of replacing text.
+    assert!(
+        said("edit_source").starts_with("Change the document"),
+        "{}",
+        said("edit_source")
+    );
+    assert!(
+        said("add_source").starts_with("Add sources"),
+        "{}",
+        said("add_source")
+    );
+}

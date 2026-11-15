@@ -136,6 +136,26 @@ fn listed_note(note: Listed) -> Value {
     })
 }
 
+/// The file name an agent gave for an export, if it is one in or below
+/// the document's directory: an agent writes nowhere else.
+fn inside(name: Option<&str>) -> Result<Option<String>, String> {
+    use std::path::{Component, Path};
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let within = Path::new(name)
+        .components()
+        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
+    if within {
+        Ok(Some(name.to_owned()))
+    } else {
+        Err(format!(
+            "{name} is not in the document's directory: give a name there, as `paper.pdf` \
+             or `out/paper.pdf`"
+        ))
+    }
+}
+
 /// The pages `text` names, as an agent wrote them.
 fn named_pages(text: &str) -> Result<Pages, String> {
     Pages::parse(text.trim()).ok_or_else(|| {
@@ -369,7 +389,7 @@ impl Editor for Bridge {
             format: Format::Pdf,
             what: What::Pages(pages.map(named_pages).transpose()?),
             dpi: None,
-            file: path.map(str::to_owned),
+            file: inside(path)?,
         })?;
         let [file] = outcome.files.as_slice() else {
             return Err("the PDF did not come out as one file".to_owned());
@@ -396,7 +416,7 @@ impl Editor for Bridge {
                 ImageOf::FigureAtLine(line) => What::FigureAtLine(line),
             },
             dpi: image.dpi.map(f64::from),
-            file: image.path,
+            file: inside(image.path.as_deref())?,
         })?;
         let files: Vec<Value> = outcome
             .files
@@ -881,6 +901,104 @@ mod tests {
         assert!(bridge.export_pdf(Some("notes.txt"), None).is_err());
         bridge.export_pdf(Some("copy.pdf"), None).unwrap();
         assert!(session.directory.join("copy.pdf").is_file());
+    }
+
+    #[test]
+    fn arguments_out_of_range_are_refused_and_the_window_lives_on() {
+        let session = session(TEXT, AgentEdits::Live);
+        let bridge = &session.bridge;
+        assert!(bridge.read_source(Some(5), Some(2)).is_err());
+        assert!(bridge.read_source(Some(99), None).is_err());
+        assert!(bridge.read_source(Some(0), Some(0)).is_err());
+        assert!(bridge.change(replace("", "x", None)).is_err());
+        assert!(bridge.change(replace("lazy", "lazy", None)).is_err());
+        assert!(bridge.change(replace("nowhere", "x", Some(99))).is_err());
+        assert!(bridge.search("", false, 10).is_err());
+        for place in [
+            Place::Source { line: 0, column: 0 },
+            Place::Source {
+                line: 99,
+                column: 1,
+            },
+            Place::Page {
+                page: 0,
+                x: 1.0,
+                y: 1.0,
+            },
+            Place::Page {
+                page: 9,
+                x: -5.0,
+                y: f64::MAX,
+            },
+        ] {
+            assert!(bridge.locate(place).is_err());
+        }
+        assert!(bridge.render_page(0, 100).is_err());
+        let moved = Change {
+            what: ChangeKind::MoveSection {
+                line: 99,
+                direction: Direction::Up,
+            },
+            expected_revision: None,
+            propose: false,
+            reason: None,
+        };
+        assert!(bridge.change(moved).is_err());
+        let note = NewNote {
+            text: "x".to_owned(),
+            anchor: NoteAnchor::Line(0),
+            expected_revision: None,
+        };
+        assert!(bridge.add_note(note).is_err());
+        let image = ImageExport {
+            format: ImageFormat::Png,
+            of: ImageOf::FigureAtLine(0),
+            dpi: Some(0),
+            path: None,
+        };
+        assert!(bridge.export_image(image).is_err());
+        assert!(bridge.withdraw_proposal(u64::MAX).is_err());
+        assert!(bridge.resolve_note(u64::MAX).is_err());
+        // Still there, and the text as it was.
+        assert_eq!(bridge.state().unwrap().revision, 0);
+        assert!(bridge.read_source(None, None).unwrap().contains("lazy dog"));
+    }
+
+    #[test]
+    fn an_agent_exports_nowhere_but_in_the_documents_directory() {
+        let session = session(TEXT, AgentEdits::Live);
+        let (bridge, directory) = (&session.bridge, &session.directory);
+        let outside = directory.with_file_name(format!(
+            "{}-outside",
+            directory.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        let name = outside.file_name().unwrap().to_string_lossy().into_owned();
+        let up = format!("../{name}/up.pdf");
+        let absolute = outside.join("absolute.pdf");
+        let refused = bridge.export_pdf(Some(&up), None).unwrap_err();
+        assert!(
+            refused.contains("not in the document's directory"),
+            "{refused}"
+        );
+        assert!(
+            bridge
+                .export_pdf(Some(absolute.to_str().unwrap()), None)
+                .is_err()
+        );
+        let image = ImageExport {
+            format: ImageFormat::Svg,
+            of: ImageOf::Pages(None),
+            dpi: None,
+            path: Some(format!("../{name}/up.svg")),
+        };
+        assert!(bridge.export_image(image).is_err());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&outside);
+        // Below it is in it.
+        std::fs::create_dir(directory.join("out")).unwrap();
+        bridge.export_pdf(Some("./out/paper.pdf"), None).unwrap();
+        assert!(directory.join("out/paper.pdf").is_file());
     }
 
     #[test]

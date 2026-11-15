@@ -201,8 +201,9 @@ struct NoteArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ExportPdfArgs {
-    /// Where to write the PDF. By default beside the document's main
-    /// file, with its name and the ending `.pdf`.
+    /// Where to write the PDF: a name ending in `.pdf`, in the document's
+    /// directory or below it. By default beside the document's main
+    /// file, with its name.
     path: Option<String>,
     /// Which pages to write, counting from 1: `5`, `3-7`, `1,4-6`, `10-`
     /// (default: all).
@@ -472,13 +473,6 @@ impl Server {
 
 #[tool_router(router = editing_tools)]
 impl Server {
-    /// Change the document: replace `old_str` by `new_str`. `old_str` has
-    /// to match the source exactly and, unless `replace_all` is set, be in
-    /// it only once. The change is one undo step for the user and is not
-    /// written to the file: the user saves. Answers with the new
-    /// `revision`, the lines changed and the compile errors of the result
-    /// (`diagnostics`; empty if it compiles) — or, for a proposal, with its
-    /// `id`.
     /// Add sources to the document's bibliography. They are given as
     /// BibTeX and put behind what the file holds; nothing in it is
     /// changed or taken out. Unlike the text, the file is written at
@@ -502,6 +496,13 @@ impl Server {
             .await
     }
 
+    /// Change the document: replace `old_str` by `new_str`. `old_str` has
+    /// to match the source exactly and, unless `replace_all` is set, be in
+    /// it only once. The change is one undo step for the user and is not
+    /// written to the file: the user saves. Answers with the new
+    /// `revision`, the lines changed and the compile errors of the result
+    /// (`diagnostics`; empty if it compiles) — or, for a proposal, with its
+    /// id as `proposal`.
     #[tool(annotations(title = "Edit source", read_only_hint = false))]
     async fn edit_source(
         &self,

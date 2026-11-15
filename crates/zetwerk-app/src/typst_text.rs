@@ -777,9 +777,16 @@ pub fn rule_value(source: &Source, function: &str, key: &str) -> Option<String> 
     source.text().get(value?).map(str::to_owned)
 }
 
+/// Whether `code` is what Typst takes for a language: two or three
+/// letters (ISO 639), as `de` or `nds`.
+#[must_use]
+pub fn is_language(code: &str) -> bool {
+    (2..=3).contains(&code.len()) && code.chars().all(|c| c.is_ascii_alphabetic())
+}
+
 /// Where `source` sets `key` of `function` by a rule: the brackets of
-/// the first rule for `function`, and in them the value of `key`, if it
-/// has one.
+/// the last rule for `function` that sets `key`, and in them its value;
+/// where none does, the brackets of the first rule for `function`.
 fn rule_place(
     source: &Source,
     function: &str,
@@ -790,6 +797,9 @@ fn rule_place(
     let rules = root
         .children()
         .filter(|node| node.kind() == SyntaxKind::SetRule);
+    // The last rule that sets it is the one that holds: one written by
+    // hand behind the first would undo a change made in that.
+    let mut found = None;
     for rule in rules {
         let names = rule.children().any(|part| {
             matches!(part.kind(), SyntaxKind::Ident | SyntaxKind::FieldAccess)
@@ -810,14 +820,19 @@ fn rule_place(
                 name.is_some_and(|name| text.get(name.range()) == Some(key))
             })
             .and_then(|named| named.children().next_back().map(|value| value.range()));
-        return Some((args.range(), value));
+        match value {
+            Some(_) => found = Some((args.range(), value)),
+            None if found.is_none() => found = Some((args.range(), None)),
+            None => {}
+        }
     }
-    None
+    found
 }
 
 /// The change to `source` that makes `key` of `function` be `value` from
 /// here on: in the `#set` rule there is for `function`, or in a new one
-/// before everything else. The bytes to replace, and what with.
+/// before everything else (see `new_rule_place`). The bytes to replace,
+/// and what with.
 #[must_use]
 pub fn set_rule(source: &Source, function: &str, key: &str, value: &str) -> (Range<usize>, String) {
     let text = source.text();
@@ -842,8 +857,43 @@ pub fn set_rule(source: &Source, function: &str, key: &str, value: &str) -> (Ran
         }
         // A new rule where there is none, or where its brackets are not
         // closed: behind its last argument would be in what follows.
-        Some(_) | None => (0..0, format!("#set {function}({key}: {value})\n")),
+        Some(_) | None => {
+            let at = new_rule_place(source);
+            let lead = if text[..at].ends_with('\n') || at == 0 {
+                ""
+            } else {
+                "\n"
+            };
+            (at..at, format!("{lead}#set {function}({key}: {value})\n"))
+        }
     }
+}
+
+/// Where a new rule goes: before everything else; but behind the last
+/// rule that hands all that follows to a template (`#show: …`), which
+/// sets its own rules, and over a rule before it.
+fn new_rule_place(source: &Source) -> usize {
+    let text = source.text();
+    let root = LinkedNode::new(source.root());
+    let mut at = 0;
+    for rule in root.children() {
+        if rule.kind() != SyntaxKind::ShowRule {
+            continue;
+        }
+        // `show` and the colon with nothing between: of all that follows.
+        let everything = rule
+            .children()
+            .filter(|part| !part.kind().is_trivia())
+            .nth(1)
+            .is_some_and(|part| part.kind() == SyntaxKind::Colon);
+        if everything {
+            let end = rule.range().end;
+            at = text[end..]
+                .find('\n')
+                .map_or(text.len(), |newline| end + newline + 1);
+        }
+    }
+    at
 }
 
 /// A table as it is written: a call of `table` (or `grid`) whose cells
@@ -2394,6 +2444,54 @@ mod tests {
             Some("true")
         );
         assert_eq!(rule_value(&source(text), "par", "leading"), None);
+    }
+
+    #[test]
+    fn the_rule_that_holds_is_the_one_changed() {
+        let set = |text: &str, function: &str, key: &str, value: &str| {
+            edited(text, vec![set_rule(&source(text), function, key, value)])
+        };
+        // Rules written by hand, one behind the other: the last that
+        // sets a thing is what holds, and what is listed and changed.
+        let text = "#set text(font: \"New Computer Modern\")\n#set text(size: 12pt)\nText.\n";
+        assert_eq!(
+            rule_value(&source(text), "text", "size").as_deref(),
+            Some("12pt")
+        );
+        assert_eq!(
+            set(text, "text", "size", "14pt"),
+            "#set text(font: \"New Computer Modern\")\n#set text(size: 14pt)\nText.\n"
+        );
+        let twice = "#set text(size: 10pt)\n#set text(size: 12pt)\n";
+        assert_eq!(
+            set(twice, "text", "size", "9pt"),
+            "#set text(size: 10pt)\n#set text(size: 9pt)\n"
+        );
+        // A new rule goes behind a template that all is handed to: one
+        // before it would be set over by the template's own.
+        let template = "#import \"t.typ\": conf\n#show: conf.with(title: [X])\nBody.\n";
+        assert_eq!(
+            set(template, "text", "size", "12pt"),
+            "#import \"t.typ\": conf\n#show: conf.with(title: [X])\n#set text(size: 12pt)\nBody.\n"
+        );
+        assert_eq!(
+            set("#show: conf", "page", "columns", "2"),
+            "#show: conf\n#set page(columns: 2)\n"
+        );
+        assert_eq!(
+            set(
+                "#show heading: set text(red)\nBody.\n",
+                "text",
+                "size",
+                "9pt"
+            ),
+            "#set text(size: 9pt)\n#show heading: set text(red)\nBody.\n"
+        );
+        // What no rule sets yet goes into the first.
+        assert_eq!(
+            set(text, "text", "lang", "\"de\""),
+            "#set text(font: \"New Computer Modern\", lang: \"de\")\n#set text(size: 12pt)\nText.\n"
+        );
     }
 
     #[test]

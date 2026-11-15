@@ -36,7 +36,7 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("equation (while typing)", "$", Does::Tells),
     (
-        "to the next place to fill in, out of brackets",
+        "to the next place to fill in (‹…›, or out of brackets); what is typed takes its place",
         "Tab",
         Does::Tells,
     ),
@@ -171,7 +171,6 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("definition"),
     ),
     ("go to a page", ":<number>", Does::Ask("")),
-    ("search", "/", Does::Tells),
     ("open a file of the document", ":files", Does::Run("files")),
     ("open a file by name", ":e <file>", Does::Ask("e ")),
     (
@@ -188,11 +187,6 @@ const ALL: &[(&str, &str, Does)] = &[
         "begin this empty document as an article, report, letter, slides, notes",
         ":new",
         Does::Run("new"),
-    ),
-    (
-        "to the next ‹place to fill in›; what is typed takes its place",
-        "Tab",
-        Does::Tells,
     ),
     (
         "next problem the compiler has",
@@ -645,9 +639,11 @@ impl Viewer {
                 }
                 _ => self.alert("how many, please: :columns 2"),
             },
-            ("lang", lang) if !lang.is_empty() => {
-                self.set("text", "lang", &quoted(lang), &format!("language: {lang}"));
+            ("lang", lang) if typst_text::is_language(lang) => {
+                let lang = lang.to_ascii_lowercase();
+                self.set("text", "lang", &quoted(&lang), &format!("language: {lang}"));
             }
+            ("lang", _) => self.alert("a language, as its code: :lang de, :lang en, :lang nl"),
             ("justify" | "indent" | "pagenumbers", _) | ("numbering", "" | "on" | "off") => {
                 let (function, key, values, what) = match name {
                     "justify" => ("par", "justify", ("true", "false"), "justified lines"),
