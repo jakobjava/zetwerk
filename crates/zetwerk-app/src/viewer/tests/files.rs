@@ -555,3 +555,28 @@ fn notes_go_along_with_a_file_moved() {
     assert_eq!(listed.len(), 1);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn leaving_without_saving_drops_the_changes_of_every_open_file() {
+    let directory = directory("= Main\n\n#include \"one.typ\"\n");
+    std::fs::write(directory.join("one.typ"), "Chapter text.\n").unwrap();
+    let (mut viewer, _) = open(&directory);
+    press(&mut viewer, "GoMain more.<Esc>:e one.typ<CR>AOne more.<Esc>:q!<CR>");
+    assert!(viewer.wants_quit());
+    drop(viewer);
+    assert_eq!(
+        read(&directory.join("one.typ")).as_deref(),
+        Some("Chapter text.\n")
+    );
+    // Neither brings anything back, and neither is said to wait.
+    let (mut viewer, opened) = open(&directory);
+    assert_eq!(opened, Opened::Clean);
+    assert!(!said(&viewer).0.contains("one.typ"), "{:?}", said(&viewer));
+    assert_eq!(viewer.text(), Some("= Main\n\n#include \"one.typ\"\n"));
+    press(&mut viewer, ":e one.typ<CR>");
+    assert_eq!(viewer.text(), Some("Chapter text.\n"));
+    // What was dropped is in the history of each.
+    press(&mut viewer, "u");
+    assert_eq!(viewer.text(), Some("Chapter text.One more.\n"));
+    let _ = std::fs::remove_dir_all(directory);
+}
