@@ -934,9 +934,13 @@ fn what_is_typed_behind_a_labelled_equation_leaves_it_its_label() {
     // and what referred to the equation referred to text, which Typst
     // refuses: the document was not typeset.
     let text = "#set math.equation(numbering: \"(1)\")\nWords.\n\n$ x $ <eq:a>\n\nSee @eq:a.\n";
-    for keys in ["a<Tab>b<Esc>", "a$b<Esc>"] {
+    for (keys, behind) in [
+        ("a<Tab>b<Esc>", "b"),
+        ("a$b<Esc>", "b"),
+        ("a$ more<Esc>", " more"),
+    ] {
         let (mut viewer, directory) = typed(text, "x", keys);
-        let left = text.replace("<eq:a>\n", "<eq:a>b\n");
+        let left = text.replace("<eq:a>\n", &format!("<eq:a>{behind}\n"));
         assert_eq!(viewer.text(), Some(left.as_str()), "{keys}");
         settled(&mut viewer);
         let _ = std::fs::remove_dir_all(directory);

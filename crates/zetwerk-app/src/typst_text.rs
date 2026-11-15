@@ -555,10 +555,10 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
     };
     match ground(source, at) {
         // Between an equation and its label, what is typed goes behind
-        // the label: before it, it would take the label from the
-        // equation, and what refers to the equation would refer to it.
+        // the label, a blank too: before it, it would take the label from
+        // the equation, and what refers to the equation would refer to it.
         Ground::Markup
-            if !c.is_whitespace()
+            if c != '\n'
                 && let Some(end) = label_behind(source, at) =>
         {
             let (range, with, within) =
@@ -646,18 +646,21 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
     }
 }
 
-/// Where the label ends that stands behind the equation that ends at
-/// byte `at` of `source`, with nothing but blanks between: `$ x $ <eq>`.
+/// Where the label ends that stands behind an equation, byte `at` of
+/// `source` being between the two, where there is nothing but blanks:
+/// `$ x $ <eq>`.
 fn label_behind(source: &Source, at: usize) -> Option<usize> {
+    let text = source.text();
+    let end = text.get(..at)?.trim_end_matches(' ').len();
     let root = LinkedNode::new(source.root());
-    let closing = root.leaf_at(at, Side::Before)?;
-    let equation = closing
-        .parent()
-        .filter(|equation| equation.kind() == SyntaxKind::Equation && equation.range().end == at)?;
+    let closing = root.leaf_at(end, Side::Before)?;
+    let equation = closing.parent().filter(|equation| {
+        equation.kind() == SyntaxKind::Equation && equation.range().end == end
+    })?;
     let label = equation
         .next_sibling()
         .filter(|label| label.kind() == SyntaxKind::Label)?;
-    let between = source.text().get(at..label.range().start)?;
+    let between = text.get(end..label.range().start)?;
     between.chars().all(|c| c == ' ').then(|| label.range().end)
 }
 
@@ -2439,7 +2442,15 @@ mod tests {
             typing("$ x $| <eq>\n", '*').as_deref(),
             Some("$ x $ <eq>\\*|\n")
         );
-        assert_eq!(typing("$ x $| <eq>\n", ' '), None);
+        // A blank too, and what follows it.
+        assert_eq!(
+            typing("$ x $| <eq>\n", ' ').as_deref(),
+            Some("$ x $ <eq> |\n")
+        );
+        assert_eq!(
+            typing("$ x $ | <eq>\n", 'a').as_deref(),
+            Some("$ x $  <eq>a|\n")
+        );
         assert_eq!(typing("$ x $|\n\n<eq>\n", 'a'), None);
     }
 
