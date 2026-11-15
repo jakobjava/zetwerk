@@ -316,7 +316,8 @@ impl Editor {
     /// While it is typed into, one that stood in its line is kept there
     /// (with blanks on both sides it would stand by itself). Else it
     /// goes, dollar signs and all: they show as nothing, and would stay
-    /// in the text unseen. One with a label stays, for what refers to it.
+    /// in the text unseen. One with a label stays, for what refers to it,
+    /// and so does one that is an argument of a call.
     fn clear_empty_equation(&mut self, here: Option<(usize, bool)>) {
         let typing = self.engine.mode() == Mode::Insert;
         let source = &self.document.buffer().0;
@@ -345,9 +346,13 @@ impl Editor {
         let labelled = text[equation.end..]
             .trim_start_matches(' ')
             .starts_with('<');
+        // One given to a function (a numbered equation, a figure) stays
+        // too: the function would lack it.
+        let given =
+            crate::typst_text::ground(source, equation.start) != crate::typst_text::Ground::Markup;
         let (range, cursor) = if typing {
             (inside, equation.start + 1)
-        } else if labelled {
+        } else if labelled || given {
             return;
         } else {
             // With what set it apart: the line breaks of a line it stood

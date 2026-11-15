@@ -799,3 +799,30 @@ fn an_equation_typst_refuses_is_shown_as_written_where_the_cursor_is_not() {
     assert!(shown.contains("[`$frac(a, b, c)$`]"), "{shown:?}");
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn an_equation_given_to_a_function_stays_when_emptied() {
+    // An emptied equation went, dollar signs and all, also out of the
+    // call it was given to: a numbered equation inserted and left at
+    // once lacked its body, and the document was not typeset again.
+    for (text, at, keys, left) in [
+        (
+            "A b.\n",
+            "b",
+            "i#neq<CR><Esc>",
+            "A \n\n#math.equation(block: true, numbering: \"(1)\", $  $)\n\nb.\n",
+        ),
+        (
+            "#figure($ x $, caption: [c])\n",
+            "x",
+            "x",
+            "#figure($  $, caption: [c])\n",
+        ),
+        ("#align(center, $x$)\n", "x", "x", "#align(center, $$)\n"),
+    ] {
+        let (mut viewer, directory) = typed(text, at, keys);
+        assert_eq!(viewer.text(), Some(left), "{text:?} {keys}");
+        settled(&mut viewer);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
