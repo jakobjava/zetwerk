@@ -572,3 +572,15 @@ fn a_citation_of_no_source_is_said_so() {
     );
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn a_name_known_only_within_something_is_not_offered() {
+    let text = "#let f() = { let theorem = 1; theorem }\n\n#theroem\n";
+    let (viewer, directory) = editing(text);
+    let status = said(&viewer);
+    assert!(
+        status.ends_with("Typst knows nothing called “theroem”  · :why"),
+        "{status}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}

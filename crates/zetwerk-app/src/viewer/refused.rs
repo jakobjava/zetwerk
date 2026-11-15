@@ -331,8 +331,8 @@ pub(super) fn likely<'a>(name: &str, names: impl Iterator<Item = &'a str>) -> Op
     best.filter(|_| !tied).map(|(.., known)| known.to_owned())
 }
 
-/// The names `source` binds with `#let`, and those of Typst's library:
-/// what a name Typst does not know may be meant to be.
+/// The names `source` binds with `#let` for all of it, and those of
+/// Typst's library: what a name Typst does not know may be meant to be.
 fn known_names<'a>(world: &'a ProjectWorld, source: &'a Source) -> Vec<&'a str> {
     let mut names: Vec<&str> = world
         .library()
@@ -341,8 +341,9 @@ fn known_names<'a>(world: &'a ProjectWorld, source: &'a Source) -> Vec<&'a str> 
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
-    let mut stack = vec![source.root()];
-    while let Some(node) = stack.pop() {
+    // Those of the document as a whole: names bound within something
+    // are not known outside it, and the text is not walked through.
+    for node in source.root().children() {
         if node.kind() == SyntaxKind::LetBinding
             && let Some(bound) = node
                 .children()
@@ -357,7 +358,6 @@ fn known_names<'a>(world: &'a ProjectWorld, source: &'a Source) -> Vec<&'a str> 
             };
             names.extend(ident.map(|ident| ident.leaf_text().as_str()));
         }
-        stack.extend(node.children());
     }
     names
 }
