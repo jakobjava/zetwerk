@@ -359,9 +359,45 @@ fn node_at(source: &Source, at: usize) -> LinkedNode<'_> {
     }
 }
 
+/// Where what is opened at byte `start` of `text` and not closed is
+/// closed with `closer`: a string where its line ends, a bracket where
+/// its paragraph ends or a line begins that is markup or other code (a
+/// heading, a `#`). Before the brackets that end it there and that
+/// close nothing opened from `start` on: those were meant to close what
+/// it is in (`[A)` is `[A])`, `"en)` is `"en")`).
+fn closing_place(text: &str, start: usize, closer: &str) -> Range<usize> {
+    let mut end = text[start..].find('\n').map_or(text.len(), |at| start + at);
+    if closer != "\"" {
+        while let Some(line) = text.get(end + 1..)
+            && let Some(first) = line.trim_start_matches([' ', '\t']).chars().next()
+            && !matches!(first, '\n' | '=' | '#')
+        {
+            end = line.find('\n').map_or(text.len(), |at| end + 1 + at);
+        }
+    }
+    let span = text[start..end].trim_end();
+    let mut at = start + span.len();
+    while let Some(last) = text[start..at].chars().next_back()
+        && let Some(opener) = match last {
+            ')' => Some('('),
+            ']' => Some('['),
+            '}' => Some('{'),
+            _ => None,
+        }
+        && last.to_string() != closer
+    {
+        let within = &text[start + 1..at];
+        if within.matches(opener).count() >= within.matches(last).count() {
+            break;
+        }
+        at -= 1;
+    }
+    at..at
+}
+
 /// What `x` does to the text: what it replaces and with what. Of the
 /// thing Typst refuses at `range` (saying `message`): a bracket opened
-/// in code and never closed is closed where its paragraph ends; else
+/// in code or a string never closed is closed (see [`closing_place`]); else
 /// the thing is taken out — a mark opened and not closed or closed and
 /// not opened (what it holds is the user's text and stays), the `@` of
 /// a reference (what it names stays, as text: it may be the user's word
@@ -376,21 +412,16 @@ pub(super) fn offending(
     let text = source.text();
     let marked = text.get(range.clone())?;
     if message.starts_with("unclosed") {
-        let closer = match marked {
-            "(" => Some(")"),
-            "[" => Some("]"),
-            "{" => Some("}"),
-            "\"" => Some("\""),
+        // A bracket (the mark alone), or a string (what of it there is).
+        let closer = match marked.chars().next() {
+            Some('(') if marked.len() == 1 => Some(")"),
+            Some('[') if marked.len() == 1 => Some("]"),
+            Some('{') if marked.len() == 1 => Some("}"),
+            Some('"') => Some("\""),
             _ => None,
         };
         if let Some(closer) = closer {
-            // At the end of the paragraph, or of the line for a string.
-            let ends = if closer == "\"" { "\n" } else { "\n\n" };
-            let end = text[range.end..]
-                .find(ends)
-                .map_or(text.len(), |at| range.end + at);
-            let at = range.end + text[range.end..end].trim_end().len();
-            return Some((at..at, closer));
+            return Some((closing_place(text, range.start, closer), closer));
         }
         // The mark alone; of raw text, all its backticks.
         let first = marked.chars().next()?;
@@ -449,10 +480,19 @@ impl Viewer {
         }
         let file = editor.file();
         let errors = || self.diagnostics.iter().filter(|(_, _, error, _)| *error);
-        let Some((of, range, _, message)) = errors()
+        let first = errors()
             .find(|(of, ..)| *of == file)
-            .or_else(|| errors().next())
-        else {
+            .or_else(|| errors().next());
+        // Of brackets opened one in another and none closed, the one
+        // opened last: closing it may close the others.
+        let first = first.map(|first| {
+            errors()
+                .skip_while(|error| !std::ptr::eq(*error, first))
+                .take_while(|(of, _, _, message)| *of == first.0 && message.starts_with("unclosed"))
+                .last()
+                .unwrap_or(first)
+        });
+        let Some((of, range, _, message)) = first else {
             // Of no place: as Typst says it.
             let first = self.problems.first()?;
             let said = first

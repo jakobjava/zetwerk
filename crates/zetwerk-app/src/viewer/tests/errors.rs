@@ -489,3 +489,35 @@ fn the_margin_says_what_is_wrong_in_the_same_words() {
     );
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn what_is_left_open_is_closed_where_it_was_meant_to_be() {
+    for (text, then) in [
+        // A rule left open: closed on its line, not in the heading.
+        (
+            "#set text(size: 11pt\n= Intro\n\nText.\n",
+            "#set text(size: 11pt)\n= Intro\n\nText.\n",
+        ),
+        // A string left open: before the bracket meant to close the rule.
+        (
+            "#set text(size: 11pt, lang: \"en)\n= Intro\n\nText.\n",
+            "#set text(size: 11pt, lang: \"en\")\n= Intro\n\nText.\n",
+        ),
+        // A caption left open: before the bracket of the figure.
+        (
+            "= Intro\n\n#figure(rect(), caption: [A)\n\nMore.\n",
+            "= Intro\n\n#figure(rect(), caption: [A])\n\nMore.\n",
+        ),
+        // A call over several lines.
+        (
+            "#table(\n  columns: 2,\n  [a], [b],\n\nMore.\n",
+            "#table(\n  columns: 2,\n  [a], [b],)\n\nMore.\n",
+        ),
+    ] {
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "x");
+        assert_eq!(viewer.text(), Some(then), "{text:?}");
+        assert_eq!(problems(&mut viewer), Vec::<String>::new(), "{text:?}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
