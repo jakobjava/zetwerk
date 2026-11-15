@@ -641,3 +641,29 @@ fn the_lines_of_a_page_cost_no_more_than_its_map() {
     assert!(lined < 2.5 * built, "lines {lined:.6} s, map {built:.6} s");
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn a_part_on_two_pages_is_refused_before_it_is_typeset() {
+    // A paragraph that runs from one page onto the next: what is typed
+    // into it is not typeset by itself, and that is known before the
+    // part is typeset. Typing an equation once typeset the rest of the
+    // document as the part, to refuse it then.
+    let mut text = "#set page(width: 300pt, height: 200pt)\n\nFirst words.\n\n".to_owned();
+    for word in 0..120 {
+        let _ = write!(text, "word{word} ");
+    }
+    text.push_str("\n\nLast words.\n");
+    let (mut viewer, directory) = editing(&text);
+    press(&mut viewer, "gsgs");
+    assert!(viewer.state().pages >= 2);
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(text.find("word3 ").unwrap_or(0));
+    }
+    press(&mut viewer, "i");
+    let typeset = super::local::PARTS_TYPESET.get();
+    press(&mut viewer, "$");
+    let declined = viewer.declined.clone().unwrap_or_default();
+    assert!(declined.contains("two pages"), "{declined}");
+    assert_eq!(super::local::PARTS_TYPESET.get(), typeset);
+    let _ = std::fs::remove_dir_all(directory);
+}
