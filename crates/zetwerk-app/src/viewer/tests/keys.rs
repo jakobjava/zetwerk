@@ -176,12 +176,16 @@ fn a_mapping_takes_the_count_and_the_register_typed_before_it() {
 
 #[test]
 fn putting_behind_a_thing_shown_as_one_puts_behind_all_of_it() {
-    check(&[(
-        "= H <h>\n\nSee @h now.\n",
-        "now",
-        "yiwF@p",
-        "= H <h>\n\nSee @hnow now.\n",
-    )]);
+    check(&[
+        // Not against the star of strong text: Typst could not read it.
+        ("One *two* x.\n", "x.", "yl0elp", "One *two* x.\n"),
+        (
+            "= H <h>\n\nSee @h now.\n",
+            "now",
+            "yiwF@p",
+            "= H <h>\n\nSee @hnow now.\n",
+        ),
+    ]);
 }
 
 #[test]
@@ -369,10 +373,53 @@ fn no_key_on_a_page_breaks_the_markup() {
     };
     assert!(!broken(&viewer));
     let keys = [
-        "x", "3x", "X", "2X", "dw", "d3w", "de", "db", "D", "dh", "d3l", "dfe", "dta", "J", "gJ",
-        "3~", "rx", "ylp", "dd", "2dd", "C<Esc>", "s<Esc>", "v3ld", "cwz<Esc>", "daw", "diw",
-        "Rxy<Esc>", "dap", "dip", "Vd", "yyP", "dj", "dk", "db", "dB", "de", "bx", "ex", "{x",
+        "x",
+        "3x",
+        "X",
+        "2X",
+        "dw",
+        "d3w",
+        "de",
+        "db",
+        "D",
+        "dh",
+        "d3l",
+        "dfe",
+        "dta",
+        "J",
+        "gJ",
+        "3~",
+        "rx",
+        "ylp",
+        "dd",
+        "2dd",
+        "C<Esc>",
+        "s<Esc>",
+        "v3ld",
+        "cwz<Esc>",
+        "daw",
+        "diw",
+        "Rxy<Esc>",
+        "dap",
+        "dip",
+        "Vd",
+        "yyP",
+        "dj",
+        "dk",
+        "db",
+        "dB",
+        "de",
+        "bx",
+        "ex",
+        "{x",
         "-x",
+        "gUiw",
+        "g~~",
+        ">>",
+        "<lt><lt>",
+        "xp",
+        "Vy<Esc>P",
+        "cgnz<Esc>",
     ];
     let mut wrong = Vec::new();
     for at in (PAGE.len()..text.len()).step_by(3) {
@@ -393,7 +440,12 @@ fn no_key_on_a_page_breaks_the_markup() {
                 ));
             }
             if viewer.text() != Some(&text) {
-                press(&mut viewer, "u");
+                // As many steps as the keys made (`xp` makes two).
+                for _ in 0..keys.matches(['x', 'p', 'P']).count().clamp(1, 2) {
+                    if viewer.text() != Some(&text) {
+                        press(&mut viewer, "u");
+                    }
+                }
                 assert_eq!(viewer.text(), Some(text.as_str()), "{keys} undone");
                 compile(&mut viewer);
             }

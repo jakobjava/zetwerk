@@ -3373,6 +3373,15 @@ impl Engine {
             } else {
                 self.cursor
             };
+            // Not where the page could not be read then: a letter put
+            // against the star of strong text leaves it unclosed.
+            let edit = Edit {
+                range: at..at,
+                text: inserted.clone(),
+            };
+            if self.rows_first && host.refuses(std::slice::from_ref(&edit)) {
+                return self.fail();
+            }
             self.edit(host, at..at, &inserted);
             self.took = Some(Took::Put(at..at + inserted.len()));
             let text = Text(host.text());
