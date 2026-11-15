@@ -3055,7 +3055,16 @@ impl Engine {
             self.cursor = Text(host.text()).first_non_blank(at);
         } else {
             let text = Text(host.text());
-            let at = if after && !text.line_is_empty(self.cursor) {
+            // After all of what a host that shows a page shows at the
+            // cursor (a symbol written with several letters), or into
+            // the place to fill in that it shows there.
+            let shown = (self.rows_first && after)
+                .then(|| host.stop(self.cursor, Seek::At))
+                .flatten()
+                .filter(|stop| stop.start == self.cursor);
+            let at = if let Some(stop) = shown {
+                stop.end
+            } else if after && !text.line_is_empty(self.cursor) {
                 text.next(self.cursor)
             } else {
                 self.cursor

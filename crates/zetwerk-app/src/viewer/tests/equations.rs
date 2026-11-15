@@ -966,3 +966,27 @@ fn deleting_back_from_an_equation_keeps_the_brackets_around_it() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn what_is_put_into_an_equation_keeps_the_symbols_beside_it() {
+    // `p` on a symbol written with several letters put what it put after
+    // the first letter (`a x lpha`), and `P` before one made one word of
+    // the two (`alphaalpha`): either was then spelled out letter by
+    // letter, and the symbol was gone without a word.
+    let text = "A $x + y$ b. C $alpha + z$.\n";
+    for (keys, left) in [
+        ("yl/\\=alpha<CR>p", "A $x + y$ b. C $alpha x + z$.\n"),
+        ("yl/\\=alpha<CR>P", "A $x + y$ b. C $x alpha + z$.\n"),
+    ] {
+        let (mut viewer, directory) = typed(text, "x", keys);
+        assert_eq!(viewer.text(), Some(left), "{keys}");
+        settled(&mut viewer);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+    // Into an equation emptied, not behind it (between it and its label).
+    let text = "#set math.equation(numbering: \"(1)\")\nA b.\n\n$ x + y $ <eq:a>\n\nSee @eq:a.\n";
+    let (mut viewer, directory) = typed(text, "x", "ddp");
+    assert_eq!(viewer.text(), Some(text));
+    settled(&mut viewer);
+    let _ = std::fs::remove_dir_all(directory);
+}

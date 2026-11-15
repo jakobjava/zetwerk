@@ -170,6 +170,9 @@ impl Editor {
             if self.document.text().len() < length {
                 self.tidy_equation();
             }
+            if !typing && self.document.revision() != before {
+                self.part_put();
+            }
             let left = typing && self.engine.mode() != Mode::Insert;
             if self.document.text().len() < length || left {
                 self.clear_empty_equation(here);
@@ -287,6 +290,47 @@ impl Editor {
             }
             self.engine.set_cursor(cursor, self.document.text());
         }
+    }
+
+    /// After `p` or `P` on a page into an equation: what was put is
+    /// parted by a blank from a letter it stands right against, or the
+    /// two would be one name to Typst (`alpha` and `x`, `alphax`), and
+    /// spelled out letter by letter.
+    fn part_put(&mut self) {
+        let Some(zetwerk_vim::Took::Put(range)) = self.engine.took().cloned() else {
+            return;
+        };
+        let source = &self.document.buffer().0;
+        let text = source.text();
+        let within = crate::typst_text::equation_at(source, range.start)
+            .is_some_and(|equation| equation.start < range.start && range.end < equation.end);
+        let (Some(before), Some(behind)) = (text.get(..range.start), text.get(range.end..)) else {
+            return;
+        };
+        if !within || range.is_empty() {
+            return;
+        }
+        let letter = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+        let put = &text[range.clone()];
+        let mut cursor = self.engine.cursor();
+        let mut replaces = Vec::new();
+        // From the last: the bytes before it stay where they are.
+        if letter(put.chars().next_back()) && letter(behind.chars().next()) {
+            replaces.push(Replace::new(range.end..range.end, " "));
+            cursor += usize::from(cursor >= range.end);
+        }
+        if letter(before.chars().next_back()) && letter(put.chars().next()) {
+            replaces.push(Replace::new(range.start..range.start, " "));
+            cursor += usize::from(cursor >= range.start);
+        }
+        if replaces.is_empty() {
+            return;
+        }
+        if let Err(err) = self.document.edit(&replaces, true) {
+            self.failure = Some(err.to_string());
+            return;
+        }
+        self.engine.set_cursor(cursor, self.document.text());
     }
 
     /// Where the equation the cursor is in begins, if it is in one.
@@ -1044,6 +1088,22 @@ impl Host for DocumentHost<'_> {
     }
 
     fn stop(&self, at: usize, seek: Seek) -> Option<Range<usize>> {
+        // The dollar sign that closes an equation with nothing in it is
+        // the place to fill in, which is no bytes: also before the pages
+        // show it (it was just emptied).
+        if seek == Seek::At && matches!(self.rows, RowsOf::Pages(_)) {
+            let source = &self.document.buffer().0;
+            let text = source.text();
+            let empty = crate::typst_text::equation_at(source, at).is_some_and(|equation| {
+                equation.end == at + 1
+                    && text
+                        .get(equation.start + 1..at)
+                        .is_some_and(|body| body.trim().is_empty())
+            });
+            if empty {
+                return Some(at..at);
+            }
+        }
         let RowsOf::Pages(Some(pages)) = &self.rows else {
             return None;
         };
