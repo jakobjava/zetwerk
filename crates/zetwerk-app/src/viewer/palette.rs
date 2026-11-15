@@ -36,7 +36,7 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("equation (while typing)", "$", Does::Tells),
     (
-        "to the next ‹place to fill in›, or out of brackets",
+        "take what is listed or shown faint; the next ‹place to fill in›",
         "Tab",
         Does::Tells,
     ),
@@ -62,11 +62,26 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("undo, redo", "u  Ctrl-R", Does::Tells),
     (
+        "back to where a jump came from, and on again",
+        "Ctrl-O  Ctrl-I",
+        Does::Tells,
+    ),
+    (
         "search for what is read on the page; \\= first: as written",
         "/  ?  n  N",
         Does::Tells,
     ),
     ("search for the word at the cursor", "*  #", Does::Tells),
+    (
+        "change the next match of the search; . the one after",
+        "cgn",
+        Does::Tells,
+    ),
+    (
+        "replace what is written, in this line or (%) in all",
+        ":s/this/that/  :%s/this/that/g",
+        Does::Ask("%s/"),
+    ),
     ("hide the matches of the search", ":noh", Does::Run("noh")),
     (
         "show the matches of searches, or not",
@@ -170,7 +185,16 @@ const ALL: &[(&str, &str, Does)] = &[
         "gd",
         Does::Run("definition"),
     ),
-    ("go to a page", ":<number>", Does::Ask("")),
+    (
+        "go to a line of the text (on a page: a paragraph, as a rule)",
+        ":<number>",
+        Does::Ask(""),
+    ),
+    (
+        "go to the next page, the page before",
+        "]]  [[",
+        Does::Run("page next"),
+    ),
     ("open a file of the document", ":files", Does::Run("files")),
     ("open a file by name", ":e <file>", Does::Ask("e ")),
     (

@@ -77,6 +77,64 @@ pub fn text() -> Result<String, String> {
     read_with(&readers, PATIENCE)
 }
 
+/// The programs that put text into the clipboard, in the order they are
+/// tried where they could be: on Wayland, on X11, on macOS.
+const WRITERS: &[(&str, &[&str], &str)] = &[
+    ("wl-copy", &[], "WAYLAND_DISPLAY"),
+    ("xclip", &["-selection", "clipboard", "-in"], "DISPLAY"),
+    ("xsel", &["--clipboard", "--input"], "DISPLAY"),
+    ("pbcopy", &[], ""),
+];
+
+/// Puts `text` into the clipboard, for other programs to paste: by the
+/// first program that is there to do it. It is handed over and not
+/// waited for: such a program stays to hold the text until something
+/// else is copied.
+///
+/// # Errors
+///
+/// If there is no clipboard, or nothing to write to it with.
+pub fn write(text: &str) -> Result<(), String> {
+    // A test never writes the user's clipboard: it hands over its own.
+    if cfg!(test) {
+        return Err("no clipboard is written in a test".to_owned());
+    }
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    let mac = cfg!(target_os = "macos");
+    let wanted = WRITERS.iter().filter(|(_, _, display)| {
+        if display.is_empty() {
+            mac
+        } else {
+            set(display)
+        }
+    });
+    for (program, args, _) in wanted {
+        let spawned = Command::new(program)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(format!("not copied: {program}: {err}")),
+        };
+        let mut input = child.stdin.take();
+        let text = text.to_owned();
+        // Written and waited for aside: nothing here waits on it.
+        std::thread::spawn(move || {
+            if let Some(input) = &mut input {
+                let _ = std::io::Write::write_all(input, text.as_bytes());
+            }
+            drop(input);
+            let _ = child.wait();
+        });
+        return Ok(());
+    }
+    Err("not copied: nothing to copy with (wl-clipboard on Wayland, xclip on X11)".to_owned())
+}
+
 /// Why a program gave nothing.
 enum Failed {
     /// It is not installed.

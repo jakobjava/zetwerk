@@ -878,3 +878,83 @@ fn probe() {
         );
     }
 }
+
+/// Runs `cases` (each the keys of one case, apart by commands) on
+/// `lines`, the cursor at the start, through Neovim and the engine, and
+/// says where the two differ.
+fn compare_fixed(name: &str, lines: &[&str], cases: &[&[&str]]) {
+    let lines: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+    let cases: Vec<Case> = cases
+        .iter()
+        .map(|keys| Case {
+            lines: lines.clone(),
+            row: 1,
+            col: 0,
+            keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+        })
+        .collect();
+    let Some(expected) = run_neovim(&cases, name) else {
+        eprintln!("nvim is not installed; skipping the comparison with Neovim");
+        return;
+    };
+    let wrong: Vec<String> = cases
+        .iter()
+        .zip(&expected)
+        .filter(|(case, expected)| run_engine(case) != **expected)
+        .map(|(case, expected)| {
+            format!(
+                "{:?}\n  neovim: {expected:?}\n  engine: {:?}",
+                case.keys,
+                run_engine(case)
+            )
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{name}:\n{}", wrong.join("\n"));
+}
+
+/// Ctrl-O back through the places jumped from, Ctrl-I and Tab on again:
+/// each jump from a line of its own, as Vim keeps one place a line. Not
+/// back past the first: the script that starts Neovim jumped before.
+#[test]
+fn jump_list() {
+    compare_fixed(
+        "jump_list",
+        &["one two", "three", "four five", "six", "seven"],
+        &[
+            &["3G", "5G", "<C-o>"],
+            &["3G", "5G", "<C-o>", "<C-o>"],
+            &["3G", "5G", "2<C-o>"],
+            &["3G", "5G", "<C-o>", "<C-o>", "<C-i>"],
+            &["3G", "5G", "<C-o>", "<C-o>", "<Tab>"],
+            &["3G", "5G", "<C-o>", "<C-o>", "2<C-i>"],
+            &["3G", "5G", "<C-o>", "<C-i>", "<C-i>"],
+            &["w", "G", "<C-o>"],
+            &["/four<CR>", "gg", "<C-o>"],
+            &["/six<CR>", "w", "<C-o>", "<C-i>"],
+            &["<Tab>"],
+        ],
+    );
+}
+
+/// Ctrl-O while typing: one command of normal mode, and typing goes on.
+#[test]
+fn insert_ctrl_o() {
+    compare_fixed(
+        "insert_ctrl_o",
+        &["one two", "three"],
+        &[
+            &["iX<C-o>xY"],
+            &["AX<C-o>0Y"],
+            &["AX<C-o>xY"],
+            &["wiX<C-o>dwY"],
+            &["iX<C-o>jY"],
+            &["AX<C-o>~Y"],
+            &["iX<C-o>3lY"],
+            &["iX<C-o>j0Y"],
+            &["AX<C-o>$Y"],
+            &["iX<C-o><Esc>Y"],
+            &["iX<C-o>xY", "u"],
+            &["iX<C-o>xY", "j."],
+        ],
+    );
+}

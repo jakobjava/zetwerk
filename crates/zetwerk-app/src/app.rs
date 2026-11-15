@@ -436,12 +436,13 @@ impl Session {
                 self.after_keys();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let Some(key) = translate(&event.logical_key) else {
+                let ctrl = self.modifiers.control_key();
+                let Some(key) = translate(&event.logical_key, event.text.as_deref(), ctrl) else {
                     return;
                 };
                 self.viewer.key(KeyPress {
                     key,
-                    ctrl: self.modifiers.control_key(),
+                    ctrl,
                     alt: self.modifiers.alt_key(),
                 });
                 self.after_keys();
@@ -659,7 +660,26 @@ impl Session {
 }
 
 /// The key a keyboard event stands for, if it is one zetwerk knows.
-fn translate(key: &WinitKey) -> Option<Key> {
+///
+/// `text` is what the press typed, if it typed something. After a dead
+/// key, or with compose, that is the character several presses made
+/// (`^` and then Space is `^`, and then `e` is `ê`), and the key itself
+/// does not say so: on a German or a US international keyboard, `^`,
+/// `` ` ``, `'`, `"` and `~` are typed so. Not with Ctrl held: the key
+/// is what counts then.
+fn translate(key: &WinitKey, text: Option<&str>, ctrl: bool) -> Option<Key> {
+    let typed = text.filter(|_| !ctrl).and_then(|text| {
+        let mut chars = text.chars();
+        let first = chars.next()?;
+        (chars.next().is_none() && !first.is_control()).then_some(first)
+    });
+    let printable = matches!(
+        key,
+        WinitKey::Character(_) | WinitKey::Dead(_) | WinitKey::Named(NamedKey::Space)
+    );
+    if let (Some(c), true) = (typed, printable) {
+        return Some(Key::Char(c));
+    }
     Some(match key {
         WinitKey::Character(text) => Key::Char(text.chars().next()?),
         WinitKey::Named(named) => match named {
@@ -679,6 +699,50 @@ fn translate(key: &WinitKey) -> Option<Key> {
             NamedKey::End => Key::End,
             _ => return None,
         },
+        // With Ctrl, a dead key is the key: Ctrl-^ on a German keyboard,
+        // to the file edited before.
+        WinitKey::Dead(Some(c)) if ctrl => Key::Char(*c),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_dead_keys_and_compose_type_what_they_make() {
+        let character = |c: &str| WinitKey::Character(c.into());
+        let space = WinitKey::Named(NamedKey::Space);
+        // A dead key alone types nothing yet; with Ctrl it is the key.
+        assert_eq!(translate(&WinitKey::Dead(Some('^')), None, false), None);
+        assert_eq!(
+            translate(&WinitKey::Dead(Some('^')), None, true),
+            Some(Key::Char('^'))
+        );
+        // Then Space types the accent itself, a letter the two together.
+        assert_eq!(translate(&space, Some("^"), false), Some(Key::Char('^')));
+        assert_eq!(translate(&space, Some("`"), false), Some(Key::Char('`')));
+        assert_eq!(
+            translate(&character("e"), Some("\u{ea}"), false),
+            Some(Key::Char('\u{ea}'))
+        );
+        // AltGr and Shift are in the key already.
+        assert_eq!(
+            translate(&character("@"), Some("@"), false),
+            Some(Key::Char('@'))
+        );
+        assert_eq!(translate(&space, Some(" "), false), Some(Key::Char(' ')));
+        // With Ctrl, the key: what it types is a control character, or
+        // nothing.
+        assert_eq!(
+            translate(&character("w"), Some("\u{17}"), true),
+            Some(Key::Char('w'))
+        );
+        assert_eq!(translate(&character("w"), None, true), Some(Key::Char('w')));
+        assert_eq!(
+            translate(&WinitKey::Named(NamedKey::Tab), Some("\t"), false),
+            Some(Key::Tab)
+        );
+    }
 }

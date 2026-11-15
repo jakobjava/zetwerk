@@ -175,11 +175,12 @@ fn deleting_words_leaves_the_marks_of_text_set_off() {
             "/and<CR>db",
             "Some word#footnote[A note|]and more text.\n",
         ),
-        // Where the mark would come to stand in a word, nothing goes.
+        // Back a word is back a word of what the page reads: the mark
+        // that ends the strong text stays, and is one still.
         (
             "Plain *bold words* after.\n",
             "/after<CR>db",
-            "Plain *bold words* |after.\n",
+            "Plain *bold |*after.\n",
         ),
     ];
     for (text, keys, expected) in cases {

@@ -897,6 +897,13 @@ impl Viewer {
         true
     }
 
+    /// Whether keys are for the prompt in which a thing is typed anew:
+    /// they are typed there as they are, no mapping of the user's
+    /// applies to them.
+    pub(super) fn is_retyping(&self) -> bool {
+        self.margin.prompt.is_some()
+    }
+
     /// A key for the prompt in which a thing is typed anew.
     fn prompt_key(&mut self, press: KeyPress) {
         let Some(prompt) = &mut self.margin.prompt else {

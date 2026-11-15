@@ -234,6 +234,27 @@ pub fn join(source: &Source, at: usize, spaced: bool) -> Option<(Range<usize>, S
     if !spaced && ((mark(left) && letter(right)) || (letter(left) && mark(right))) {
         return None;
     }
+    // Behind a comment that ends the line, what follows would be part
+    // of the comment: the line break that ends it stays, and in a
+    // paragraph it is the blank between the two. A heading or an item
+    // ends with its line, and gives no such way.
+    let comment = LinkedNode::new(source.root())
+        .leaf_at(from, Side::Before)
+        .filter(|leaf| leaf.kind() == SyntaxKind::LineComment);
+    if let Some(comment) = comment {
+        let chain = super::ancestors(source, comment.range().start);
+        let ends_with_line = marked(source, line).is_some()
+            || chain.iter().any(|node| {
+                matches!(
+                    node.kind(),
+                    SyntaxKind::Heading
+                        | SyntaxKind::ListItem
+                        | SyntaxKind::EnumItem
+                        | SyntaxKind::TermItem
+                )
+            });
+        return (spaced && !ends_with_line).then(|| (end..to, "\n".to_owned()));
+    }
     let with = if spaced { " " } else { "" };
     Some((from..to, with.to_owned()))
 }
@@ -531,6 +552,119 @@ fn unpaired(node: &LinkedNode, range: &Range<usize>, kept: &mut Vec<Range<usize>
             unpaired(child, range, kept);
         }
     }
+}
+
+/// What `edits` (each a range of `source` as it is and what to put
+/// there, in order and apart) would break that is whole now: what Typst
+/// could not read then, as words for a person (strong text unclosed).
+/// `None` where nothing would break, and where something is broken
+/// already.
+#[must_use]
+pub fn breaks(source: &Source, edits: &[(Range<usize>, &str)]) -> Option<String> {
+    // What an equation lacks after something in it went (a mark that
+    // raises nothing, a fraction without what it divides by) is nothing
+    // broken: the page shows an empty place there, and what is left
+    // over is tidied away (see `lacking` and `Editor::tidy_equation`).
+    // Else nothing in an exponent could be taken out to type it anew.
+    // That holds for what goes within one equation, where the cursor
+    // stays in it; what reaches out of it leaves it behind as it is.
+    fn first(node: &LinkedNode, lenient: bool, in_equation: bool) -> Option<String> {
+        let in_equation = in_equation || node.kind() == SyntaxKind::Equation;
+        if node.kind() == SyntaxKind::Error {
+            let (errors, _) = node.get().errors_and_warnings();
+            let message = errors.first().map(|error| error.message.to_string())?;
+            let lacks = lenient && in_equation && message == "expected expression";
+            return (!lacks).then_some(message);
+        }
+        if !node.get().diagnosis().errors {
+            return None;
+        }
+        node.children()
+            .find_map(|child| first(&child, lenient, in_equation))
+    }
+    if source.root().diagnosis().errors {
+        return None;
+    }
+    let mut after = source.clone();
+    for (range, with) in edits.iter().rev() {
+        source.text().get(range.clone())?;
+        after.edit(range.clone(), with);
+    }
+    if !after.root().diagnosis().errors {
+        return None;
+    }
+    let within = edits.iter().all(|(range, _)| {
+        equation_at(source, range.start)
+            .is_some_and(|equation| equation.start < range.start && range.end < equation.end)
+    });
+    let message = first(&LinkedNode::new(after.root()), within, false)?;
+    let message = message.as_str();
+    Some(match message {
+        "unclosed delimiter" => "a mark unclosed: strong or emphasised text, say".to_owned(),
+        "expected expression" => "a part of an equation with nothing in it".to_owned(),
+        _ => format!("what Typst cannot read ({message})"),
+    })
+}
+
+/// Whether taking bytes `range` out of `source` would take a mark that
+/// opens or closes something (a dollar sign, a star, a bracket, the
+/// marker of a heading) and leave that something: half an equation, a
+/// strong text that is never closed. What a page shows, and things that
+/// go whole (a symbol, a label, a comment), may be taken by themselves;
+/// running text may be cut anywhere.
+#[must_use]
+pub fn cuts(source: &Source, range: &Range<usize>) -> bool {
+    /// Leaves that may be taken whole without what they are in.
+    fn by_itself(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::Text
+                | SyntaxKind::Space
+                | SyntaxKind::Parbreak
+                | SyntaxKind::Linebreak
+                | SyntaxKind::Escape
+                | SyntaxKind::Shorthand
+                | SyntaxKind::SmartQuote
+                | SyntaxKind::Link
+                | SyntaxKind::Label
+                | SyntaxKind::RefMarker
+                | SyntaxKind::LineComment
+                | SyntaxKind::BlockComment
+                | SyntaxKind::RawTrimmed
+                | SyntaxKind::MathText
+                | SyntaxKind::MathIdent
+                | SyntaxKind::MathShorthand
+        )
+    }
+    fn walk(node: &LinkedNode, range: &Range<usize>) -> bool {
+        let here = node.range();
+        let apart = here.end <= range.start || here.start >= range.end;
+        let within = range.start <= here.start && here.end <= range.end;
+        if apart || within {
+            return false;
+        }
+        if node.children().len() == 0 {
+            // Cut in two: only running text and blanks may be.
+            return !matches!(
+                node.kind(),
+                SyntaxKind::Text | SyntaxKind::Space | SyntaxKind::Parbreak | SyntaxKind::Link
+            );
+        }
+        let children: Vec<LinkedNode> = node.children().collect();
+        children.iter().enumerate().any(|(index, child)| {
+            let part = child.range();
+            let taken = range.start <= part.start && part.end <= range.end && !part.is_empty();
+            if taken && child.children().len() == 0 && !by_itself(child.kind()) {
+                // A hash goes with the code it begins.
+                let code = children.get(index + 1).map(LinkedNode::range);
+                let with_code = child.kind() == SyntaxKind::Hash
+                    && code.is_some_and(|code| code.end <= range.end);
+                return !with_code;
+            }
+            walk(child, range)
+        })
+    }
+    walk(&LinkedNode::new(source.root()), range)
 }
 
 /// Blanks, for [`raw_blank`] to take as many of as it needs.

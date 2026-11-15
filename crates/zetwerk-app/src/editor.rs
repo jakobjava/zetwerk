@@ -227,7 +227,12 @@ impl Editor {
         for _ in 0..TIDY_ROUNDS {
             let source = &self.document.buffer().0;
             let cursor = self.engine.cursor();
-            let Some(equation) = crate::typst_text::equation_at(source, cursor) else {
+            // The one the cursor is in, or has just come out of at its
+            // end: what was taken may have been the last thing in it.
+            let behind = cursor
+                .checked_sub(1)
+                .and_then(|before| crate::typst_text::equation_at(source, before));
+            let Some(equation) = crate::typst_text::equation_at(source, cursor).or(behind) else {
                 return;
             };
             if cursor <= equation.start || !crate::typst_text::is_whole_equation(source, &equation)
@@ -351,6 +356,19 @@ impl Editor {
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.engine.is_idle()
+    }
+
+    /// Makes register `name` hold `text`: whole lines if it ends with a
+    /// line break. See [`Engine::set_register`].
+    pub fn set_register(&mut self, name: char, text: &str) {
+        self.engine.set_register(name, text);
+    }
+
+    /// Whether the next key is part of a command begun; see
+    /// [`Engine::awaits_part`].
+    #[must_use]
+    pub fn awaits_part(&self) -> bool {
+        self.engine.awaits_part()
     }
 
     /// What can follow the keys typed so far; see [`Engine::following`].
@@ -891,6 +909,26 @@ impl Host for DocumentHost<'_> {
     fn letters(&self, range: Range<usize>) -> Option<Vec<Range<usize>>> {
         matches!(self.rows, RowsOf::Pages(_))
             .then(|| crate::typst_text::letters(&self.document.buffer().0, &range))
+    }
+
+    fn refuses(&mut self, edits: &[Edit]) -> bool {
+        if !matches!(self.rows, RowsOf::Pages(_)) {
+            return false;
+        }
+        let edits: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .map(|edit| (edit.range.clone(), edit.text.as_str()))
+            .collect();
+        let why = crate::typst_text::breaks(&self.document.buffer().0, &edits);
+        if let Some(why) = &why {
+            *self.failure = Some(format!("it would leave {why}"));
+        }
+        why.is_some()
+    }
+
+    fn cuts(&self, range: Range<usize>) -> bool {
+        matches!(self.rows, RowsOf::Pages(_))
+            && crate::typst_text::cuts(&self.document.buffer().0, &range)
     }
 
     fn join(&self, at: usize, spaced: bool) -> Option<(Range<usize>, String)> {

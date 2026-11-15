@@ -98,8 +98,9 @@ impl Viewer {
             _ => &self.keymap.normal,
         };
         // In the middle of a command a key is part of it: the `;` of
-        // `f;` is a character to find.
-        if self.typed.is_empty() && !editor.is_idle() {
+        // `f;` is a character to find. Not behind a count or the name
+        // of a register: `3Y` is the mapping of `Y`, three times.
+        if self.typed.is_empty() && editor.awaits_part() {
             return Mapped::Keys(vec![press]);
         }
         self.typed.push(press);
@@ -122,8 +123,11 @@ impl Viewer {
 
     /// A key was pressed: it, or what the user's mappings make of it.
     pub fn key(&mut self, press: KeyPress) {
-        let plain =
-            self.keymap.is_empty() || self.is_picking() || self.is_grid() || self.is_jumping();
+        let plain = self.keymap.is_empty()
+            || self.is_picking()
+            || self.is_grid()
+            || self.is_jumping()
+            || self.is_retyping();
         if plain {
             self.plain_key(press);
         } else {

@@ -27,6 +27,7 @@ mod palette;
 mod pointer;
 pub mod refer;
 mod refused;
+mod registers;
 mod slides;
 mod sources;
 mod sources_add;
@@ -878,6 +879,8 @@ pub struct Viewer {
     refer: refer::Refer,
     /// What the bibliography manager keeps between commands.
     sources_kept: sources_look::Kept,
+    /// The register `"+`, and the system clipboard it stands for.
+    clipboard: registers::Clipboard,
     /// What is known about the spelling and grammar of the text.
     language: language::Language,
     /// The notes on the text, and what reviewing keeps (see [`notes`]).
@@ -997,6 +1000,7 @@ impl Viewer {
             history: None,
             refer: refer::Refer::default(),
             sources_kept: sources_look::Kept::default(),
+            clipboard: registers::Clipboard::default(),
             language: language::Language::default(),
             notes: notes::Notes::default(),
             margin: margin::Margin::default(),
@@ -1675,6 +1679,34 @@ impl Viewer {
     }
 
     /// A key, as it is: no mapping of the user's is applied to it.
+    ///
+    /// Who has a key is decided here, in this order: the overview of
+    /// pages; the places to fill in of a starter (`start_key`); a thing
+    /// that shows as nothing that `]i` went to, or the prompt it is typed
+    /// anew in (`margin_key`); the labels of `gw`, a list of places to go,
+    /// the aids and the list of completions (`assist_key`); and then Vim.
+    ///
+    /// Tab means many things, and so means the first of these that
+    /// holds. While typing:
+    ///
+    /// 1. A list of completions is up (or of things to refer to): Tab
+    ///    takes the chosen entry. (Where what is typed is that entry
+    ///    already, Tab goes on down this list.)
+    /// 2. The rest of a word shows faint behind the cursor (`:ghost`):
+    ///    Tab takes it. What is shown wins over what is not.
+    /// 3. The word before the cursor is the short name of a snippet: it
+    ///    becomes the snippet.
+    /// 4. A starter is being filled in: to its next place to fill in.
+    /// 5. In an equation, in the arguments of a call: to the next place
+    ///    to fill in. In a cell of a table: to the next cell; behind the
+    ///    last one a row is made.
+    /// 6. On a page nothing else: a tab shows as nothing there. In the
+    ///    source, blanks to the next stop.
+    ///
+    /// In normal mode Tab goes to the next place to fill in of a starter
+    /// where the text has one; where it has none, it is Vim's Ctrl-I:
+    /// on again to where Ctrl-O came back from. On the command line it
+    /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
         self.message = None;
         if self.grid.is_some() {
@@ -1739,6 +1771,11 @@ impl Viewer {
 
     /// A key for the source text.
     fn editor_key(&mut self, press: KeyPress) {
+        if (self.editor.as_ref())
+            .is_some_and(|editor| registers::asks_clipboard(&mut self.clipboard, editor, press))
+        {
+            self.clipboard_to_register();
+        }
         // What the pages say of where the text is holds also while one
         // of them is shown as worked out: only where things are drawn
         // differs then.
@@ -1824,6 +1861,7 @@ impl Viewer {
             }
         }
         self.stepped();
+        self.register_to_clipboard();
         if moved {
             self.follow_cursor();
         }
@@ -3131,6 +3169,8 @@ mod tests {
     mod errors;
     mod files;
     mod frames;
+    #[path = "keys.rs"]
+    mod keyboard;
     mod left_behind;
     mod panels;
     mod speed;

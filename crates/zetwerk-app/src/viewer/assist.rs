@@ -675,6 +675,14 @@ impl Viewer {
         }
     }
 
+    /// Makes Escape take the list that is up away, and not lead back to
+    /// another: it was put up by itself.
+    pub(super) fn picker_by_itself(&mut self) {
+        if let Some(picker) = &mut self.picker {
+            picker.back = None;
+        }
+    }
+
     fn picker_key(&mut self, press: KeyPress) {
         let Some(picker) = &mut self.picker else {
             return;

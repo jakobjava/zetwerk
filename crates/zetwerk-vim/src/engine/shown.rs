@@ -14,10 +14,15 @@
 
 use std::ops::Range;
 
-use super::{Column, Engine, Host, Mode, Operator, Seek, clamp, lower, upper};
+use super::{
+    Awaiting, Column, Edit, Engine, Host, Mode, Moved, Operator, Seek, clamp, line_end_inclusive,
+    lower, upper,
+};
 use crate::keys::{Key, KeyPress};
+use crate::motion::{self, Kind};
 use crate::object::Object;
 use crate::text::Text;
+use crate::took::Took;
 
 /// How many places a command looks at in one line, or in one selection,
 /// before it gives up: more than any line has, and few enough to be gone
@@ -27,6 +32,11 @@ const MANY: usize = 4096;
 /// Up to how many characters a place may be written with to be found by
 /// any of them (see [`found_by`]).
 const SHORT: usize = 3;
+
+/// How many lines a whole-lines command looks on for the end of what
+/// it would else cut in two: more than a figure or a table is written
+/// over, as a rule.
+const LOOK_AT: usize = 64;
 
 /// Whether `f` and `t` find what is shown at bytes `stop` of `text` when
 /// they look for `target`.
@@ -69,7 +79,7 @@ fn all_of(stop: &Range<usize>, stops: &[Range<usize>]) -> Range<usize> {
 impl Engine {
     /// The place the host shows under the cursor, outside insert mode
     /// and where it shows places of its own at all.
-    fn shown_here(&self, host: &impl Host) -> Option<Range<usize>> {
+    pub(super) fn shown_here(&self, host: &impl Host) -> Option<Range<usize>> {
         if !self.rows_first || self.mode == Mode::Insert {
             return None;
         }
@@ -341,7 +351,14 @@ impl Engine {
         let in_text = puts.iter().all(|(range, ..)| {
             range.start <= range.end && host.text().get(range.clone()).is_some()
         });
-        if !apart || !in_text {
+        let edits: Vec<Edit> = puts
+            .iter()
+            .map(|(range, text, _)| Edit {
+                range: range.clone(),
+                text: text.clone(),
+            })
+            .collect();
+        if !apart || !in_text || host.refuses(&edits) {
             self.fail();
             return true;
         }
@@ -545,6 +562,449 @@ impl Engine {
         self.cursor = clamp(Text(host.text()), self.cursor, false);
         self.wanted_column = None;
         true
+    }
+
+    /// `w`, `b`, `e` and their WORD kin (behind an operator only `b`
+    /// and `e`), where the
+    /// host reads the text as something else than it is written (see
+    /// [`Host::reading`]): over the words as read, so that the marks
+    /// strong text and equations are written with are no words of their
+    /// own. `None` where there is no reading, or the motion gets nowhere
+    /// in it: then the text's own words count.
+    pub(super) fn shown_word(&mut self, c: char, host: &impl Host) -> Option<Moved> {
+        let reading = host.reading()?;
+        let read = Text(reading.text());
+        let at = reading.read_at(self.cursor);
+        if at >= read.len() {
+            return None;
+        }
+        let count = self.pending.count.unwrap_or(1).max(1)
+            * self.pending.operator_count.unwrap_or(1).max(1);
+        let big = c.is_ascii_uppercase();
+        let (to, ok) = match c.to_ascii_lowercase() {
+            'w' => motion::word_forward(read, at, count, big, false),
+            'b' => motion::word_backward(read, at, count, big),
+            _ => motion::word_end(read, at, count, big, false),
+        };
+        if !ok || to == at || to >= read.len() {
+            return None;
+        }
+        let written = reading.written(to..read.next(to)).start;
+        // Not into or out of an equation (the host's object `$`): what
+        // one reads as runs its parts together (`frac(a, b)` is `ab`),
+        // and the places the host shows in it lead through it.
+        let in_equation = |at: usize| host.object('$', at, true).is_some();
+        if written == self.cursor || in_equation(self.cursor) || in_equation(written) {
+            return None;
+        }
+        self.take_count();
+        let kind = if c.eq_ignore_ascii_case(&'e') {
+            Kind::Inclusive
+        } else {
+            Kind::Exclusive
+        };
+        Some(Moved {
+            to: written,
+            kind,
+            column: Column::Reset,
+        })
+    }
+
+    /// Whole lines `start..end` of the text that a motion took for an
+    /// operator (`dgg`, `dG`, `dj`), where the host shows pages: without
+    /// the lines at either end that show nothing although something is
+    /// written there (the rules that set up the page, a comment). Those
+    /// are not where the motion went on the page; `dgg` took them along.
+    /// Empty lines stay: they part paragraphs. All of it where no line
+    /// shows anything.
+    pub(super) fn shown_lines_within(
+        &self,
+        start: usize,
+        end: usize,
+        host: &impl Host,
+    ) -> (usize, usize) {
+        if !self.rows_first || start >= end {
+            return (start, end);
+        }
+        let text = Text(host.text());
+        let hidden = |line: usize| {
+            let line_end = text.line_end(line);
+            line < line_end
+                && host
+                    .stop(line, Seek::After)
+                    .is_none_or(|stop| stop.start >= line_end)
+        };
+        let (mut from, mut to) = (start, end);
+        while from < to && hidden(from) {
+            from = text.next_line(from).unwrap_or(to).min(to);
+        }
+        while from < to {
+            let last = text.line_start(text.prev(to));
+            if last < from || !hidden(last) {
+                break;
+            }
+            to = last;
+        }
+        if from >= to {
+            return (start, end);
+        }
+        // Lines that end or begin in the middle of something the page
+        // shows as one (a figure written over several lines, a table):
+        // all of it, as it is one line of the page. Else `dj` above a
+        // figure took its first line and left the rest as text.
+        if host.cuts(from..to) {
+            let len = text.0.len();
+            let mut later = to;
+            for _ in 0..LOOK_AT {
+                if later >= len || !host.cuts(from..later) {
+                    break;
+                }
+                later = line_end_inclusive(text, later);
+            }
+            let mut earlier = from;
+            for _ in 0..LOOK_AT {
+                if earlier == 0 || !host.cuts(earlier..to) {
+                    break;
+                }
+                earlier = text.line_start(text.prev(earlier));
+            }
+            if !host.cuts(from..later) {
+                to = later;
+            } else if !host.cuts(earlier..to) {
+                from = earlier;
+            } else if !host.cuts(earlier..later) {
+                (from, to) = (earlier, later);
+            }
+        }
+        (from, to)
+    }
+
+    /// After `{` where the host shows pages: the empty line it went to
+    /// shows nothing, and coming to rest before it would be on the end
+    /// of the paragraph before. To the start of the paragraph instead,
+    /// that is, behind that line; or, where the cursor was there
+    /// already (at `before`), to the start of the one before.
+    pub(super) fn shown_paragraph_start(&mut self, before: usize, host: &impl Host) {
+        let start_behind = |at: usize| {
+            let text = Text(host.text());
+            if !text.line_is_empty(at) {
+                return None;
+            }
+            host.stop(at, Seek::After).map(|stop| stop.start)
+        };
+        let Some(start) = start_behind(self.cursor) else {
+            return;
+        };
+        if start < before {
+            self.cursor = start;
+            return;
+        }
+        // At the start already: one more paragraph back.
+        let text = Text(host.text());
+        let mut line = Some(self.cursor);
+        while let Some(at) = line.and_then(|at| text.prev_line(at)) {
+            if text.line_is_empty(at) {
+                line = Some(at);
+                continue;
+            }
+            // Up to the empty line before this paragraph, or the start.
+            let mut first = at;
+            while let Some(above) = text
+                .prev_line(first)
+                .filter(|above| !text.line_is_empty(*above))
+            {
+                first = above;
+            }
+            let found = text
+                .prev_line(first)
+                .and_then(start_behind)
+                .or_else(|| host.stop(first, Seek::After).map(|stop| stop.start));
+            if let Some(found) = found.filter(|found| *found < before) {
+                self.cursor = found;
+            }
+            return;
+        }
+    }
+
+    /// `ip` and `ap` where the host shows pages: `found`, the paragraph
+    /// of the text around byte `at`, without the lines next to it that
+    /// the host shows as things of their own (see [`Host::open`]): the
+    /// rules that set up the page, a heading, that stand against it with
+    /// no empty line between. Else `dap` would take those, unseen.
+    pub(super) fn shown_paragraph(&self, found: Object, at: usize, host: &impl Host) -> Object {
+        if !self.rows_first {
+            return found;
+        }
+        let (Some((start, above, _)), Some((end, below, _))) =
+            (host.open(at, false), host.open(at, true))
+        else {
+            return found;
+        };
+        if above != "\n\n" || below != "\n\n" {
+            return found;
+        }
+        let text = Text(host.text());
+        let filled = |range: Range<usize>| {
+            text.0
+                .get(range)
+                .is_some_and(|between| !between.trim().is_empty())
+        };
+        let mut shown = found;
+        if found.start < start && filled(found.start..start) {
+            shown.start = start;
+        }
+        if end < found.end && filled(end..found.end) {
+            shown.end = text.next_line(end).unwrap_or(text.0.len());
+        }
+        shown
+    }
+
+    /// What `operator` (a delete, a change or a yank, not of whole lines)
+    /// takes of `object` where taking all of it would cut what the host
+    /// shows in two (see [`Host::cuts`]): the places shown in it, each
+    /// run of them that can go together as one, in the order of the
+    /// text. So `3x` from before an equation into it takes what is shown,
+    /// and the dollar sign between stays. `None` where all of it may go.
+    pub(super) fn shown_parts(
+        &self,
+        operator: Operator,
+        object: &Object,
+        host: &impl Host,
+    ) -> Option<Vec<Range<usize>>> {
+        let range = object.start..object.end;
+        let deletes = matches!(
+            operator,
+            Operator::Delete | Operator::Change | Operator::Yank
+        );
+        if !self.rows_first || !deletes || object.linewise || range.is_empty() {
+            return None;
+        }
+        if !host.cuts(range.clone()) {
+            return None;
+        }
+        Some(Self::parts_within(host, &range))
+    }
+
+    /// The places the host shows in bytes `range` (see
+    /// [`Engine::shown_parts`]), each run of them that can be taken out
+    /// together as one.
+    fn parts_within(host: &impl Host, range: &Range<usize>) -> Vec<Range<usize>> {
+        let stops = Self::shown_within(host, range).unwrap_or_default();
+        let mut parts: Vec<Range<usize>> = Vec::new();
+        // Not what is shown as one and goes on beyond `range` (the number
+        // of a footnote whose text is only partly in it): taken whole,
+        // more would go than was asked for.
+        let within = |stop: &Range<usize>| !stop.is_empty() && stop.end <= range.end;
+        for stop in stops.into_iter().filter(within) {
+            match parts.last_mut() {
+                Some(last) if stop.start <= last.end => last.end = last.end.max(stop.end),
+                Some(last) if !host.cuts(last.start..stop.end) => last.end = stop.end,
+                _ => parts.push(stop),
+            }
+        }
+        parts
+    }
+
+    /// Before a key in normal mode that changes what is at the cursor
+    /// (`x`, `d`, `r`, `p` and their like) where the host shows places
+    /// of its own: a cursor that was put where nothing is shown, from
+    /// outside the keys (to the mark of a heading a list of headings led
+    /// to, to a label), comes to rest on what is shown nearest, as it
+    /// does after every key. Else `x` or `dw` there would take marks
+    /// nobody sees, and `i` would type before the mark of a heading,
+    /// which makes it none. Other keys go from where it is: typing there
+    /// goes into what that place is in.
+    pub(super) fn rest_before_key(&mut self, press: KeyPress, host: &impl Host) {
+        // Typing goes into what the place is in (at the dollar sign
+        // that closes an equation: into it), but not before the mark
+        // that begins a line: a heading, an item.
+        let line_starts = || {
+            let text = Text(host.text());
+            let before = text.0.get(text.line_start(self.cursor)..self.cursor);
+            before.is_some_and(|before| before.trim().is_empty())
+        };
+        let changes = !press.ctrl
+            && match press.key {
+                Key::Delete => true,
+                Key::Char('i' | 'a') => line_starts(),
+                Key::Char(c) => "xXsSrR~dcDCpPJ.".contains(c),
+                _ => false,
+            };
+        let begun = self.pending.operator.is_some() || self.pending.awaiting != Awaiting::Nothing;
+        if !self.rows_first || !changes || self.mode != Mode::Normal || begun {
+            return;
+        }
+        if host.stop(self.cursor, Seek::At).is_some() {
+            return;
+        }
+        let text = Text(host.text());
+        let line = text.line_index(clamp(text, self.cursor, true));
+        // What the cursor is in the middle of (a link, shown as one,
+        // that a search led into); else what follows in its line before
+        // what is before it.
+        let within = host
+            .stop(self.cursor, Seek::Before)
+            .filter(|stop| stop.end > self.cursor);
+        let after = host
+            .stop(self.cursor, Seek::After)
+            .filter(|stop| text.line_index(stop.start) == line);
+        let stop = within.or(after);
+        let stop = stop.or_else(|| host.stop(self.cursor, Seek::Before));
+        let stop = stop.or_else(|| host.stop(self.cursor, Seek::After));
+        if let Some(stop) = stop {
+            self.cursor = stop.start;
+            self.wanted_column = None;
+        }
+    }
+
+    /// Ctrl-W (`word`) and Ctrl-U while typing, where the host shows the
+    /// text as pages: back over what is shown, never into the marks it
+    /// is made with. Ctrl-W goes back over the blanks before the cursor
+    /// and then over the letters of a word, or the signs that are no
+    /// letters, as shown; Ctrl-U to where typing began, or to the start
+    /// of the paragraph. Where that would take a mark without what it
+    /// marks (the star that ends strong text), only what is shown goes.
+    ///
+    /// `None` where the host does not show places of its own here: then
+    /// these go by the characters of the text. Else whether anything went.
+    pub(super) fn shown_erase(&mut self, word: bool, host: &mut impl Host) -> Option<bool> {
+        if !self.rows_first || self.replacing {
+            return None;
+        }
+        let text = Text(host.text());
+        let start = text.line_start(self.cursor);
+        let mut to = self.cursor;
+        if word {
+            let mut class = None;
+            while to > start {
+                let Some(stop) = host.stop(text.prev(to), Seek::Before) else {
+                    break;
+                };
+                if stop.start >= to || stop.end > self.cursor || stop.start < start {
+                    break;
+                }
+                // Not into another part of the page that is typed into
+                // by itself: the cell before, the text a footnote is in.
+                if host.parted(stop.start..self.cursor) {
+                    break;
+                }
+                let shown = text.0.get(stop.clone()).unwrap_or("");
+                let blank = shown.chars().all(char::is_whitespace);
+                let letters = shown.chars().all(|c| c.is_alphanumeric() || c == '_');
+                match class {
+                    None if blank => {}
+                    None => class = Some(letters),
+                    Some(_) if blank => break,
+                    Some(was) if was != letters => break,
+                    Some(_) => {}
+                }
+                to = stop.start;
+            }
+        } else {
+            to = start;
+        }
+        let to = self.stop_at_insert_start(host.text(), to);
+        if to >= self.cursor || host.stop(to, Seek::After).is_none() {
+            return None;
+        }
+        let range = to..self.cursor;
+        if !host.cuts(range.clone()) {
+            self.insert_delete(to, host);
+            return Some(true);
+        }
+        let parts = Self::parts_within(host, &range);
+        let Some(first) = parts.first().map(|part| part.start) else {
+            return Some(false);
+        };
+        for part in parts.iter().rev() {
+            self.edit(host, part.clone(), "");
+        }
+        self.cursor = first;
+        Some(true)
+    }
+
+    /// Whether the host refuses what `operator` would take of `object`
+    /// (`parts` of it, where only those go): see [`Host::refuses`]. Then
+    /// the command fails and nothing changes.
+    pub(super) fn shown_refused(
+        &mut self,
+        operator: Operator,
+        object: &Object,
+        parts: Option<&[Range<usize>]>,
+        host: &mut impl Host,
+    ) -> bool {
+        let deletes = matches!(operator, Operator::Delete | Operator::Change);
+        if !self.rows_first || !deletes || object.linewise || object.start >= object.end {
+            return false;
+        }
+        let whole = object.start..object.end;
+        let mut taken: Vec<Edit> = parts
+            .unwrap_or(std::slice::from_ref(&whole))
+            .iter()
+            .map(|range| Edit {
+                range: range.clone(),
+                text: String::new(),
+            })
+            .collect();
+        // Where only parts go, what was asked for reached beyond them:
+        // out of an equation, say, where the cursor then does not stay
+        // to have what is left empty in it tidied. The host is told how
+        // far it reached, by a change of nothing at the end of it.
+        if parts.is_some() && taken.last().is_some_and(|last| last.range.end < whole.end) {
+            taken.push(Edit {
+                range: whole.end..whole.end,
+                text: String::new(),
+            });
+        }
+        if !host.refuses(&taken) {
+            return false;
+        }
+        self.fail();
+        self.changed = false;
+        self.undo_block = None;
+        self.undo_cursor = None;
+        self.column_before = None;
+        self.wanted_column = None;
+        self.cursor = clamp(Text(host.text()), self.cursor, false);
+        true
+    }
+
+    /// Takes `parts` (see [`Engine::shown_parts`]) out of the text for
+    /// `operator`, as one change: what they held goes into the register
+    /// together, and the cursor to where the first of them was, to type
+    /// there after a change. Where nothing is shown in them, nothing is
+    /// taken, and the command fails.
+    pub(super) fn delete_parts(
+        &mut self,
+        operator: Operator,
+        parts: &[Range<usize>],
+        host: &mut impl Host,
+    ) {
+        let Some(first) = parts.first().map(|part| part.start) else {
+            self.cursor = clamp(Text(host.text()), self.cursor, false);
+            return self.fail();
+        };
+        let text = host.text();
+        let taken: String = parts
+            .iter()
+            .filter_map(|part| text.get(part.clone()))
+            .collect();
+        self.took = Some(Took::Deleted {
+            text: taken.clone(),
+            at: first,
+            linewise: false,
+        });
+        self.store(taken, false, true);
+        // From the last: the parts before it stay where they are.
+        for part in parts.iter().rev() {
+            self.edit(host, part.clone(), "");
+        }
+        if operator == Operator::Change {
+            self.cursor = first;
+            self.enter_insert(1, host.text());
+        } else {
+            self.cursor = clamp(Text(host.text()), first, false);
+        }
     }
 
     /// `x` and `s` on a place that shows no bytes, at byte `at`: a part

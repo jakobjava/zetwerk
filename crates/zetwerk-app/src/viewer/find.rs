@@ -567,6 +567,10 @@ impl Viewer {
     /// `:noh`, `:hlsearch` and `:feedback`; whether `command` is one of
     /// them.
     pub(super) fn find_command(&mut self, command: &str) -> bool {
+        if let Some(substitute) = Substitute::read(command) {
+            self.substitute(substitute);
+            return true;
+        }
         let (name, wanted) = command.split_once(' ').unwrap_or((command, ""));
         let on = |now: bool| match wanted {
             "on" => Some(true),
@@ -606,6 +610,48 @@ impl Viewer {
             _ => return false,
         }
         true
+    }
+
+    /// `:s/this/that/` and its like (see [`Substitute`]).
+    fn substitute(&mut self, substitute: Result<Substitute, String>) {
+        let substitute = match substitute {
+            Ok(substitute) => substitute,
+            Err(why) => return self.alert(why),
+        };
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let (edits, last) = substitute.edits(editor.text(), editor.cursor());
+        if edits.is_empty() {
+            return self.alert(format!("not found: {}", substitute.pattern));
+        }
+        // From the last: the ranges before it stay those of the text.
+        let backwards: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .rev()
+            .map(|range| (range.clone(), substitute.with.as_str()))
+            .collect();
+        match editor.replace(&backwards) {
+            Ok(()) => {
+                // To the start of the last line that changed, as in Vim:
+                // where it is now that those before it changed.
+                let before = &edits[..edits.len() - 1];
+                let taken: usize = before.iter().map(Range::len).sum();
+                let last = (last + before.len() * substitute.with.len()).saturating_sub(taken);
+                let text = editor.text();
+                let line = text[..last.min(text.len())]
+                    .rfind('\n')
+                    .map_or(0, |found| found + 1);
+                let blanks =
+                    text[line..].len() - text[line..].trim_start_matches([' ', '\t']).len();
+                editor.set_cursor(line + blanks);
+                self.text_changed(super::Edited::Command);
+                let count = edits.len();
+                let what = if count == 1 { "change" } else { "changes" };
+                self.notice(format!("{count} {what}  (u takes them back)"));
+            }
+            Err(why) => self.alert(format!("not changed: {why}")),
+        }
     }
 
     /// Tints on page `index`, whose top-left corner is drawn at `origin`,
@@ -685,6 +731,138 @@ impl Viewer {
                 tint(scene, has, PAGE_TOOK, place_on(rect));
             }
         }
+    }
+}
+
+/// `:s/this/that/`, `:%s/this/that/g` and `:3,7s/this/that/`: what is
+/// written as `pattern` becomes `with`, in the line of the text the
+/// cursor is in, in all of them (`%`) or in those counted; the first in
+/// each line, or with `g` all; with `i` in any case. The pattern is
+/// taken as it is written, not as Vim's regular expression: a backslash
+/// only lets the sign that parts the three stand for itself.
+struct Substitute {
+    lines: Lines,
+    pattern: String,
+    with: String,
+    all: bool,
+    any_case: bool,
+}
+
+/// The lines a substitution is made in.
+enum Lines {
+    Cursor,
+    All,
+    /// From and to, counted from 1.
+    Counted(usize, usize),
+}
+
+impl Substitute {
+    /// `command` read as a substitution: `None` if it is none, `Err`
+    /// with why if it is one that cannot be made.
+    fn read(command: &str) -> Option<Result<Self, String>> {
+        let (lines, rest) = if let Some(rest) = command.strip_prefix('%') {
+            (Lines::All, rest)
+        } else {
+            let counted = command.len()
+                - command
+                    .trim_start_matches(|c: char| c.is_ascii_digit() || c == ',')
+                    .len();
+            let (numbers, rest) = command.split_at(counted);
+            let lines = if numbers.is_empty() {
+                Lines::Cursor
+            } else {
+                let (from, to) = numbers.split_once(',').unwrap_or((numbers, numbers));
+                let (Ok(from), Ok(to)) = (from.parse::<usize>(), to.parse::<usize>()) else {
+                    return None;
+                };
+                Lines::Counted(from.min(to).max(1), from.max(to))
+            };
+            (lines, rest)
+        };
+        let rest = rest
+            .strip_prefix("substitute")
+            .or_else(|| rest.strip_prefix('s'))?;
+        let mut chars = rest.chars();
+        let parting = chars.next()?;
+        if parting.is_alphanumeric() || parting.is_whitespace() || parting == '\\' {
+            return None;
+        }
+        let mut parts = vec![String::new()];
+        let mut escaped = false;
+        for c in chars {
+            match c {
+                _ if escaped => {
+                    if c != parting {
+                        parts.last_mut()?.push('\\');
+                    }
+                    parts.last_mut()?.push(c);
+                    escaped = false;
+                }
+                '\\' => escaped = true,
+                _ if c == parting && parts.len() < 3 => parts.push(String::new()),
+                _ => parts.last_mut()?.push(c),
+            }
+        }
+        let mut parts = parts.into_iter();
+        let pattern = parts.next().unwrap_or_default();
+        let with = parts.next().unwrap_or_default();
+        let flags = parts.next().unwrap_or_default();
+        if pattern.is_empty() {
+            return Some(Err("nothing to look for: :s/this/that/".to_owned()));
+        }
+        if let Some(flag) = flags.chars().find(|flag| !matches!(flag, 'g' | 'i' | 'I')) {
+            return Some(Err(format!("not a flag of :s here: {flag}")));
+        }
+        Some(Ok(Self {
+            lines,
+            pattern,
+            with,
+            all: flags.contains('g'),
+            any_case: flags.contains('i'),
+        }))
+    }
+
+    /// Where in `text`, with the cursor at byte `cursor`, the pattern is
+    /// found to be replaced, in order; and where the last of them is.
+    fn edits(&self, text: &str, cursor: usize) -> (Vec<Range<usize>>, usize) {
+        let mut found = Vec::new();
+        let mut start = 0;
+        let lowered = |text: &str| {
+            if self.any_case {
+                text.to_lowercase()
+            } else {
+                text.to_owned()
+            }
+        };
+        let pattern = lowered(&self.pattern);
+        for (index, line) in text.split_inclusive('\n').enumerate() {
+            let range = start..start + line.len();
+            start = range.end;
+            let wanted = match self.lines {
+                Lines::Cursor => {
+                    range.contains(&cursor) || (cursor == text.len() && range.end == cursor)
+                }
+                Lines::All => true,
+                Lines::Counted(from, to) => (from..=to).contains(&(index + 1)),
+            };
+            // Lower case where it is as long: else the places would not
+            // be those of the text.
+            let searched = lowered(line);
+            if !wanted || searched.len() != line.len() {
+                continue;
+            }
+            let mut from = 0;
+            while let Some(at) = searched[from..].find(&pattern) {
+                let at = from + at;
+                found.push(range.start + at..range.start + at + pattern.len());
+                from = at + pattern.len().max(1);
+                if !self.all || from >= searched.len() {
+                    break;
+                }
+            }
+        }
+        let last = found.last().map_or(cursor, |range| range.start);
+        (found, last)
     }
 }
 

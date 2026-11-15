@@ -719,7 +719,7 @@ fn undoing_on_the_page_gives_back_what_was_there() {
     }
     press(&mut viewer, "ay<Esc>");
     let typed = viewer.text().unwrap_or_default().to_owned();
-    assert_eq!(typed, "Some $xy^$ here, and more words.\n");
+    assert_eq!(typed, "Some $x y^$ here, and more words.\n");
     press(&mut viewer, "u");
     assert_eq!(viewer.text(), Some(text));
     press(&mut viewer, "<C-r>");
