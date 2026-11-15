@@ -893,6 +893,18 @@ impl Host for DocumentHost<'_> {
         })
     }
 
+    fn parted(&self, range: Range<usize>) -> bool {
+        matches!(self.rows, RowsOf::Pages(_))
+            && crate::typst_text::parted(&self.document.buffer().0, range)
+    }
+
+    fn pieces(&self, range: Range<usize>, with: &str) -> Option<Vec<Range<usize>>> {
+        if !matches!(self.rows, RowsOf::Pages(_)) {
+            return Some(vec![range]);
+        }
+        crate::typst_text::pieces(&self.document.buffer().0, range, with)
+    }
+
     fn next_field(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
         matches!(self.rows, RowsOf::Pages(_))
             .then(|| crate::typst_text::tab_key(&self.document.buffer().0, at))?

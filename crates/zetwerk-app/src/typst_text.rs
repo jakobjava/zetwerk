@@ -16,6 +16,7 @@ mod shown;
 mod slots;
 
 pub use shown::{join, letters, put_over, raw_blank};
+pub use shown::{parted, pieces};
 pub use slots::{Around, Enclosure, enclosing, has_rules, slot_name, spot_name};
 
 /// The innermost node at byte `at` of `source` and its ancestors, from
@@ -431,9 +432,21 @@ pub fn line_break(source: &Source, at: usize) -> (Range<usize>, String) {
             (line, String::new())
         };
     }
+    // Text set off ends with its paragraph: it is closed before the
+    // break and begun again behind it.
+    let (chain, _) = containing(source, at);
+    let marks: String = chain
+        .iter()
+        .filter_map(|node| match node.kind() {
+            SyntaxKind::Strong => Some('*'),
+            SyntaxKind::Emph => Some('_'),
+            _ => None,
+        })
+        .collect();
+    let closing: String = marks.chars().rev().collect();
     match list_item(source, at.saturating_sub(1)) {
-        Some((indent, marker)) => put(&format!("\n{indent}{marker} ")),
-        None => put("\n\n"),
+        Some((indent, marker)) => put(&format!("{closing}\n{indent}{marker} {marks}")),
+        None => put(&format!("{closing}\n\n{marks}")),
     }
 }
 

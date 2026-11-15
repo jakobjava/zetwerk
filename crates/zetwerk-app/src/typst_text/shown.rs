@@ -215,8 +215,196 @@ pub fn join(source: &Source, at: usize, spaced: bool) -> Option<(Range<usize>, S
     if let Some(mark) = marked(source, to_line) {
         to = mark.end;
     }
+    // Without a blank between, the mark of strong or emphasised text
+    // would stand in a word, and be a character like any other.
+    let mark = |c: Option<char>| matches!(c, Some('*' | '_'));
+    let letter = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    let (left, right) = (text[..from].chars().next_back(), text[to..].chars().next());
+    if !spaced && ((mark(left) && letter(right)) || (letter(left) && mark(right))) {
+        return None;
+    }
     let with = if spaced { " " } else { "" };
     Some((from..to, with.to_owned()))
+}
+
+/// The functions whose content goes on in the text around them: what is
+/// typed into it is of the same line as what stands before and behind.
+const IN_LINE: &[&str] = &[
+    "strong",
+    "emph",
+    "underline",
+    "overline",
+    "strike",
+    "highlight",
+    "text",
+    "smallcaps",
+    "sub",
+    "super",
+    "upper",
+    "lower",
+    "link",
+];
+
+/// Whether bytes `range` of `source` cross from one part of the page
+/// that is typed into by itself to another: the cells of a table, a
+/// caption and what it is the caption of, a footnote and the text it
+/// is in, a quote and what is around it. Backspace and Delete do not
+/// take what is on the other side of that. Text set off as strong or
+/// emphasised (also with `#strong[…]` and its like) is no such part.
+#[must_use]
+pub fn parted(source: &Source, range: Range<usize>) -> bool {
+    let text = source.text();
+    let part = |at: usize| {
+        let (chain, _) = containing(source, at.min(text.len()));
+        chain
+            .iter()
+            .rfind(|node| {
+                if node.kind() != SyntaxKind::ContentBlock {
+                    return false;
+                }
+                let callee = node
+                    .parent()
+                    .filter(|args| args.kind() == SyntaxKind::Args)
+                    .and_then(LinkedNode::parent)
+                    .filter(|call| call.kind() == SyntaxKind::FuncCall)
+                    .and_then(|call| call.children().next())
+                    .filter(|callee| callee.kind() == SyntaxKind::Ident);
+                !callee.is_some_and(|callee| IN_LINE.contains(&&text[callee.range()]))
+            })
+            .map(LinkedNode::range)
+    };
+    part(range.start) != part(range.end)
+}
+
+/// What deleting bytes `range` of `source` takes where only pages are
+/// shown, with `with` put where the first part of it was: the parts of
+/// it that go, in the order of the text and apart from each other. A mark that opens or closes something (strong or
+/// emphasised text, the brackets of a cell or a footnote, the dollar
+/// signs of an equation, parentheses) stays where the mark that belongs
+/// with it is outside of `range`: that is not seen on the page, and
+/// without it all that follows would be something else. `None` where
+/// what is left would turn the mark of strong or emphasised text into
+/// a character, standing in a word.
+#[must_use]
+pub fn pieces(source: &Source, range: Range<usize>, with: &str) -> Option<Vec<Range<usize>>> {
+    let text = source.text();
+    if text.get(range.clone()).is_none() {
+        return Some(vec![range]);
+    }
+    let mut kept = Vec::new();
+    unpaired(&LinkedNode::new(source.root()), &range, &mut kept);
+    kept.sort_by_key(|mark| mark.start);
+    let mut pieces = Vec::new();
+    let mut from = range.start;
+    for mark in &kept {
+        if mark.start > from {
+            pieces.push(from..mark.start);
+        }
+        from = from.max(mark.end);
+    }
+    if range.end > from {
+        pieces.push(from..range.end);
+    }
+    // What stands around what goes, as it will be: the marks of strong
+    // or emphasised text are to be marks still.
+    let set_off = |at: usize, side: Side| {
+        LinkedNode::new(source.root())
+            .leaf_at(at, side)
+            .filter(|leaf| matches!(leaf.kind(), SyntaxKind::Star | SyntaxKind::Underscore))
+            .filter(|leaf| {
+                leaf.parent()
+                    .is_some_and(|it| matches!(it.kind(), SyntaxKind::Strong | SyntaxKind::Emph))
+            })
+            .map(|leaf| leaf.range())
+    };
+    let mut left: Vec<(char, bool)> = text[..range.start]
+        .chars()
+        .rev()
+        .take(2)
+        .map(|c| (c, false))
+        .collect();
+    left.reverse();
+    if let Some(last) = left.last_mut() {
+        last.1 = set_off(range.start, Side::Before).is_some_and(|mark| mark.end == range.start);
+    }
+    let mut shown = left;
+    // What is put in goes where the first piece was.
+    let put = pieces.first().map_or(range.start, |piece| piece.start);
+    let mut with = Some(with);
+    for mark in &kept {
+        if mark.start > put
+            && let Some(with) = with.take()
+        {
+            shown.extend(with.chars().map(|c| (c, false)));
+        }
+        let is_set_off = set_off(mark.start, Side::After).is_some_and(|it| it == *mark);
+        shown.extend(text[mark.clone()].chars().map(|c| (c, is_set_off)));
+    }
+    if let Some(with) = with {
+        shown.extend(with.chars().map(|c| (c, false)));
+    }
+    for (index, c) in text[range.end..].chars().take(2).enumerate() {
+        let is_set_off =
+            index == 0 && set_off(range.end, Side::After).is_some_and(|it| it.start == range.end);
+        shown.push((c, is_set_off));
+    }
+    let letter = |at: Option<usize>| {
+        at.and_then(|at| shown.get(at))
+            .is_some_and(|(c, _)| c.is_alphanumeric())
+    };
+    let glued =
+        (0..shown.len()).any(|at| shown[at].1 && letter(at.checked_sub(1)) && letter(Some(at + 1)));
+    (!glued).then_some(pieces)
+}
+
+/// Collects into `kept` the marks of `node` and of what is in it that
+/// open or close something in bytes `range` of the text whose other
+/// mark is outside of `range`.
+fn unpaired(node: &LinkedNode, range: &Range<usize>, kept: &mut Vec<Range<usize>>) {
+    let inside = |part: &Range<usize>| range.start <= part.start && part.end <= range.end;
+    let children: Vec<LinkedNode> = node.children().collect();
+    let mut keep = |open: &LinkedNode, close: &LinkedNode| {
+        let (open, close) = (open.range(), close.range());
+        match (inside(&open), inside(&close)) {
+            (true, false) => kept.push(open),
+            (false, true) => kept.push(close),
+            _ => {}
+        }
+    };
+    // Text set off, an equation, raw text: the first and the last.
+    if let [first, .., last] = children.as_slice()
+        && first.kind() == last.kind()
+        && matches!(
+            first.kind(),
+            SyntaxKind::Star | SyntaxKind::Underscore | SyntaxKind::Dollar | SyntaxKind::RawDelim
+        )
+    {
+        keep(first, last);
+    }
+    // Brackets, parentheses and braces, each with the one it closes.
+    let mut open: Vec<&LinkedNode> = Vec::new();
+    for child in &children {
+        match child.kind() {
+            SyntaxKind::LeftBracket | SyntaxKind::LeftParen | SyntaxKind::LeftBrace => {
+                open.push(child);
+            }
+            SyntaxKind::RightBracket | SyntaxKind::RightParen | SyntaxKind::RightBrace => {
+                if let Some(opened) = open.pop() {
+                    keep(opened, child);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Into what is cut, not into what goes whole or stays whole.
+    for child in &children {
+        let part = child.range();
+        let cut = (part.start < range.start && range.start < part.end)
+            || (part.start < range.end && range.end < part.end);
+        if cut {
+            unpaired(child, range, kept);
+        }
+    }
 }
 
 /// Blanks, for [`raw_blank`] to take as many of as it needs.
