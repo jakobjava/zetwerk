@@ -884,3 +884,28 @@ fn an_equation_shown_as_written_stays_so_when_the_cursor_leaves_it() {
     assert_eq!(viewer.text(), Some("A $x frac(a)$ c b.\n"));
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn two_equations_typst_refuses_are_both_shown_as_written() {
+    // With one equation left refused, typing another into a state Typst
+    // refuses showed only that one as written: the first was refused
+    // again, and the document was not typeset until the second was an
+    // equation again, the page standing still while it was typed.
+    let text = "A $frac(a)$ b.\n\nC $x$ d.\n";
+    let (mut viewer, directory) = typed(text, "x$", "");
+    settle(&mut viewer);
+    assert!(viewer.written.is_some());
+    press(&mut viewer, "a frac(b");
+    settle(&mut viewer);
+    assert_eq!(viewer.state().problems, Vec::<String>::new());
+    assert_eq!(viewer.document_revision, Some(viewer.revision));
+    let shown = shown_text(&mut viewer);
+    assert_eq!(shown.matches("[`$").count(), 2, "{shown:?}");
+    // Each is shown as what it means once it is an equation again.
+    press(&mut viewer, ", c)<Esc>");
+    settle(&mut viewer);
+    assert_eq!(viewer.state().problems, Vec::<String>::new());
+    let shown = shown_text(&mut viewer);
+    assert_eq!(shown.matches("[`$").count(), 1, "{shown:?}");
+    let _ = std::fs::remove_dir_all(directory);
+}

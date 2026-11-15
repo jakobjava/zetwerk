@@ -727,6 +727,10 @@ pub struct Viewer {
     /// The revision of the text at which an equation was last shown as
     /// written because Typst refused it: once for each.
     written_tried: Option<u64>,
+    /// Where the other equations begin that Typst refused and that are
+    /// shown as written too: with two refused at once, showing one so
+    /// leaves the document refused for the other.
+    written_too: Vec<usize>,
     /// Whether the lines of the pages say how far they are from the
     /// cursor (see `aids`), and what they say, for as long as the cursor
     /// and the pages are the same.
@@ -915,6 +919,7 @@ impl Viewer {
             chrome: Chrome::new(env)?,
             written: None,
             written_tried: None,
+            written_too: Vec::new(),
             numbers: true,
             numbered: None,
             jump: jump::Jump::default(),
