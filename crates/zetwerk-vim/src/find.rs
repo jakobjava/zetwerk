@@ -129,6 +129,48 @@ impl Reading {
         start..end.max(start)
     }
 
+    /// The first piece read from byte `at` of the text or after it, and
+    /// where in the reading it begins.
+    fn from(&self, at: usize) -> (usize, usize) {
+        let index = self.pieces.partition_point(|piece| piece.from.start < at);
+        let read = self
+            .pieces
+            .get(index)
+            .map_or(self.text.len(), |piece| piece.read);
+        (index, read)
+    }
+
+    /// This reading, with what bytes `start..old_end` of the text were
+    /// read as taken out and `between` put in, what bytes
+    /// `start..new_end` of the text are now read as; what is read of the
+    /// bytes behind is moved along. The bytes are to be read alike in
+    /// the old text and the new from `start` on and from `old_end` and
+    /// `new_end` on, and `between` to be read by itself as all that is
+    /// read before it would read it: from paragraph break to paragraph
+    /// break (see `zetwerk_app::reading`).
+    #[must_use]
+    pub fn splice(&self, start: usize, old_end: usize, new_end: usize, between: &Reading) -> Self {
+        let (first, read_from) = self.from(start);
+        let (behind, read_behind) = self.from(old_end);
+        let mut text = String::with_capacity(self.text.len() + between.text.len());
+        text.push_str(&self.text[..read_from]);
+        text.push_str(&between.text);
+        let moved = text.len();
+        text.push_str(&self.text[read_behind..]);
+        let mut pieces = Vec::with_capacity(self.pieces.len() + between.pieces.len());
+        pieces.extend_from_slice(&self.pieces[..first]);
+        pieces.extend(between.pieces.iter().map(|piece| Piece {
+            read: piece.read + read_from,
+            ..piece.clone()
+        }));
+        pieces.extend(self.pieces[behind..].iter().map(|piece| Piece {
+            read: piece.read - read_behind + moved,
+            from: piece.from.start - old_end + new_end..piece.from.end - old_end + new_end,
+            verbatim: piece.verbatim,
+        }));
+        Self { text, pieces }
+    }
+
     /// Where in the reading byte `at` of the text is read, or what is
     /// read next after it if it is not read at all (markup).
     #[must_use]
@@ -221,6 +263,68 @@ pub fn find_all(text: &str, reading: Option<&Reading>, query: &Query) -> Vec<Ran
         }
         None => occurrences(text, &wanted.needle, wanted.ignore_case, false, whole),
     }
+}
+
+/// The matches [`find_all`] finds that begin in bytes `within` of
+/// `text`, with the bytes they were looked for in, which hold `within`.
+/// With a `reading`, `within` is to begin after a paragraph break of the
+/// text and end where one begins (or at the start and end of the text):
+/// no match reaches across one. `None` where that cannot be told: a
+/// pattern with a line break in it, or `within` not between breaks.
+#[must_use]
+pub fn find_within(
+    text: &str,
+    reading: Option<&Reading>,
+    query: &Query,
+    within: Range<usize>,
+) -> Option<(Range<usize>, Vec<Range<usize>>)> {
+    let wanted = wanted(&query.pattern, reading.is_some());
+    if wanted.needle.contains('\n') {
+        return None;
+    }
+    if wanted.needle.is_empty() {
+        return Some((within, Vec::new()));
+    }
+    let whole = (query.word_start, query.word_end);
+    if let Some(reading) = reading.filter(|_| !wanted.as_written) {
+        let ((_, from), (_, to)) = (reading.from(within.start), reading.from(within.end));
+        let read = reading.text();
+        // A paragraph break is read as a line break: none on the edges
+        // of `within`, none in the pattern, no match across.
+        let broken = |at: usize| at == 0 || at >= read.len() || read[..at].ends_with('\n');
+        if !broken(from) || !(to >= read.len() || read[to..].starts_with('\n')) {
+            return None;
+        }
+        let mut needle = String::with_capacity(wanted.needle.len());
+        for c in wanted.needle.chars() {
+            if !(c == ' ' && needle.ends_with(' ')) {
+                needle.push(c);
+            }
+        }
+        let found = occurrences(&read[from..to], &needle, wanted.ignore_case, true, whole);
+        let found = found
+            .into_iter()
+            .map(|range| reading.written(range.start + from..range.end + from))
+            .collect();
+        return Some((within, found));
+    }
+    // Lines: no match reaches across their ends.
+    let start = text[..within.start].rfind('\n').map_or(0, |at| at + 1);
+    let end = text[within.end..]
+        .find('\n')
+        .map_or(text.len(), |at| within.end + at);
+    let found = occurrences(
+        &text[start..end],
+        &wanted.needle,
+        wanted.ignore_case,
+        false,
+        whole,
+    );
+    let found = found
+        .into_iter()
+        .map(|range| range.start + start..range.end + start)
+        .collect();
+    Some((start..end, found))
 }
 
 /// Whether `c` belongs to a word.

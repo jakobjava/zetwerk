@@ -24,23 +24,159 @@ static LIBRARY: LazyLock<Library> = LazyLock::new(<Library as LibraryExt>::defau
 
 /// What the text of a file was last read as, kept until it changes: it
 /// is asked for at every search and at every key while matches are
-/// shown, and reading a long text is not free.
+/// shown, and reading a long text is not free. When it changes, only
+/// the paragraphs that changed are read again.
 #[derive(Default)]
-pub struct Cache(RefCell<Option<(u64, Arc<Reading>)>>);
+pub struct Cache(RefCell<Option<(u64, Source, Arc<Reading>)>>);
 
 impl Cache {
     /// What `source`, the text at `revision`, is read as.
     pub fn get(&self, revision: u64, source: &Source) -> Arc<Reading> {
         let mut kept = self.0.borrow_mut();
-        match &*kept {
-            Some((read, reading)) if *read == revision => Arc::clone(reading),
-            _ => {
-                let fresh = Arc::new(reading(source));
-                *kept = Some((revision, Arc::clone(&fresh)));
-                fresh
-            }
+        let fresh = match &*kept {
+            Some((read, _, reading)) if *read == revision => return Arc::clone(reading),
+            Some((_, old, reading)) => reading_again(reading, old, source),
+            None => reading(source),
+        };
+        let fresh = Arc::new(fresh);
+        *kept = Some((revision, source.clone(), Arc::clone(&fresh)));
+        fresh
+    }
+}
+
+/// Where `new` differs from `old`, in whole paragraphs: the bytes from
+/// the start of the first paragraph that changed to the paragraph break
+/// behind the last, in each. Before and behind them the two texts are
+/// alike and taken apart alike, so read alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Paragraphs {
+    pub start: usize,
+    pub old_end: usize,
+    pub new_end: usize,
+    /// Which children of the root of `new` they are.
+    first: usize,
+    behind: usize,
+}
+
+/// A paragraph break among the children of the root: which child it is,
+/// and its bytes.
+type Break = (usize, Range<usize>);
+
+/// The last paragraph break of `root` that ends by byte `before`, and
+/// the first that begins at byte `after` or behind it.
+fn breaks_around(
+    root: &typst::syntax::SyntaxNode,
+    before: usize,
+    after: usize,
+) -> (Option<Break>, Option<Break>) {
+    let (mut last, mut next) = (None, None);
+    let mut at = 0;
+    for (index, child) in root.children().enumerate() {
+        let range = at..at + child.len();
+        at = range.end;
+        if child.kind() != SyntaxKind::Parbreak {
+            continue;
+        }
+        if range.end <= before {
+            last = Some((index, range));
+        } else if range.start >= after {
+            next = Some((index, range));
+            break;
         }
     }
+    (last, next)
+}
+
+/// The paragraphs `new` changed of `old` (see [`Paragraphs`]). `None`
+/// where the two are not taken apart alike before and behind them: the
+/// same text may be, after an edit put something before it in another
+/// light.
+#[must_use]
+pub fn paragraphs_changed(old: &Source, new: &Source) -> Option<Paragraphs> {
+    let (was, now) = (old.text().as_bytes(), new.text().as_bytes());
+    let same = was.iter().zip(now).take_while(|(a, b)| a == b).count();
+    let rest = was.len().min(now.len()) - same;
+    let same_behind = was
+        .iter()
+        .rev()
+        .zip(now.iter().rev())
+        .take(rest)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (old_end, new_end) = (was.len() - same_behind, now.len() - same_behind);
+    let (before, behind) = breaks_around(new.root(), same, new_end);
+    let start = before.as_ref().map_or(0, |(_, range)| range.end);
+    let first = before.map_or(0, |(index, _)| index + 1);
+    let (old_children, new_children) = (
+        old.root().children().as_slice(),
+        new.root().children().as_slice(),
+    );
+    let (behind, end) = behind.map_or((new_children.len(), now.len()), |(index, range)| {
+        (index, range.start)
+    });
+    // The same nodes: most are those of the old text itself, kept by
+    // the edit, and are told to be the same at once.
+    let was_behind = (old_children.len() + behind).checked_sub(new_children.len())?;
+    let alike = first <= was_behind
+        && old_children.get(..first) == new_children.get(..first)
+        && old_children[was_behind..] == new_children[behind..];
+    alike.then_some(Paragraphs {
+        start,
+        old_end: end - new_end + old_end,
+        new_end: end,
+        first,
+        behind,
+    })
+}
+
+/// What `new` is read as, from what `old` was read as, `reading`: only
+/// the paragraphs that changed are read.
+fn reading_again(reading: &Reading, old: &Source, new: &Source) -> Reading {
+    let Some(changed) = paragraphs_changed(old, new) else {
+        return self::reading(new);
+    };
+    let mut between = Reading::new();
+    let root = LinkedNode::new(new.root());
+    let children = root.children().skip(changed.first);
+    for child in children.take(changed.behind - changed.first) {
+        read(&child, new.text(), Within::Markup, &mut between);
+    }
+    reading.splice(changed.start, changed.old_end, changed.new_end, &between)
+}
+
+/// The matches of `query` in `new`, from `found`, those in `old`: only
+/// the paragraphs that changed are looked through (see
+/// [`zetwerk_vim::find::find_within`]). `reading` is what `new` is read
+/// as, if what is read is looked through. `None` where that cannot be
+/// done, or where as many are found as are looked for at most.
+#[must_use]
+pub fn found_again(
+    found: &[Range<usize>],
+    old: &Source,
+    new: &Source,
+    reading: Option<&Reading>,
+    query: &zetwerk_vim::Query,
+) -> Option<Vec<Range<usize>>> {
+    use zetwerk_vim::find::{MOST, find_within};
+    if found.len() >= MOST {
+        return None;
+    }
+    let changed = paragraphs_changed(old, new)?;
+    let within = changed.start..changed.new_end;
+    let (looked, between) = find_within(new.text(), reading, query, within)?;
+    let behind = looked.end - changed.new_end + changed.old_end;
+    let mut matches: Vec<Range<usize>> = found
+        .iter()
+        .take_while(|range| range.end <= looked.start)
+        .cloned()
+        .collect();
+    matches.extend(between);
+    let first_behind = found.partition_point(|range| range.start < behind);
+    matches.extend(found[first_behind..].iter().map(|range| {
+        range.start - changed.old_end + changed.new_end
+            ..range.end - changed.old_end + changed.new_end
+    }));
+    (matches.len() < MOST).then_some(matches)
 }
 
 /// What a node is in.
@@ -297,6 +433,88 @@ fn value_of(node: &LinkedNode, in_math: bool) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_is_read_and_found_again_after_an_edit_is_what_is_read_and_found_anew() {
+        const ROUNDS: usize = 500;
+        use zetwerk_vim::Query;
+        use zetwerk_vim::find::find_all;
+        let article = include_str!("../../zetwerk-corpus/docs/article.typ");
+        let mut source = Source::detached(article.repeat(2));
+        let cache = Cache::default();
+        let _ = cache.get(0, &source);
+        let queries: Vec<Query> = ["the", "e", "\u{3b1}", "of the", "\\=$", "\\=the ", "a b"]
+            .into_iter()
+            .map(|pattern| Query {
+                pattern: pattern.to_owned(),
+                word_start: pattern == "e",
+                word_end: false,
+            })
+            .collect();
+        let mut found: Vec<[Vec<Range<usize>>; 2]> = queries
+            .iter()
+            .map(|query| {
+                let read = reading(&source);
+                [
+                    find_all(source.text(), Some(&read), query),
+                    find_all(source.text(), None, query),
+                ]
+            })
+            .collect();
+        // What is typed, and taken out: also what parses the rest anew.
+        let typed = [
+            "", "x", " ", "\n\n", "$", "*", "#", "[", "]", "$x$", "the ", "\n", "= ", "- ", "\"",
+            "alpha", "_", "#strong[", "/* ", "`",
+        ];
+        let (mut seed, mut quick) = (7_u64, 0);
+        for round in 1..ROUNDS {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let text = source.text();
+            let mut at = usize::try_from(seed >> 33).unwrap_or(0) % (text.len() + 1);
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            // Now and then much: paragraphs, and their breaks.
+            let most = if round % 7 == 0 { 600 } else { 5 };
+            let mut end = (at + usize::try_from((seed >> 20) % most).unwrap_or(0)).min(text.len());
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            // And now and then a paragraph or two of the article.
+            let pasted = usize::try_from(seed >> 40).unwrap_or(0) % (article.len() - 300);
+            let pasted = (pasted..pasted + 300)
+                .find(|from| article.is_char_boundary(*from))
+                .unwrap_or(0);
+            let mut until = pasted + 300;
+            while !article.is_char_boundary(until) {
+                until += 1;
+            }
+            let put = match usize::try_from((seed >> 8) % 26).unwrap_or(0) {
+                pick @ 0..20 => typed[pick],
+                _ => &article[pasted..until],
+            };
+            let old = source.clone();
+            source.edit(at..end, put);
+            let anew = reading(&source);
+            let again = cache.get(u64::try_from(round).unwrap_or(0), &source);
+            assert_eq!(format!("{again:?}"), format!("{anew:?}"), "round {round}");
+            for (query, found) in queries.iter().zip(&mut found) {
+                for (kept, read) in found.iter_mut().zip([Some(&anew), None]) {
+                    let all = find_all(source.text(), read, query);
+                    let again = found_again(kept, &old, &source, read, query);
+                    if let Some(again) = again {
+                        assert_eq!(again, all, "round {round}, {query:?}");
+                        quick += 1;
+                    }
+                    *kept = all;
+                }
+            }
+        }
+        // Nearly always only the paragraphs that changed are looked at.
+        assert!(quick > (ROUNDS - 1) * 14 * 3 / 4, "{quick}");
+    }
 
     fn read(text: &str) -> (Source, Reading) {
         let source = Source::detached(text);
