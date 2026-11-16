@@ -17,7 +17,7 @@ use typst_layout::PagedDocument;
 use zetwerk_render::{PixelRegion, page_size_px, tiles};
 
 use super::deck::Deck;
-use super::present::{AHEAD, BLACK, clock, lag, minutes, next_tick};
+use super::present::{AHEAD, BLACK, lag, minutes, next_tick};
 use super::{Quad, ROW_HEIGHT, RowText, Scene, TextureId, Viewer, row_images, solid, texture};
 
 /// The colour behind the presenter's view, of the frame around the
@@ -290,7 +290,7 @@ impl Viewer {
         let said = format!("{}  ·  {}", time_of_day(), minutes(show.began.elapsed()));
         let markup = format!(
             "#set page(width: auto, height: auto, margin: (x: 7pt, y: 4pt), fill: rgb(\"#000000a0\"))\n\
-             #set text(font: \"{FONT}\", size: 11pt, fill: rgb(\"{TEXT}\"))\n#{}",
+             #set text(font: \"{FONT}\", size: 14pt, fill: rgb(\"{TEXT}\"))\n#{}",
             literal(&said)
         );
         let margin = 10.0 * self.scale;
@@ -339,7 +339,7 @@ impl Viewer {
             format!("next: slide {label}")
         };
         let label = format!(
-            "#set page(width: auto, height: auto, margin: (y: 2pt), fill: none)\n\
+            "#set page(width: auto, height: auto, margin: (x: 0pt, y: 2pt), fill: none)\n\
              #set text(font: \"{FONT}\", size: 12pt, fill: rgb(\"{DIM}\"))\n#{}",
             literal(&next_said)
         );
@@ -422,16 +422,17 @@ impl Viewer {
                 literal(&format!("  {} left", minutes(left_over)))
             );
             if let Some(due) = show.plan.window(slide, count) {
-                match lag(due, elapsed) {
+                match lag(due, elapsed).filter(|(_, by)| by.as_secs() >= 60) {
                     Some((true, by)) => {
                         let _ = write!(
                             right,
                             " + text(fill: rgb(\"{ALERT}\"), {})",
-                            literal(&format!("  {} behind", clock(by)))
+                            literal(&format!("  {} behind", minutes(by)))
                         );
                     }
                     Some((false, by)) => {
-                        let _ = write!(right, " + {}", literal(&format!("  {} ahead", clock(by))));
+                        let _ =
+                            write!(right, " + {}", literal(&format!("  {} ahead", minutes(by))));
                     }
                     None => {
                         let _ = write!(right, " + {}", literal("  on time"));

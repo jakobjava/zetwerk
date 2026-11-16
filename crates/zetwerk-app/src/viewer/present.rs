@@ -224,11 +224,16 @@ pub fn clock(duration: Duration) -> String {
     }
 }
 
-/// `duration` in whole minutes, as the live clock shows it: `h:mm`.
+/// `duration` in whole minutes, as the live clock and the presenter's
+/// view say it: `12 min`, `1 h 05 min`.
 #[must_use]
 pub fn minutes(duration: Duration) -> String {
     let minutes = duration.as_secs() / 60;
-    format!("{}:{:02}", minutes / 60, minutes % 60)
+    if minutes >= 60 {
+        format!("{} h {:02} min", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes} min")
+    }
 }
 
 /// Reads how long a talk is to take: `20min`, `20m`, `20`, `1h`, `1h30`,
@@ -848,7 +853,8 @@ mod tests {
         assert_eq!(parse_duration("0"), None);
         assert_eq!(clock(Duration::from_secs(65)), "1:05");
         assert_eq!(clock(Duration::from_secs(3725)), "1:02:05");
-        assert_eq!(minutes(Duration::from_secs(3725)), "1:02");
+        assert_eq!(minutes(Duration::from_secs(3725)), "1 h 02 min");
+        assert_eq!(minutes(Duration::from_secs(119)), "1 min");
     }
 
     #[test]
