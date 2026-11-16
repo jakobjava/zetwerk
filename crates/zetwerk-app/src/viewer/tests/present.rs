@@ -350,6 +350,7 @@ fn a_rehearsal_lists_the_time_of_each_slide_and_is_kept() {
     assert_eq!(show.plan.rehearsed.len(), 4);
     // The presenter's view says how far the talk is.
     press(&mut viewer, "p");
+    viewer.scene(&|_| true);
     let foot = viewer.presenter_foot(&viewer.present.deck.as_ref().unwrap().1.clone(), 6);
     assert!(foot.contains("left"), "{foot}");
     assert!(foot.contains("ahead") || foot.contains("on time"), "{foot}");

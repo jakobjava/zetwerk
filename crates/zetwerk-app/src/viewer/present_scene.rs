@@ -252,7 +252,10 @@ impl Viewer {
         markup: &str,
         place: impl FnOnce((f64, f64)) -> (f64, f64),
     ) -> (f64, f64) {
-        let Some(image) = self.chrome.render(markup, self.scale) else {
+        let rendered = self.chrome.render(markup, self.scale);
+        // The markup is made here: one that does not typeset is a bug.
+        debug_assert!(rendered.is_some(), "markup that does not typeset: {markup}");
+        let Some(image) = rendered else {
             return (0.0, 0.0);
         };
         let size = (
@@ -287,7 +290,7 @@ impl Viewer {
         let said = format!("{}  ·  {}", time_of_day(), minutes(show.began.elapsed()));
         let markup = format!(
             "#set page(width: auto, height: auto, margin: (x: 7pt, y: 4pt), fill: rgb(\"#000000a0\"))\n\
-             #set text(font: \"{FONT}\", size: 11pt, fill: rgb(\"{TEXT}\"))\n{}",
+             #set text(font: \"{FONT}\", size: 11pt, fill: rgb(\"{TEXT}\"))\n#{}",
             literal(&said)
         );
         let margin = 10.0 * self.scale;
@@ -336,8 +339,8 @@ impl Viewer {
             format!("next: slide {label}")
         };
         let label = format!(
-            "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
-             #set text(font: \"{FONT}\", size: 12pt, fill: rgb(\"{DIM}\"))\n{}",
+            "#set page(width: auto, height: auto, margin: (y: 2pt), fill: none)\n\
+             #set text(font: \"{FONT}\", size: 12pt, fill: rgb(\"{DIM}\"))\n#{}",
             literal(&next_said)
         );
         let (_, label_height) = self.talk_panel(scene, has, &label, |_| (right, pad));
@@ -407,7 +410,7 @@ impl Viewer {
         }
         let elapsed = show.began.elapsed();
         let mut right = format!(
-            "text(fill: rgb(\"{ACCENT}\"), {})  {}",
+            "text(fill: rgb(\"{ACCENT}\"), {}) + {}",
             literal(&time_of_day()),
             literal(&format!("  {} gone", minutes(elapsed)))
         );
