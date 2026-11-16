@@ -2279,11 +2279,13 @@ impl Engine {
                 self.effects.push(Effect::Command("structure".to_owned()));
             }
             // The host's list of all there is to do, and its list of
-            // what there is to decide about the document.
-            '?' | 'D' | 'B' if self.pending.is_idle() && !self.selecting() => {
+            // what there is to decide about the document; and, not Vim's
+            // `gP`, the talk given from the slide at the cursor.
+            '?' | 'D' | 'B' | 'P' if self.pending.is_idle() && !self.selecting() => {
                 let command = match c {
                     '?' => "help",
                     'D' => "doc",
+                    'P' => "present",
                     _ => "bib",
                 };
                 self.effects.push(Effect::Command(command.to_owned()));
@@ -2296,11 +2298,6 @@ impl Engine {
             // Nor Vim's `gF`: the host's list of the figures and tables.
             'F' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("figures".to_owned()));
-            }
-            // Nor Vim's `gP` (which puts before and stays behind): the
-            // host's talk, given from the slide at the cursor.
-            'P' if self.pending.is_idle() && !self.selecting() => {
-                self.effects.push(Effect::Command("present".to_owned()));
             }
             // To where the name under the cursor is defined, as far as
             // the host can tell; and the host's list of places to go.

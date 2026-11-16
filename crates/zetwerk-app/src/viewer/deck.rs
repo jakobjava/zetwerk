@@ -315,15 +315,14 @@ pub fn new_slide(source: &Source, at: usize) -> Result<(usize, String), String> 
     match way {
         Written::Calls(name) => {
             let behind = blocks.iter().rev().find(|block| block.start <= at);
-            match behind {
-                Some(block) => Ok((
+            if let Some(block) = behind {
+                Ok((
                     block.end,
                     format!("\n\n#{name}[\n  ‹What this slide says.›\n]"),
-                )),
-                None => {
-                    let first = blocks.first().map_or(text.len(), |block| block.start);
-                    Ok((first, format!("#{name}[\n  ‹What this slide says.›\n]\n\n")))
-                }
+                ))
+            } else {
+                let first = blocks.first().map_or(text.len(), |block| block.start);
+                Ok((first, format!("#{name}[\n  ‹What this slide says.›\n]\n\n")))
             }
         }
         Written::Headings(level) => {
@@ -335,22 +334,25 @@ pub fn new_slide(source: &Source, at: usize) -> Result<(usize, String), String> 
                 .find(|section| section.level <= level && section.span.start > at);
             let marks = "=".repeat(level);
             let slide = format!("{marks} ‹Title›\n\n‹What this slide says.›\n");
-            match next {
-                Some(section) => Ok((section.span.start, format!("{slide}\n"))),
-                None => {
-                    let ending = if text.ends_with("\n\n") {
-                        ""
-                    } else if text.ends_with('\n') {
-                        "\n"
-                    } else {
-                        "\n\n"
-                    };
-                    Ok((text.len(), format!("{ending}{slide}")))
-                }
+            if let Some(section) = next {
+                Ok((section.span.start, format!("{slide}\n")))
+            } else {
+                let ending = if text.ends_with("\n\n") {
+                    ""
+                } else if text.ends_with('\n') {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+                Ok((text.len(), format!("{ending}{slide}")))
             }
         }
     }
 }
+
+/// Edits of a text, each referring to the text as those before it left
+/// it.
+pub type Edits = Vec<(Range<usize>, String)>;
 
 /// The edits that move the slide at byte `at` of `source` past the one
 /// before it (`later` false) or behind it, and where the slide begins
@@ -359,11 +361,7 @@ pub fn new_slide(source: &Source, at: usize) -> Result<(usize, String), String> 
 /// # Errors
 ///
 /// Where the slide is not one block of the source, or has nowhere to go.
-pub fn moved(
-    source: &Source,
-    at: usize,
-    later: bool,
-) -> Result<(Vec<(Range<usize>, String)>, usize), String> {
+pub fn moved(source: &Source, at: usize, later: bool) -> Result<(Edits, usize), String> {
     let text = source.text();
     let (way, blocks) = blocks(source).ok_or(UNKNOWN)?;
     match way {

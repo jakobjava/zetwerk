@@ -152,6 +152,7 @@ pub(super) fn second_event(session: &mut Session, id: WindowId, event: &WindowEv
 /// Draws the audience's window, if there is one, and adds the tiles it
 /// lacks to `wanted`.
 pub(super) fn draw_second(session: &mut Session, wanted: &mut Vec<Tile>) {
+    use wgpu::CurrentSurfaceTexture as Current;
     let Some(second) = &mut session.second else {
         return;
     };
@@ -167,7 +168,6 @@ pub(super) fn draw_second(session: &mut Session, wanted: &mut Vec<Tile>) {
             .upload(image.id, pixmap.width(), pixmap.height(), pixmap.data());
     }
     wanted.extend(scene.wanted);
-    use wgpu::CurrentSurfaceTexture as Current;
     let frame = match second.surface.get_current_texture() {
         Current::Success(frame) | Current::Suboptimal(frame) => frame,
         Current::Outdated | Current::Lost => {

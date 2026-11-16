@@ -9,9 +9,9 @@
 //!
 //! Keys, none of which needs the mouse:
 //!
-//! - next: Space, Enter, `j`, `l`, `n`, Right, Down, PageDown (and a
+//! - next: Space, Enter, `j`, `l`, `n`, Right, Down, `PageDown` (and a
 //!   click, a touch, the wheel); previous: Backspace, `k`, `h`, `N`,
-//!   Left, Up, PageUp. They go page by page, so through the steps of an
+//!   Left, Up, `PageUp`. They go page by page, so through the steps of an
 //!   animated slide; the page before the first step of a slide is the
 //!   last step of the slide before.
 //! - first, last: `gg` or Home, `G` or End; a slide by its number: the
@@ -108,6 +108,10 @@ pub(super) struct Present {
 }
 
 /// A talk being given.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "switches of the talk's views, not states of one thing"
+)]
 pub(super) struct Show {
     /// The page shown.
     pub(super) page: usize,
@@ -185,9 +189,9 @@ impl Plan {
 #[must_use]
 pub fn lag((from, to): (Duration, Duration), elapsed: Duration) -> Option<(bool, Duration)> {
     if elapsed < from {
-        Some((false, from - elapsed))
+        Some((false, from.saturating_sub(elapsed)))
     } else if elapsed > to {
-        Some((true, elapsed - to))
+        Some((true, elapsed.saturating_sub(to)))
     } else {
         None
     }
@@ -199,7 +203,9 @@ pub fn lag((from, to): (Duration, Duration), elapsed: Duration) -> Option<(bool,
 pub fn next_tick(now: Instant, began: Instant, wall: SystemTime) -> Instant {
     let minute = Duration::from_mins(1);
     let rest = |gone: Duration| {
-        minute - Duration::from_nanos((gone.as_nanos() % minute.as_nanos()) as u64)
+        minute.saturating_sub(Duration::from_nanos(
+            (gone.as_nanos() % minute.as_nanos()) as u64,
+        ))
     };
     let elapsed = now.saturating_duration_since(began);
     let of_day = wall.duration_since(UNIX_EPOCH).unwrap_or_default();
@@ -413,16 +419,16 @@ impl Viewer {
                     self.list_rehearsal(&self.kept_plan());
                     return true;
                 }
-                other => match parse_duration(other) {
-                    Some(found) => duration = Some(found),
-                    None => {
+                other => {
+                    duration = parse_duration(other);
+                    if duration.is_none() {
                         self.alert(format!(
                             "not something to present with: {other} (:present, :present \
                              rehearse, :present 20min, :present times)"
                         ));
                         return true;
                     }
-                },
+                }
             }
         }
         self.begin_talk(rehearse, duration);
@@ -889,17 +895,17 @@ mod tests {
 
     #[test]
     fn the_clock_wakes_the_window_when_a_minute_it_shows_goes_by() {
-        let now = Instant::now();
+        let began = Instant::now();
         let wall = UNIX_EPOCH + Duration::from_secs(1_000_000 * 60 + 15);
         // Begun 10 s ago: its minute is over in 50 s, the time of day's
         // in 45.
-        let began = now - Duration::from_secs(10);
+        let now = began + Duration::from_secs(10);
         assert_eq!(next_tick(now, began, wall), now + Duration::from_secs(45));
-        let began = now - Duration::from_secs(20);
+        let now = began + Duration::from_secs(20);
         assert_eq!(next_tick(now, began, wall), now + Duration::from_secs(40));
         // Never more than a minute away, never now.
         for offset in 0..120 {
-            let began = now - Duration::from_secs(offset);
+            let now = began + Duration::from_secs(offset);
             let tick = next_tick(now, began, wall);
             assert!(tick > now && tick <= now + Duration::from_mins(1));
         }

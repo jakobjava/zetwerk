@@ -11,6 +11,7 @@
 //! wakes the window when it is over, as exports are; without a window,
 //! on the spot.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -58,10 +59,11 @@ pub fn wrapper(slides: usize, count: usize) -> Option<String> {
             text.push_str("#pagebreak()\n");
         }
         let cells: Vec<String> = chunk.iter().map(|n| format!("slide({n})")).collect();
-        text.push_str(&format!(
-            "#grid(columns: (1fr,) * {across}, rows: (1fr,) * {down}, gutter: 8mm, {})\n",
+        let _ = writeln!(
+            text,
+            "#grid(columns: (1fr,) * {across}, rows: (1fr,) * {down}, gutter: 8mm, {})",
             cells.join(", ")
-        ));
+        );
     }
     Some(text)
 }
