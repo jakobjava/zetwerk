@@ -610,7 +610,7 @@ impl Viewer {
     /// Brings what is known of the compiled document up to date with
     /// the document there is.
     fn refresh_known(&mut self) {
-        let Some(document) = &self.document else {
+        let Some(document) = self.document.as_ref().map(super::local::Pages::whole) else {
             self.refer.known = None;
             return;
         };
@@ -690,7 +690,7 @@ impl Viewer {
         self.project.set_source(asked_of.clone());
         let world = self.project.snapshot();
         self.project.set_source(source.clone());
-        let document = self.document.as_deref();
+        let document = self.document.as_ref().map(|pages| &**pages.whole());
         let own = zetwerk_typst::complete(&world, document, &asked_of, cursor, false);
         let mut seen = HashSet::new();
         let others = own
@@ -705,7 +705,10 @@ impl Viewer {
             file,
             at,
             rest,
-            document: self.document.as_ref().map(Arc::downgrade),
+            document: self
+                .document
+                .as_ref()
+                .map(|pages| Arc::downgrade(pages.whole())),
             offers,
             candidates,
             keys,
@@ -729,7 +732,10 @@ impl Viewer {
             return false;
         };
         let rest = length - typed.len();
-        let document = self.document.as_ref().map(Arc::as_ptr);
+        let document = self
+            .document
+            .as_ref()
+            .map(|pages| Arc::as_ptr(pages.whole()));
         let good = self.refer.listed.as_ref().is_some_and(|listed| {
             let pages = listed.document.as_ref().map(Weak::as_ptr);
             (listed.file, listed.at, listed.rest, pages) == (file, at, rest, document)
@@ -1711,13 +1717,13 @@ mod tests {
             let editor = viewer.editor.as_ref().unwrap();
             let (source, cursor) = (editor.source().clone(), editor.cursor());
             let world = viewer.project.snapshot();
-            let document = viewer.document.as_deref();
+            let document = viewer.document.as_ref().map(|pages| &**pages.whole());
             let _ = zetwerk_typst::complete(&world, document, &source, cursor, false);
         });
         best(
             "the document asked for its numbers (once a compile)",
             &mut |viewer| {
-                let _ = know(viewer.document.as_ref().unwrap());
+                let _ = know(viewer.document.as_ref().unwrap().whole());
             },
         );
         best(

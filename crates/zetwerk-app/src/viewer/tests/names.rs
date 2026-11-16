@@ -44,7 +44,11 @@ fn page_text(viewer: &Viewer) -> String {
         }
     }
     let mut text = String::new();
-    for page in viewer.document.iter().flat_map(|document| document.pages()) {
+    for page in viewer
+        .document
+        .iter()
+        .flat_map(super::super::local::Pages::pages)
+    {
         walk(&page.frame, &mut text);
     }
     text

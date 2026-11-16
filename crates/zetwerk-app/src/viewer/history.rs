@@ -500,7 +500,7 @@ impl Viewer {
         };
         let at = world.shown_at(file, first.start);
         let near = self.cursor_page.get();
-        let Some(position) = zetwerk_typst::locate(document, &source, at, near) else {
+        let Some(position) = zetwerk_typst::locate(document.pages(), &source, at, near) else {
             return false;
         };
         let band = if self.history.is_some() {

@@ -33,7 +33,6 @@ use std::path::{Path, PathBuf};
 use typst::World;
 use typst::layout::{Frame, FrameItem, Point, Rect};
 use typst::syntax::{FileId, Source, Span};
-use typst_layout::PagedDocument;
 use zetwerk_typst::{Origin, PageLines, PageMap, PagePosition, ProjectWorld};
 
 use super::agent::Outcome;
@@ -149,13 +148,13 @@ fn image_unit(
 /// The first and the last byte of `file` that page `index` shows, from
 /// its glyphs, or from the page put in that it is.
 fn shown_by(
-    document: &PagedDocument,
+    typeset: &[typst_layout::Page],
     world: &ProjectWorld,
     file: FileId,
     index: usize,
     pages: &[Inserted],
 ) -> Option<(usize, usize)> {
-    let page = document.pages().get(index)?;
+    let page = typeset.get(index)?;
     if let Some(unit) = image_unit(world, file, &page.frame, pages) {
         let range = &pages[unit].range;
         return Some((range.start, range.end));
@@ -184,13 +183,13 @@ fn shown_by(
 /// show something are the blank pages put in between what those show,
 /// one by one, where there are as many of either.
 fn blank_unit(
-    document: &PagedDocument,
+    typeset: &[typst_layout::Page],
     world: &ProjectWorld,
     file: FileId,
     index: usize,
     pages: &[Inserted],
 ) -> Option<usize> {
-    let all = document.pages();
+    let all = typeset;
     let empty = |at: usize| all.get(at).is_some_and(|page| is_empty(&page.frame));
     let mut before = index;
     while before > 0 && empty(before - 1) && index - before < NEIGHBOURS {
@@ -201,11 +200,11 @@ fn blank_unit(
         behind += 1;
     }
     let from = match before.checked_sub(1) {
-        Some(shown) => shown_by(document, world, file, shown, pages)?.1,
+        Some(shown) => shown_by(typeset, world, file, shown, pages)?.1,
         None => 0,
     };
     let to = if behind + 1 < all.len() {
-        shown_by(document, world, file, behind + 1, pages)?.0
+        shown_by(typeset, world, file, behind + 1, pages)?.0
     } else {
         usize::MAX
     };
@@ -218,32 +217,32 @@ fn blank_unit(
     (blanks.len() == behind - before + 1).then(|| blanks[index - before])
 }
 
-/// The page put in that page `index` of `document` is, among those of
+/// The page put in that page `index` of `typeset` is, among those of
 /// the written text of `world`: by its image, or, where it shows
 /// nothing, by where it stands.
 fn unit_on(
-    document: &PagedDocument,
+    typeset: &[typst_layout::Page],
     world: &ProjectWorld,
     file: FileId,
     index: usize,
     pages: &[Inserted],
 ) -> Option<usize> {
-    let page = document.pages().get(index)?;
+    let page = typeset.get(index)?;
     if let Some(unit) = image_unit(world, file, &page.frame, pages) {
         return Some(unit);
     }
     if is_empty(&page.frame) && pages.iter().any(|page| page.shows == Shows::Blank) {
-        return blank_unit(document, world, file, index, pages);
+        return blank_unit(typeset, world, file, index, pages);
     }
     None
 }
 
-/// The lines of page `index` of `document`, whose frame is `frame`, for
+/// The lines of page `index` of `typeset`, whose frame is `frame`, for
 /// a cursor that moves on the pages: those of its text, or, on a page
 /// put in, the page itself as one place, the bytes of all of its call.
 pub(super) fn lines_of(
     world: &ProjectWorld,
-    document: &PagedDocument,
+    typeset: &[typst_layout::Page],
     index: usize,
     frame: &Frame,
     file: FileId,
@@ -255,7 +254,7 @@ pub(super) fn lines_of(
         return lines;
     }
     let found = written_pages(world, file).and_then(|(_, pages)| {
-        let unit = unit_on(document, world, file, index, &pages)?;
+        let unit = unit_on(typeset, world, file, index, &pages)?;
         Some(pages[unit].range.clone())
     });
     match found {
@@ -279,10 +278,10 @@ fn on_page_line(text: &str, at: usize) -> bool {
     text[start..].trim_start().starts_with("#page")
 }
 
-/// The page of `document` that shows the page put in at byte `then` of
+/// The page of `typeset` that shows the page put in at byte `then` of
 /// the text `world` was made of (as written), if it is in one.
 pub(super) fn page_showing(
-    document: &PagedDocument,
+    typeset: &[typst_layout::Page],
     world: &ProjectWorld,
     file: FileId,
     then: usize,
@@ -295,19 +294,18 @@ pub(super) fn page_showing(
     }
     let pages = page_text::inserted(&source);
     let unit = pages.iter().position(|page| page.range.contains(&then))?;
-    (0..document.pages().len())
-        .find(|index| unit_on(document, world, file, *index, &pages) == Some(unit))
+    (0..typeset.len()).find(|index| unit_on(typeset, world, file, *index, &pages) == Some(unit))
 }
 
 /// Where the page put in at byte `then` of the text `world` was made of
 /// is on the pages: its top-left corner.
 pub(super) fn shown_on(
-    document: &PagedDocument,
+    typeset: &[typst_layout::Page],
     world: &ProjectWorld,
     file: FileId,
     then: usize,
 ) -> Option<PagePosition> {
-    page_showing(document, world, file, then).map(|page| PagePosition {
+    page_showing(typeset, world, file, then).map(|page| PagePosition {
         page,
         x: 0.0,
         y: 0.0,
@@ -378,7 +376,7 @@ impl Viewer {
         let text = source.text();
         let mut facts = Vec::new();
         for (index, page) in document.pages().iter().enumerate() {
-            if let Some(unit) = unit_on(&document, &world, file, index, &pages) {
+            if let Some(unit) = unit_on(document.pages(), &world, file, index, &pages) {
                 let range = &pages[unit].range;
                 facts.push(Fact {
                     shown: Some((range.start, range.end)),
@@ -1458,7 +1456,7 @@ impl Viewer {
     fn seen_on(&mut self, index: usize) -> Option<Seen> {
         let document = self.document.clone()?;
         let world = self.compiled_world.clone()?;
-        let key = std::sync::Arc::as_ptr(&document) as usize;
+        let key = document.pages().as_ptr() as usize;
         if self.pages.seen.as_ref().is_none_or(|(of, _)| *of != key) {
             self.pages.seen = Some((key, HashMap::new()));
         }
@@ -1476,7 +1474,7 @@ impl Viewer {
                     return None;
                 }
                 let (_, pages) = written_pages(&world, file)?;
-                let unit = unit_on(&document, &world, file, index, &pages)?;
+                let unit = unit_on(document.pages(), &world, file, index, &pages)?;
                 let page = &pages[unit];
                 let mut called = page.called();
                 if !page.counted {

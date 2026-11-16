@@ -453,7 +453,7 @@ fn what_parts_of_a_key_ask(viewer: &Viewer) -> String {
     let wrapped = timed_ms(&|| {
         if let Some(document) = &viewer.document {
             let pages: typst::ecow::EcoVec<Page> = document.pages().iter().cloned().collect();
-            let info = typst::model::Document::info(document.as_ref()).clone();
+            let info = typst::model::Document::info(document.whole().as_ref()).clone();
             let _ = PagedDocument::new(pages, info);
         }
     });

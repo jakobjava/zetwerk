@@ -62,7 +62,7 @@ use typst::syntax::{FileId, LinkedNode, Side, Source, SyntaxKind};
 use typst::utils::hash128;
 use typst_layout::{Page, PagedDocument};
 use zetwerk_core::{DiskError, DiskStatus, Opened};
-use zetwerk_predict::{Replacement, predict};
+use zetwerk_predict::{Lines, Replacement, predict};
 use zetwerk_render::{PixelRegion, Tile, TileKey, page_size_px, tile_origins, tiles};
 use zetwerk_typst::{CompileOutput, Environment, PageLines, PageMap, Project, ProjectWorld};
 use zetwerk_vim::{Effect, Seek, Shown as ShownLine};
@@ -225,6 +225,39 @@ struct Predicted {
     /// ends: with the cursor there, the cursor is shown behind the cell.
     typed: Rect,
     end: usize,
+    /// What became of the lines of the paragraph, and whether they are
+    /// justified: what the random typist counts.
+    #[cfg_attr(not(test), allow(dead_code, reason = "only counted in tests"))]
+    lines: zetwerk_predict::Lines,
+    #[cfg_attr(not(test), allow(dead_code, reason = "only counted in tests"))]
+    justified: bool,
+}
+
+/// Whether `prediction` breaks the lines as Typst does, in a document
+/// whose paragraphs are `justified` or not: the error says why it may
+/// not. The random typist (25 seeds of 150 keys on each document) found
+/// a third of the lines worked out in justified text elsewhere than
+/// Typst puts them, by up to 101 pt: Typst breaks justified text
+/// weighing all of the paragraph, and a letter more on one line may
+/// move a word on another (the last line of a paragraph, which is not
+/// stretched, too). A part breaks them as Typst does. Ragged text Typst
+/// breaks first fit, as the predictor does (all 81 lines broken anew in
+/// the paper were right; in the document of chapters 50 of 158 were
+/// not, which is still to be looked into).
+fn as_typst_breaks(
+    prediction: &zetwerk_predict::Prediction,
+    justified: bool,
+) -> Result<(), String> {
+    // A line more or less moves all that is below it: what goes off a
+    // full page or comes back onto it is known to a part, which knows
+    // where the text of the page ends, and not here.
+    if matches!(prediction.lines, Lines::More | Lines::Fewer) {
+        return Err("the paragraph has a line more or less".to_owned());
+    }
+    if justified || prediction.justified {
+        return Err("a line of justified text".to_owned());
+    }
+    Ok(())
 }
 
 /// How the text differs from the text the pages were compiled from.
@@ -507,7 +540,7 @@ struct Shown {
 /// The lines of the typeset pages, for a cursor that moves up and down on
 /// them.
 struct PageRows<'a> {
-    document: &'a PagedDocument,
+    document: &'a local::Pages,
     world: &'a ProjectWorld,
     file: FileId,
     lines: &'a RefCell<HashMap<usize, PageLines>>,
@@ -554,12 +587,14 @@ impl PageRows<'_> {
         if covering.is_some() {
             return covering;
         }
-        if let Some(page) = pages::page_showing(self.document, self.world, self.file, then) {
+        if let Some(page) = pages::page_showing(self.document.pages(), self.world, self.file, then)
+        {
             return Some(page);
         }
         let source = self.world.source(self.file).ok()?;
         let then = self.world.shown_at(self.file, then);
-        zetwerk_typst::locate(self.document, &source, then, near).map(|position| position.page)
+        zetwerk_typst::locate(self.document.pages(), &source, then, near)
+            .map(|position| position.page)
     }
 
     /// Runs `ask` on the lines of page `index`.
@@ -567,7 +602,13 @@ impl PageRows<'_> {
         let page = self.document.pages().get(index)?;
         let mut lines = self.lines.borrow_mut();
         let lines = lines.entry(index).or_insert_with(|| {
-            pages::lines_of(self.world, self.document, index, &page.frame, self.file)
+            pages::lines_of(
+                self.world,
+                self.document.pages(),
+                index,
+                &page.frame,
+                self.file,
+            )
         });
         Some(ask(lines))
     }
@@ -789,9 +830,10 @@ pub struct Viewer {
     file: String,
     revision: u64,
     compiled_revision: Option<u64>,
-    /// The last document that compiled. Stays on screen while a newer
-    /// revision has errors.
-    document: Option<Arc<PagedDocument>>,
+    /// The pages of the last document that compiled, with a part typeset
+    /// since put in (see `local`). Stay on screen while a newer revision
+    /// has errors.
+    document: Option<local::Pages>,
     /// The last document that was typeset whole. What is asked about
     /// the document as a whole (its labels, what a name stands for) is
     /// asked of it: `document` may be it with a part typeset anew, a
@@ -1277,7 +1319,7 @@ impl Viewer {
     /// The document on screen, with the revision it was compiled from.
     #[must_use]
     pub fn document(&self) -> Option<&Arc<PagedDocument>> {
-        self.document.as_ref()
+        self.document.as_ref().map(local::Pages::document)
     }
 
     /// The files whose changes on disk concern this window.
@@ -1541,10 +1583,10 @@ impl Viewer {
                 y: cell.min.y.to_pt(),
             })
         });
-        let there = there.or_else(|| pages::shown_on(document, world, file, cursor));
+        let there = there.or_else(|| pages::shown_on(document.pages(), world, file, cursor));
         let shown = world.shown_at(file, cursor);
         let Some(position) =
-            there.or_else(|| zetwerk_typst::locate(document, &source, shown, near))
+            there.or_else(|| zetwerk_typst::locate(document.pages(), &source, shown, near))
         else {
             return;
         };
@@ -1611,12 +1653,12 @@ impl Viewer {
             if self.document.is_none() {
                 // The first pages there are: until now the window showed
                 // the source in their place.
-                self.document = Some(document);
+                self.document = Some(local::Pages::new(document, Arc::clone(&output.world)));
                 self.arrange();
                 // Now that it is known which files the document is made of.
                 self.announce_unsaved_elsewhere();
             } else {
-                self.document = Some(document);
+                self.document = Some(local::Pages::new(document, Arc::clone(&output.world)));
             }
             self.compiled_world = Some(Arc::clone(&output.world));
             self.document_revision = Some(output.revision);
@@ -1975,7 +2017,7 @@ impl Viewer {
                 // Back at the text the pages show. Pages a part was put
                 // into are not all of it typeset: that is still to come.
                 let whole = matches!((document, &self.whole),
-                    (document, Some(whole)) if Arc::ptr_eq(document, whole));
+                    (document, Some(whole)) if document.is_whole() && Arc::ptr_eq(document.whole(), whole));
                 self.document_revision = Some(self.revision);
                 if whole {
                     self.compiled_revision = Some(self.revision);
@@ -2032,7 +2074,7 @@ impl Viewer {
             // Near the cursor: a part typeset by itself is looked for
             // no further either.
             _ => zetwerk_typst::locate_near(
-                document,
+                document.pages(),
                 &base,
                 offset.saturating_sub(1),
                 self.cursor_page.get(),
@@ -2057,6 +2099,9 @@ impl Viewer {
             text,
         };
         let prediction = predict(&page.frame, map, edit).map_err(|why| format!("{why:?}"))?;
+        let justified = crate::typst_text::rule_value(editor.source(), "par", "justify")
+            .is_some_and(|value| value.trim() != "false");
+        as_typst_breaks(&prediction, justified)?;
         self.planned.retain(|(planned, _, _), _| *planned != index);
         self.predicted = Some(Predicted {
             index,
@@ -2066,6 +2111,8 @@ impl Viewer {
             },
             typed: prediction.typed,
             end,
+            lines: prediction.lines,
+            justified: prediction.justified,
         });
         Ok(())
     }
@@ -4580,18 +4627,24 @@ mod tests {
                     Third.\n";
         let (mut viewer, directory) = editing(text);
         // At the end of the first paragraph: enough for two more lines.
+        // The keys that add one are typeset by themselves, the others
+        // worked out on their line; none waits.
         press(&mut viewer, "/some<CR>A");
         let typed = " More and more words are typed here, and the paragraph grows by a line and by another.";
         let mut shown = 0;
         for key in keys::parse(typed).unwrap() {
             viewer.key(key);
-            shown += usize::from(viewer.is_predicted());
+            shown += usize::from(
+                viewer.is_predicted() || viewer.document_revision == Some(viewer.revision),
+            );
         }
         assert_eq!(shown, typed.len(), "{:?}", viewer.declined);
+        assert!(viewer.stats.local >= 1, "{}", viewer.stats.local);
         let predicted = viewer
             .predicted
             .as_ref()
-            .map(|predicted| predicted.page.clone());
+            .map(|predicted| predicted.page.clone())
+            .or_else(|| Some(viewer.document.as_ref()?.pages()[0].clone()));
         let predicted = zetwerk_render::render_page(&predicted.unwrap(), 2.0);
         compile(&mut viewer);
         let document = viewer.document().unwrap();

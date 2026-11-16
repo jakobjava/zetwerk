@@ -381,6 +381,25 @@ impl PageMap {
         PageLines { lines, stops }
     }
 
+    /// Makes the map one of the text of `file` with bytes `taken` taken
+    /// out and `put` bytes put in their place, where the page is the same
+    /// (a part was put into another page): the bytes behind them move.
+    /// Returns whether it could be: not if a glyph shows any of the bytes
+    /// taken out, or is of a node the bytes were put into, as a heading
+    /// in a table of contents is. The map is then as it was.
+    pub fn shift(&mut self, file: FileId, taken: &Range<usize>, put: usize) -> bool {
+        let origins = || self.glyphs.iter().filter_map(|glyph| glyph.origin.place());
+        if origins().any(|(of, range)| of == file && touches(range, taken)) {
+            return false;
+        }
+        for glyph in &mut self.glyphs {
+            if let Some(range) = glyph.origin.range_mut(file) {
+                *range = moved(range, taken, put);
+            }
+        }
+        true
+    }
+
     /// The cells of the glyphs that show bytes `range` of `file`, joined
     /// where they stand side by side on a line.
     #[must_use]
@@ -397,6 +416,36 @@ impl PageMap {
             join(&mut rects, glyph.rect);
         }
         rects
+    }
+}
+
+/// Whether bytes `range` of a text are, or hold, some of bytes `taken`,
+/// or the place they were taken from: what is shown of them changes
+/// with them.
+fn touches(range: &Range<usize>, taken: &Range<usize>) -> bool {
+    if taken.is_empty() {
+        range.start < taken.start && taken.start < range.end
+    } else {
+        range.start < taken.end && taken.start < range.end
+    }
+}
+
+/// Where bytes `range` of a text are after bytes `taken` of it were
+/// replaced by `put` bytes, if they are none of them: what ends where
+/// bytes were put in stays, what begins there moves.
+fn moved(range: &Range<usize>, taken: &Range<usize>, put: usize) -> Range<usize> {
+    let byte = |then: usize| {
+        if then < taken.start {
+            then
+        } else {
+            then.max(taken.end) - taken.len() + put
+        }
+    };
+    let start = byte(range.start);
+    if range.end <= taken.start && !range.is_empty() {
+        start..range.end
+    } else {
+        start..byte(range.end).max(start)
     }
 }
 
@@ -520,6 +569,27 @@ impl PageLine {
 }
 
 impl PageLines {
+    /// Like [`PageMap::shift`], for the lines of a page.
+    pub fn shift(&mut self, file: FileId, taken: &Range<usize>, put: usize) -> bool {
+        let glyphs = || self.lines.iter().flat_map(|line| &line.glyphs);
+        if glyphs().any(|glyph| glyph.file == file && touches(&(glyph.offset..glyph.end), taken)) {
+            return false;
+        }
+        for glyph in self.lines.iter_mut().flat_map(|line| &mut line.glyphs) {
+            if glyph.file == file {
+                let now = moved(&(glyph.offset..glyph.end), taken, put);
+                (glyph.offset, glyph.end) = (now.start, now.end);
+            }
+        }
+        for stop in &mut self.stops {
+            if stop.file == file {
+                let now = moved(&(stop.start..stop.end), taken, put);
+                (stop.start, stop.end) = (now.start, now.end);
+            }
+        }
+        true
+    }
+
     /// How many lines of the page show text of the file.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -907,6 +977,20 @@ impl Origin {
     /// that part is typed at.
     fn is_empty_place(&self) -> bool {
         matches!(self, Self::Math { range, .. } if range.is_empty())
+    }
+
+    /// The bytes of `file` this glyph stands for, to be changed, if it
+    /// stands for any.
+    fn range_mut(&mut self, file: FileId) -> Option<&mut Range<usize>> {
+        match self {
+            Self::Text { file: of, range }
+            | Self::Space { file: of, range }
+            | Self::Math { file: of, range }
+            | Self::Object {
+                file: of, range, ..
+            } if *of == file => Some(range),
+            _ => None,
+        }
     }
 
     /// The bytes of `file` this glyph stands for, if it stands for any.

@@ -25,7 +25,6 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use typst::World;
@@ -579,7 +578,7 @@ impl Viewer {
         };
         let shown = world.shown_at(file, change.back_or_edge(at));
         let near = self.cursor_page.get();
-        let Some(position) = zetwerk_typst::locate(document, &source, shown, near) else {
+        let Some(position) = zetwerk_typst::locate(document.pages(), &source, shown, near) else {
             return;
         };
         if self.paging == Paging::Slides {
@@ -834,7 +833,7 @@ impl Viewer {
             )
         };
         if let Some(found) = found {
-            let key = (found.generation, Arc::as_ptr(document) as usize, change);
+            let key = (found.generation, document.pages().as_ptr() as usize, change);
             let placed = self.find.placed.entry(index).or_insert_with(|| Placed {
                 key: None,
                 cells: Vec::new(),

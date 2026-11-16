@@ -50,13 +50,20 @@ Open, as reported:
   first key.
 - A long document shows an empty window while it is typeset for the first
   time.
-- Speed and parts: in work (the walks from the root of the text, page maps
-  after a part, lines left out at the foot of a full page, the predictor on
-  justified text).
+- Parts (merged 2026-11-16, night): page maps after a part, lines left out
+  at the foot of a full page; justified text is no longer guessed while
+  typing but typeset as a part, which costs more per key on a long
+  document (to be measured on a quiet machine). Two cases of the random
+  typist are left open and listed in `viewer/tests/typist.rs` (`KNOWN`):
+  a list item begun behind typed names on the paper, and one glyph out of
+  place after undo and redo on the plain text, both until the pause.
+- Speed: in work (the walks from the root of the text).
 - Still nothing of this was typed on a real keyboard by its authors.
 
-In work, each on a branch of its own: suggestions from agents as a review
-workflow with a record; who wrote what; pages from PDF files; a `:report`
+Pages from PDF files, images, blank pages and page breaks (`gS`, `:pages`,
+`:page add`, the agent's `insert_pages`) are merged. In work, each on a
+branch of its own: suggestions from agents as a review
+workflow with a record; who wrote what; a `:report`
 recorder; LaTeX habits in equations; images and tables from the clipboard;
 the window as it was left, typewriter scrolling, night colours; `:tutor` and
 `:help`; change bars; packages; presenting; a settings panel with quiet

@@ -424,7 +424,7 @@ fn a_page_put_in_is_drawn_once_exported_whole_and_typing_beside_it_shows_the_who
         .count();
     assert!(dark > 20, "{dark} dark pixels");
     // The PDF written holds it as a form, drawn as lines: no picture.
-    let pdf = zetwerk_typst::export_pdf(&document, &world).unwrap();
+    let pdf = zetwerk_typst::export_pdf(document.document(), &world).unwrap();
     let written = String::from_utf8_lossy(&pdf);
     assert!(written.contains("/Count 3"));
     assert!(written.contains("/Form") && !written.contains("/Subtype /Image"));
