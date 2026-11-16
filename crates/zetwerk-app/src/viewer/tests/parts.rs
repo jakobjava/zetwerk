@@ -537,8 +537,11 @@ fn the_tags_in_the_margin_follow_the_lines_a_part_moves() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// The bytes each glyph of a page shows, page by page.
+type Shown = HashMap<usize, Vec<Option<Range<usize>>>>;
+
 /// The maps of all pages of `viewer`, with the text they were made of.
-fn maps_now(viewer: &mut Viewer) -> (String, HashMap<usize, Vec<Option<Range<usize>>>>) {
+fn maps_now(viewer: &mut Viewer) -> (String, Shown) {
     let world = viewer
         .compiled_world
         .clone()

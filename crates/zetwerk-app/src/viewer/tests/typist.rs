@@ -211,6 +211,22 @@ struct Tally {
 }
 
 impl Tally {
+    /// Counts how the page showed the key just pressed: worked out on its
+    /// line (and what became of the lines), or not at all; the counts of
+    /// the viewer before it were `predicted` and `declined`.
+    fn count_shown(&mut self, viewer: &Viewer, predicted: u64, declined: u64) {
+        self.predicted += viewer.stats.predicted - predicted;
+        if viewer.stats.predicted > predicted
+            && let Some(shown) = &viewer.predicted
+        {
+            *self
+                .predicted_lines
+                .entry(format!("{:?}", (shown.lines, shown.justified)))
+                .or_default() += 1;
+        }
+        self.declined += viewer.stats.declined - declined;
+    }
+
     fn note(
         map: &mut BTreeMap<String, (usize, String)>,
         kind: String,
@@ -630,16 +646,7 @@ fn walk(files: &[(&str, &str)], seed: u64, steps: usize, tally: &mut Tally) {
             let local = viewer.stats.local;
             let (predicted, declined) = (viewer.stats.predicted, viewer.stats.declined);
             viewer.key(key);
-            tally.predicted += viewer.stats.predicted - predicted;
-            if viewer.stats.predicted > predicted
-                && let Some(shown) = &viewer.predicted
-            {
-                *tally
-                    .predicted_lines
-                    .entry(format!("{:?}", (shown.lines, shown.justified)))
-                    .or_default() += 1;
-            }
-            tally.declined += viewer.stats.declined - declined;
+            tally.count_shown(&viewer, predicted, declined);
             let took = started.elapsed().as_secs_f64() * 1000.0;
             asked |= viewer.take_edited().is_some();
             tally.keys += 1;

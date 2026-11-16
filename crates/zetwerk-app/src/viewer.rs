@@ -225,6 +225,24 @@ struct Predicted {
     justified: bool,
 }
 
+/// Whether `prediction` breaks the lines as Typst does: the error says
+/// why it may not.
+fn as_typst_breaks(prediction: &zetwerk_predict::Prediction) -> Result<(), String> {
+    // A line more or less moves all that is below it: what goes off a
+    // full page or comes back onto it is known to a part, which knows
+    // where the text of the page ends, and not here.
+    if matches!(prediction.lines, Lines::More | Lines::Fewer) {
+        return Err("the paragraph has a line more or less".to_owned());
+    }
+    // Lines broken anew one after the other, first fit, are where Typst
+    // breaks ragged text; justified text it breaks weighing all of the
+    // paragraph, which a part does as Typst does.
+    if prediction.lines == Lines::Rebroken && prediction.justified {
+        return Err("justified lines broken anew".to_owned());
+    }
+    Ok(())
+}
+
 /// How the text differs from the text the pages were compiled from.
 enum Difference<'a> {
     Nothing,
@@ -2025,18 +2043,7 @@ impl Viewer {
             text,
         };
         let prediction = predict(&page.frame, map, edit).map_err(|why| format!("{why:?}"))?;
-        // A line more or less moves all that is below it: what goes off a
-        // full page or comes back onto it is known to a part, which knows
-        // where the text of the page ends, and not here.
-        if matches!(prediction.lines, Lines::More | Lines::Fewer) {
-            return Err("the paragraph has a line more or less".to_owned());
-        }
-        // Lines broken anew one after the other, first fit, are where
-        // Typst breaks ragged text; justified text it breaks weighing all
-        // of the paragraph, which a part does as Typst does.
-        if prediction.lines == Lines::Rebroken && prediction.justified {
-            return Err("justified lines broken anew".to_owned());
-        }
+        as_typst_breaks(&prediction)?;
         self.planned.retain(|(planned, _, _), _| *planned != index);
         self.predicted = Some(Predicted {
             index,

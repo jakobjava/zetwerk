@@ -168,16 +168,17 @@ impl Viewer {
     /// See [`Viewer::typeset_locally`].
     fn put_part_in(&mut self) -> Result<(), String> {
         let started = Instant::now();
-        let (Some(shown), Some(was)) = (self.document.clone(), self.compiled_world.clone()) else {
+        let (Some(on_screen), Some(was)) = (self.document.clone(), self.compiled_world.clone())
+        else {
             return Err("nothing compiled yet".to_owned());
         };
         // The part holds all that changed since the pages were typeset
         // whole, and goes into the page as it was then: what a part before
         // it pushed off the foot of the page comes back where this one is
         // shorter.
-        let before = Arc::clone(&shown.world);
-        let pages = shown.whole.pages();
-        if self.back_at_whole(&shown) {
+        let before = Arc::clone(&on_screen.world);
+        let pages = on_screen.whole.pages();
+        if self.back_at_whole(&on_screen) {
             return Ok(());
         }
         // What typing put in to be seen (a refused equation as it is
@@ -185,7 +186,7 @@ impl Viewer {
         // is not to stay beside a part, nor anywhere.
         let typing = (self.editor.as_ref())
             .is_some_and(|editor| editor.mode() == crate::editor::Mode::Insert);
-        if !typing && shown.world.shows_more() {
+        if !typing && on_screen.world.shows_more() {
             return Err("the pages show what typing put in".to_owned());
         }
         // The page: where the cursor was last found, or one beside it.
@@ -218,7 +219,7 @@ impl Viewer {
             return Err("a left page with margins of two sides is typeset whole".to_owned());
         }
         // What every page has around its text stays where it is.
-        let stays = shown.furniture(index);
+        let stays = on_screen.furniture(index);
         let foot = local::foot_of_text(&part.typeset).ok_or("the foot of the text is not known")?;
         let frame = local::splice(
             &page.frame,
@@ -233,7 +234,7 @@ impl Viewer {
         if let Some(slot) = patched.make_mut().get_mut(index) {
             slot.frame = frame;
         }
-        let other = shown.spliced_at().filter(|other| *other != index);
+        let other = on_screen.spliced_at().filter(|other| *other != index);
         let world = Arc::new(part.world);
         // The page put in is mapped anew, and the one the part before was
         // put in, if that is another (it is as typeset whole again); the
@@ -243,7 +244,7 @@ impl Viewer {
         self.document = Some(Pages {
             spliced: Some((index, patched)),
             wrapped: OnceCell::new(),
-            ..shown
+            ..on_screen
         });
         self.compiled_world = Some(world);
         self.document_revision = Some(part.revision);
@@ -434,20 +435,18 @@ impl Viewer {
     /// show any of what changed, are made anew when they are asked for.
     fn maps_moved(&mut self, was: &ProjectWorld, now: &ProjectWorld, renew: &[Option<usize>]) {
         let file = self.file_id();
-        let changed = match (was.written(file), now.written(file)) {
-            (Ok(was), Ok(now)) => match difference(was.text(), now.text()) {
-                Difference::Nothing => None,
-                Difference::Replacement {
-                    offset,
-                    removed,
-                    text,
-                } => Some((offset..offset + removed, text.len())),
-            },
-            _ => {
-                self.maps.clear();
-                self.page_lines.get_mut().clear();
-                return;
-            }
+        let (Ok(was), Ok(now)) = (was.written(file), now.written(file)) else {
+            self.maps.clear();
+            self.page_lines.get_mut().clear();
+            return;
+        };
+        let changed = match difference(was.text(), now.text()) {
+            Difference::Nothing => None,
+            Difference::Replacement {
+                offset,
+                removed,
+                text,
+            } => Some((offset..offset + removed, text.len())),
         };
         let kept = |index: &usize| !renew.contains(&Some(*index));
         self.maps.retain(|index, map| {
