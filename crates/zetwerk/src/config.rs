@@ -18,6 +18,10 @@
 //! [power]
 //! mode = "auto"       # or "saver", "performance"
 //!
+//! [present]
+//! clock = false       # the time shows in a corner of the slides from the start (t)
+//! duration = "20min"  # how long a talk is to take, unless :present says otherwise
+//!
 //! [language]
 //! spelling = true     # words no dictionary knows are marked on the page
 //! grammar = true      # and what a grammar checker finds
@@ -60,6 +64,8 @@ pub struct Config {
     pub view: View,
     #[serde(default)]
     pub power: Power,
+    #[serde(default)]
+    pub present: Present,
     #[serde(default)]
     pub language: Checking,
     #[serde(default)]
@@ -126,6 +132,32 @@ impl From<Layout> for Panes {
             Layout::Split => Self::Split,
             Layout::Source => Self::Source,
             Layout::Page => Self::Page,
+        }
+    }
+}
+
+/// What talks given from the editor are like (`:present`).
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Present {
+    /// Whether the time shows in the corner of the slides from the start.
+    #[serde(default)]
+    pub clock: bool,
+    /// How long a talk is to take: `20min`, `1h30`, `45`.
+    pub duration: Option<String>,
+}
+
+impl Present {
+    /// The settings as the viewer takes them. A duration that cannot be
+    /// read is no duration.
+    #[must_use]
+    pub fn talk(&self) -> zetwerk_app::viewer::Talk {
+        zetwerk_app::viewer::Talk {
+            clock: self.clock,
+            duration: self
+                .duration
+                .as_deref()
+                .and_then(zetwerk_app::viewer::present_duration),
         }
     }
 }

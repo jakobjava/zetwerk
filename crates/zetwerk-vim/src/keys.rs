@@ -32,6 +32,8 @@ pub enum Key {
     /// to the engine that made it (see `Engine::completed`); it is what
     /// `.` and macros replay.
     Text(u32),
+    /// A function key: `F(5)` is F5, which presentation remotes send.
+    F(u8),
 }
 
 /// A key pressed together with modifiers.
@@ -115,6 +117,9 @@ fn parse_special(name: &str) -> Result<KeyPress, String> {
         ("pagedown", ..) => Key::PageDown,
         ("home", ..) => Key::Home,
         ("end", ..) => Key::End,
+        (_, Some('f' | 'F'), Some(_)) if function_key(name).is_some() => {
+            Key::F(function_key(name).unwrap_or_default())
+        }
         (_, Some(c), None) => Key::Char(c),
         _ => return Err(format!("unknown key <{name}>")),
     };
@@ -129,6 +134,12 @@ fn parse_special(name: &str) -> Result<KeyPress, String> {
         };
     }
     Ok(press)
+}
+
+/// The number of the function key `name` stands for (`F5`, `f12`).
+fn function_key(name: &str) -> Option<u8> {
+    let number = name.strip_prefix(['f', 'F'])?.parse().ok()?;
+    (1..=24).contains(&number).then_some(number)
 }
 
 #[cfg(test)]
@@ -187,6 +198,7 @@ mod tests {
             ])
         );
         assert!(parse("<S-Left>").is_err());
+        assert_eq!(parse("<F5>"), Ok(vec![KeyPress::plain(Key::F(5))]));
     }
 
     #[test]

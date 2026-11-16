@@ -27,6 +27,7 @@ use crate::viewer::agent::AgentEdits;
 use crate::viewer::{self, Edited, State, Viewer};
 use crate::watch::FileWatcher;
 
+mod present;
 mod refusal;
 mod switch;
 
@@ -63,6 +64,8 @@ pub struct Options {
     pub language: zetwerk_language::Settings,
     /// Where the user's own starters for new documents are.
     pub templates: Option<PathBuf>,
+    /// What the user has to say about giving talks.
+    pub talk: viewer::Talk,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -190,6 +193,11 @@ struct Session {
     env: Arc<Environment>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    /// What surfaces are made with, for a window of the audience's view
+    /// (see `present`), and that window while there is one.
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    second: Option<present::Second>,
     gpu: Gpu,
     viewer: Viewer,
     compiler: Compiler,
@@ -229,7 +237,7 @@ impl ApplicationHandler<Event> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if let Some(refusal) = &mut self.refusal {
             if refusal.event(&event) {
                 event_loop.exit();
@@ -239,6 +247,9 @@ impl ApplicationHandler<Event> for App {
         let Some(session) = &mut self.session else {
             return;
         };
+        if present::second_event(session, id, &event) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             // Away from the window is a good moment to make sure. A
@@ -285,6 +296,7 @@ impl ApplicationHandler<Event> for App {
         let Some(session) = &mut self.session else {
             return;
         };
+        present::follow(session, event_loop);
         let now = Instant::now();
         // A pointer held beyond the text while it selects moves the view
         // along, and keys that wait for another are explained once they
@@ -298,6 +310,11 @@ impl ApplicationHandler<Event> for App {
         }
         // And the keys that can follow come up when typing has paused.
         if session.viewer.hints_due(now) {
+            session.window.request_redraw();
+        }
+        // And the clock of a talk, where it is shown, when it shows
+        // another minute.
+        if session.viewer.present_due(now) {
             session.window.request_redraw();
         }
         // Keys that may begin a mapping are taken as they are when the
@@ -336,6 +353,7 @@ impl ApplicationHandler<Event> for App {
             session.compiler.overtake_at(),
             session.viewer.compiling_at(now),
             session.viewer.keys_at(),
+            session.viewer.present_at(),
         ]
         .into_iter()
         .flatten()
@@ -435,11 +453,15 @@ impl Session {
         let mut viewer = viewer;
         viewer.wake_for_language(wake(proxy));
         viewer.wake_for_review(wake(proxy));
+        viewer.wake_for_handouts(wake(proxy));
         let mut session = Self {
             window,
             env,
             surface,
             config,
+            instance,
+            adapter,
+            second: None,
             gpu,
             viewer,
             compiler,
@@ -461,6 +483,9 @@ impl Session {
     }
 
     fn window_event(&mut self, event: WindowEvent) {
+        if present::touched(&mut self.viewer, &event) {
+            return self.window.request_redraw();
+        }
         match event {
             WindowEvent::Resized(size) => {
                 self.config.width = size.width.max(1);
@@ -643,7 +668,7 @@ impl Session {
         self.viewer.stats.texture_bytes = self.gpu.texture_bytes();
 
         let gpu = &self.gpu;
-        let scene = self.viewer.scene(&|id| gpu.has(id));
+        let mut scene = self.viewer.scene(&|id| gpu.has(id));
         for image in &scene.images {
             let pixmap = &image.pixmap;
             self.gpu
@@ -657,6 +682,7 @@ impl Session {
             && self.scheduler.deadline().is_none()
             && scene.wanted.is_empty()
             && self.rasterizer.is_idle();
+        present::draw_second(self, &mut scene.wanted);
         self.rasterizer.request(scene.wanted);
         self.present(&scene.quads);
 
@@ -770,6 +796,7 @@ fn translate(key: &WinitKey, text: Option<&str>, ctrl: bool) -> Option<Key> {
             NamedKey::PageDown => Key::PageDown,
             NamedKey::Home => Key::Home,
             NamedKey::End => Key::End,
+            NamedKey::F5 => Key::F(5),
             _ => return None,
         },
         // With Ctrl, a dead key is the key: Ctrl-^ on a German keyboard,

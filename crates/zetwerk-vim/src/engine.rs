@@ -2297,6 +2297,11 @@ impl Engine {
             'F' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("figures".to_owned()));
             }
+            // Nor Vim's `gP` (which puts before and stays behind): the
+            // host's talk, given from the slide at the cursor.
+            'P' if self.pending.is_idle() && !self.selecting() => {
+                self.effects.push(Effect::Command("present".to_owned()));
+            }
             // To where the name under the cursor is defined, as far as
             // the host can tell; and the host's list of places to go.
             'd' | 'o' | 'f' if self.pending.is_idle() && !self.selecting() => {
@@ -4971,6 +4976,7 @@ fn key_of(c: char) -> KeyPress {
         '\u{e009}' => special(Key::Delete),
         '\u{e00a}' => special(Key::BackTab),
         '\u{e00b}' => special(Key::ShiftEnter),
+        '\u{e010}'..='\u{e028}' => special(Key::F((c as u32 - 0xe010) as u8)),
         '\u{e100}'..='\u{f8ff}' => special(Key::Text(c as u32 - TEXT_KEYS)),
         '\u{1}'..='\u{1f}' => KeyPress {
             key: Key::Char(char::from(c as u8 | 0x60)),
@@ -5003,6 +5009,7 @@ fn char_of(press: KeyPress) -> char {
         Key::Delete => '\u{e009}',
         Key::BackTab => '\u{e00a}',
         Key::ShiftEnter => '\u{e00b}',
+        Key::F(number) => char::from_u32(0xe010 + u32::from(number.min(24))).unwrap_or('\u{e010}'),
         // The rest of the private use area numbers the texts put in
         // whole; beyond that many, the last stands for all.
         Key::Text(number) => {

@@ -235,6 +235,7 @@ impl Viewer {
         let plain = self.keymap.is_empty()
             || self.is_picking()
             || self.is_grid()
+            || self.is_presenting()
             || self.is_jumping()
             || self.is_retyping();
         if plain {
