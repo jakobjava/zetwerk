@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     Change, ChangeKind, Direction, ImageExport, ImageFormat, ImageOf, NewNote, NoteAnchor,
-    NoteAnswer, Place, SharedEditor,
+    NoteAnswer, PagesWanted, Place, SharedEditor,
 };
 
 /// Longest side of a rendered page unless the caller asks otherwise. Large
@@ -120,6 +120,35 @@ struct MoveSectionArgs {
     direction: Direction,
     /// The `revision` you got the outline at. The move is refused if the
     /// text has changed since.
+    expected_revision: Option<u64>,
+    /// `apply` (default) or `propose`; see `edit_source`.
+    mode: Option<EditMode>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct InsertPagesArgs {
+    /// The file to make pages of: a PDF, or an image (png, jpg, gif,
+    /// svg, webp), as a path from the document's directory, in it or
+    /// below it (`cover.pdf`, `appendix/paper.pdf`).
+    file: String,
+    /// Which pages of a PDF: `2`, `1-3`, `1,4-6`, `3-` (default: all of
+    /// them). An image is one page.
+    pages: Option<String>,
+    /// Where they go: `cursor` (default: after the paragraph the user's
+    /// cursor is in; the text goes on on the next page), `start` (behind
+    /// the rules at the top), `end`, `after:<line>` (after the paragraph
+    /// that line is in) or `before:<line>` (before it).
+    #[serde(rename = "where")]
+    place: Option<String>,
+    /// Put each page on the document's paper, scaled to fit and in the
+    /// middle (default: false for a PDF, whose pages keep their own size
+    /// and orientation; true for an image).
+    fit: Option<bool>,
+    /// Whether the pages count in the page numbers (default true; they
+    /// never show a number themselves).
+    counted: Option<bool>,
+    /// The `revision` you read the source at. Refused if the text has
+    /// changed since.
     expected_revision: Option<u64>,
     /// `apply` (default) or `propose`; see `edit_source`.
     mode: Option<EditMode>,
@@ -324,7 +353,11 @@ impl Server {
     }
 
     /// The headings of the document (level, text, line, and page once it
-    /// is compiled) and its labels with their lines.
+    /// is compiled), its labels with their lines, and the pages put in
+    /// whole (`inserted_pages`: each with its `line`, what it `shows`,
+    /// `pdf`, `image`, `blank` or `other`, its `file` and `page`, whether
+    /// it is `fit` to the paper, null where written otherwise, and
+    /// whether it is `counted` in the page numbers).
     #[tool(annotations(title = "Outline", read_only_hint = true))]
     async fn get_outline(&self) -> Result<CallToolResult, ErrorData> {
         self.value(crate::Editor::outline).await
@@ -435,8 +468,9 @@ impl Server {
     /// tells; null where it has no number), its `caption` as written,
     /// its `label` (refer to it as `@label`), the `line` its call begins
     /// on and, of an image, the `image` file. Tables and images that
-    /// stand in no figure are listed too, with `in_figure` false. Change
-    /// them with `edit_source`.
+    /// stand in no figure are listed too, with `in_figure` false; an
+    /// image that is a page of its own (`insert_pages`) is not: see
+    /// `inserted_pages` in `get_outline`. Change them with `edit_source`.
     #[tool(annotations(title = "List figures", read_only_hint = true))]
     async fn list_figures(&self) -> Result<CallToolResult, ErrorData> {
         self.value(crate::Editor::figures).await
@@ -587,6 +621,35 @@ impl Server {
                 line: args.line,
                 direction: args.direction,
             },
+            expected_revision: args.expected_revision,
+            propose: args.mode == Some(EditMode::Propose),
+            reason: None,
+        };
+        self.value(move |editor| editor.change(change)).await
+    }
+
+    /// Put pages of a PDF (a cover, a signed form, a paper as an
+    /// appendix, slides) or an image into the document whole, each as a
+    /// page of its own with no margins, header or number. Written as
+    /// one line of plain Typst a page:
+    /// `#page(width: auto, height: auto, margin: 0pt, header: none,
+    /// footer: none)[#image("cover.pdf", page: 1)]`; `get_outline` lists
+    /// them as `inserted_pages`, and they are not figures. The file has
+    /// to be in the document's directory or below it already. Answers
+    /// like `edit_source`.
+    #[tool(annotations(title = "Insert pages", read_only_hint = false))]
+    async fn insert_pages(
+        &self,
+        Parameters(args): Parameters<InsertPagesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let change = Change {
+            what: ChangeKind::InsertPages(PagesWanted {
+                file: args.file,
+                pages: args.pages,
+                place: args.place,
+                fit: args.fit,
+                counted: args.counted,
+            }),
             expected_revision: args.expected_revision,
             propose: args.mode == Some(EditMode::Propose),
             reason: None,

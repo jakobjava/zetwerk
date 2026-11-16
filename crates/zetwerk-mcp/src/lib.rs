@@ -183,6 +183,25 @@ pub enum ChangeKind {
     /// Take the section whose heading is on `line` (counting from 1)
     /// where `direction` says, with all its subsections.
     MoveSection { line: usize, direction: Direction },
+    /// Put pages of a file beside the document into it, each a page of
+    /// its own (see `insert_pages`).
+    InsertPages(PagesWanted),
+}
+
+/// Pages of a file an agent wants put into the document.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PagesWanted {
+    /// The file (a PDF or an image), as a path from the document's
+    /// directory.
+    pub file: String,
+    /// Which pages of a PDF: `2`, `1-3`, `1,4-6`; all where none.
+    pub pages: Option<String>,
+    /// `cursor`, `start`, `end`, `after:<line>` or `before:<line>`.
+    pub place: Option<String>,
+    /// Fit to the document's paper, or as large as it is.
+    pub fit: Option<bool>,
+    /// Counted in the page numbers.
+    pub counted: Option<bool>,
 }
 
 /// Where a section is to go: past the section of its level before it

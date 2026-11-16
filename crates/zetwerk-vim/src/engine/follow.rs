@@ -63,6 +63,11 @@ const G: &[(&str, &str, When)] = &[
     ("D", "how the document looks", When::Idle),
     ("B", "the bibliography", When::Idle),
     ("F", "figures and tables", When::Idle),
+    (
+        "S",
+        "the pages: put in a PDF, an image; move, take out",
+        When::Idle,
+    ),
     ("s", "the page, the source, or both", When::Idle),
     ("?", "all there is to do", When::Idle),
     ("w", "jump to a label in view", When::Unpending),

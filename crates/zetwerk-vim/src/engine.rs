@@ -2248,6 +2248,13 @@ impl Engine {
         let Key::Char(c) = press.key else {
             return self.reset_pending();
         };
+        if self.pending.is_idle()
+            && !self.selecting()
+            && let Some(command) = host_command(c)
+        {
+            self.effects.push(Effect::Command(command.to_owned()));
+            return;
+        }
         match c {
             'g' | 'e' | 'E' | '_' => self.motion_key_g(c, host),
             'j' | 'k' => self.row_key(c == 'j', host),
@@ -2301,52 +2308,6 @@ impl Engine {
                 }
                 self.start_insert('i', host);
             }
-            // Not Vim's `gs` (which sleeps): the editor's own key, for
-            // switching what the window shows.
-            's' if self.pending.is_idle() && !self.selecting() => {
-                self.effects.push(Effect::Command("view".to_owned()));
-            }
-            // As Vim's `gO` lists the headings of a help file: the host's
-            // list of the document's sections, to rearrange them.
-            'O' if self.pending.is_idle() && !self.selecting() => {
-                self.effects.push(Effect::Command("structure".to_owned()));
-            }
-            // The host's list of all there is to do, and its list of
-            // what there is to decide about the document.
-            '?' | 'D' | 'B' if self.pending.is_idle() && !self.selecting() => {
-                let command = match c {
-                    '?' => "help",
-                    'D' => "doc",
-                    _ => "bib",
-                };
-                self.effects.push(Effect::Command(command.to_owned()));
-            }
-            // Not Vim's `gx` (which opens what is under the cursor
-            // elsewhere): the equation there as it is written.
-            'x' if self.pending.is_idle() && !self.selecting() => {
-                self.effects.push(Effect::Command("written".to_owned()));
-            }
-            // Nor Vim's `gF`: the host's list of the figures and tables.
-            'F' if self.pending.is_idle() && !self.selecting() => {
-                self.effects.push(Effect::Command("figures".to_owned()));
-            }
-            // To where the name under the cursor is defined, as far as
-            // the host can tell; and the host's list of places to go.
-            'd' | 'o' | 'f' if self.pending.is_idle() && !self.selecting() => {
-                let command = match c {
-                    'd' => "definition",
-                    'o' => "outline",
-                    // The file named under the cursor.
-                    _ => "file",
-                };
-                self.effects.push(Effect::Command(command.to_owned()));
-            }
-            // Nor Vim's `ga` and `gr`: to accept or reject the change an
-            // agent proposes under the cursor.
-            'a' | 'r' if self.pending.is_idle() && !self.selecting() => {
-                let command = if c == 'a' { "accept" } else { "reject" };
-                self.effects.push(Effect::Command(command.to_owned()));
-            }
             // Behind an operator, Vim's `gn` and `gN`: the next match of
             // the search, or the one before (`cgn` and then `.`).
             'n' | 'N' if self.pending.operator.is_some() => self.search_object(c == 'n', host),
@@ -2356,11 +2317,6 @@ impl Engine {
             'n' | 'q' if self.pending.is_idle() => {
                 let command = if c == 'n' { "note" } else { "ask" };
                 self.effects.push(Effect::Command(command.to_owned()));
-            }
-            // Nor Vim's `gh` (which selects): the host's list of the steps
-            // of the undo history, to look at and to go back to.
-            'h' if self.pending.is_idle() && !self.selecting() => {
-                self.effects.push(Effect::Command("history".to_owned()));
             }
             // Nor Vim's `gw` (which formats): the host's labels on the
             // words in view, to jump to one by typing its label. In
@@ -5097,6 +5053,43 @@ fn place(text: &str, pos: usize) -> LinePlace {
     let text = Text(text);
     let pos = pos.min(text.len());
     (text.line_index(pos), pos - text.line_start(pos))
+}
+
+/// The command of the host that `g` and `c` ask for, with nothing
+/// pending and nothing selected: its own lists and views, none of them
+/// Vim's.
+fn host_command(c: char) -> Option<&'static str> {
+    Some(match c {
+        // Not Vim's `gs` (which sleeps): what the window shows.
+        's' => "view",
+        // As Vim's `gO` lists the headings of a help file: the sections
+        // of the document, to rearrange them.
+        'O' => "structure",
+        // All there is to do, and what there is to decide about the
+        // document and its sources.
+        '?' => "help",
+        'D' => "doc",
+        'B' => "bib",
+        // Not Vim's `gx` (which opens what is under the cursor
+        // elsewhere): the equation there as it is written.
+        'x' => "written",
+        // The pages (sheets, Seiten), and the figures and tables.
+        'S' => "pages",
+        'F' => "figures",
+        // To where the name under the cursor is defined, as far as the
+        // host can tell; the places to go; the file named there.
+        'd' => "definition",
+        'o' => "outline",
+        'f' => "file",
+        // Nor Vim's `ga` and `gr`: to accept or reject the change an
+        // agent proposes under the cursor.
+        'a' => "accept",
+        'r' => "reject",
+        // Nor Vim's `gh` (which selects): the steps of the undo history,
+        // to look at and to go back to.
+        'h' => "history",
+        _ => return None,
+    })
 }
 
 /// The nearest position to `pos` the cursor may be at: in insert and visual

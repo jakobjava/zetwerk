@@ -334,7 +334,10 @@ impl Viewer {
     /// If no file is being edited.
     pub fn figures(&self) -> Result<Vec<Figure>, String> {
         let editor = self.editor.as_ref().ok_or(NOT_EDITING)?;
-        Ok(figure_text::figures(editor.source()))
+        Ok(super::pages::not_pages(
+            editor.source(),
+            figure_text::figures(editor.source()),
+        ))
     }
 
     /// Figure `number` of the file, counting from 1 as the list does.

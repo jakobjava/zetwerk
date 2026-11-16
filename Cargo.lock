@@ -9639,6 +9639,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "hayagriva",
+ "hayro-syntax",
  "notify",
  "pollster",
  "rayon",

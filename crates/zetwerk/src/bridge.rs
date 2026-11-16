@@ -162,6 +162,16 @@ fn made(
             };
             viewer.agent_move_section(line, way, expected, propose)
         }
+        ChangeKind::InsertPages(wanted) => {
+            let wanted = zetwerk_app::page_text::Wanted {
+                file: inside(Some(&wanted.file))?.unwrap_or_default(),
+                pages: wanted.pages,
+                place: wanted.place,
+                fit: wanted.fit,
+                counted: wanted.counted,
+            };
+            viewer.agent_insert_pages(&wanted, expected, propose)
+        }
     }
 }
 
@@ -416,8 +426,13 @@ impl Editor for Bridge {
 
     fn outline(&self) -> Result<Value, String> {
         let shown = self.shown()?;
-        let (outline, revision) =
-            self.compiled_for(shown, |viewer| (viewer.outline(), viewer.state().revision))?;
+        let (outline, revision, pages) = self.compiled_for(shown, |viewer| {
+            (
+                viewer.outline(),
+                viewer.state().revision,
+                viewer.agent_pages_put_in(),
+            )
+        })?;
         let outline = outline?;
         let headings: Vec<Value> = outline
             .headings
@@ -436,7 +451,9 @@ impl Editor for Bridge {
             .iter()
             .map(|(name, line)| json!({ "name": name, "line": line }))
             .collect();
-        Ok(json!({ "revision": revision, "headings": headings, "labels": labels }))
+        Ok(
+            json!({ "revision": revision, "headings": headings, "labels": labels, "inserted_pages": pages }),
+        )
     }
 
     fn search(&self, query: &str, ignore_case: bool, limit: usize) -> Result<Value, String> {
@@ -1670,5 +1687,81 @@ mod tests {
             })
             .unwrap();
         assert_eq!(bridge.state().unwrap().open_questions, 0);
+    }
+
+    /// The bytes of a PDF of `count` pages of 300 by 200 points.
+    fn landscape_pdf(count: usize) -> Vec<u8> {
+        let env = zetwerk_typst::Environment::new(FontSet::Embedded);
+        let text = format!(
+            "#set page(width: 300pt, height: 200pt)\n{}",
+            vec!["Slide"; count].join("\n#pagebreak()\n")
+        );
+        let project =
+            zetwerk_typst::Project::in_memory(env, PathBuf::from("/"), "main.typ", text).unwrap();
+        let world = project.snapshot();
+        let document = zetwerk_typst::compile(&world).document.unwrap();
+        zetwerk_typst::export_pdf(&document, &world).unwrap()
+    }
+
+    #[test]
+    fn an_agent_puts_in_pages_of_a_file_beside_the_document_only() {
+        let live = session(TEXT, AgentEdits::Live);
+        std::fs::write(live.directory.join("slides.pdf"), landscape_pdf(3)).unwrap();
+        let bridge = &live.bridge;
+        let insert = |file: &str, pages: Option<&str>, place: &str, expected: Option<u64>| Change {
+            what: ChangeKind::InsertPages(zetwerk_mcp::PagesWanted {
+                file: file.to_owned(),
+                pages: pages.map(str::to_owned),
+                place: Some(place.to_owned()),
+                fit: None,
+                counted: None,
+            }),
+            expected_revision: expected,
+            propose: false,
+            reason: None,
+        };
+        let put = bridge
+            .change(insert("slides.pdf", Some("2-3"), "after:3", Some(0)))
+            .unwrap();
+        assert_eq!(put["applied"], json!(true), "{put}");
+        assert_eq!(put["pages"], json!(4), "{put}");
+        assert_eq!(put["diagnostics"], json!([]), "{put}");
+        let outline = bridge.outline().unwrap();
+        let pages = outline["inserted_pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 2, "{outline}");
+        assert_eq!(
+            pages[0],
+            json!({ "line": 5, "shows": "pdf", "file": "slides.pdf", "page": 2,
+                    "fit": false, "counted": true })
+        );
+        // They are pages, not figures.
+        assert_eq!(bridge.figures().unwrap(), json!({ "figures": [] }));
+        // Not from outside the directory, not a page the file lacks,
+        // not a file that is none.
+        for (file, pages) in [
+            ("../slides.pdf", None),
+            ("/etc/passwd", None),
+            ("slides.pdf", Some("4")),
+            ("nowhere.pdf", None),
+            ("main.typ", None),
+        ] {
+            let refused = bridge.change(insert(file, pages, "end", None));
+            assert!(refused.is_err(), "{file}: {refused:?}");
+        }
+        assert!(
+            bridge
+                .change(insert("slides.pdf", None, "sideways", None))
+                .is_err()
+        );
+        // Where the user reviews changes, it is a proposal.
+        let proposing = session(TEXT, AgentEdits::Propose);
+        std::fs::write(proposing.directory.join("slides.pdf"), landscape_pdf(1)).unwrap();
+        let proposed = proposing
+            .bridge
+            .change(insert("slides.pdf", None, "end", None))
+            .unwrap();
+        assert_eq!(proposed["applied"], json!(false), "{proposed}");
+        let read = proposing.bridge.read_source(None, None).unwrap();
+        assert!(!read.contains("#page("), "{read}");
     }
 }
