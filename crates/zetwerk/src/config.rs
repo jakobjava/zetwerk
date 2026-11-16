@@ -10,6 +10,13 @@
 //! # window; with no window (`zetwerk mcp <file>`), the agent's.
 //! save = false
 //!
+//! [review]
+//! # How suggestions of agents are marked on the page: "all", only the
+//! # one under the cursor ("current"), or "none" (]p still finds them).
+//! marks = "all"
+//! # Whom an instruction made with g! is for: "document" or "everywhere".
+//! instructions = "document"
+//!
 //! [view]
 //! layout = "split"    # or "source", "page": what the window shows
 //! slides = false      # one page at a time, whole
@@ -59,6 +66,8 @@ pub struct Config {
     #[serde(default)]
     pub view: View,
     #[serde(default)]
+    pub review: Review,
+    #[serde(default)]
     pub power: Power,
     #[serde(default)]
     pub language: Checking,
@@ -98,6 +107,48 @@ impl Config {
                 block: insert.block,
             })
             .collect()
+    }
+}
+
+/// How reviewing with agents looks and acts.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Review {
+    #[serde(default)]
+    pub marks: ReviewMarks,
+    #[serde(default)]
+    pub instructions: Instructions,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewMarks {
+    #[default]
+    All,
+    Current,
+    None,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Instructions {
+    #[default]
+    Document,
+    Everywhere,
+}
+
+impl Review {
+    /// What the window is told.
+    pub fn settings(&self) -> zetwerk_app::viewer::review::Settings {
+        use zetwerk_app::viewer::review::Marks;
+        zetwerk_app::viewer::review::Settings {
+            marks: match self.marks {
+                ReviewMarks::All => Marks::All,
+                ReviewMarks::Current => Marks::Current,
+                ReviewMarks::None => Marks::None,
+            },
+            everywhere: self.instructions == Instructions::Everywhere,
+        }
     }
 }
 

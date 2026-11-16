@@ -234,6 +234,7 @@ impl Viewer {
     pub fn key(&mut self, press: KeyPress) {
         let plain = self.keymap.is_empty()
             || self.is_picking()
+            || self.is_reviewing()
             || self.is_grid()
             || self.is_jumping()
             || self.is_retyping();

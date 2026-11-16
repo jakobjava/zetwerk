@@ -30,6 +30,7 @@ mod pointer;
 pub mod refer;
 mod refused;
 mod registers;
+pub mod review;
 mod saving;
 mod slides;
 mod sources;
@@ -905,6 +906,8 @@ pub struct Viewer {
     language: language::Language,
     /// The notes on the text, and what reviewing keeps (see [`notes`]).
     notes: notes::Notes,
+    /// Suggestions of agents and what is made of them (see [`review`]).
+    review: review::Review,
     /// What is beside the pages: tags for what they show as nothing, and
     /// the compiler's complaints (see [`margin`]).
     margin: margin::Margin,
@@ -1029,6 +1032,7 @@ impl Viewer {
             clipboard: registers::Clipboard::default(),
             language: language::Language::default(),
             notes: notes::Notes::default(),
+            review: review::Review::default(),
             margin: margin::Margin::default(),
             refused: refused::Refused::default(),
             caret_at: None,
@@ -1083,6 +1087,7 @@ impl Viewer {
         }
         self.inserts.clone_from(&options.inserts);
         self.set_language(&options.language);
+        self.set_review(options.review);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
             self.ui = ui.clamp(UI_SMALLEST, UI_LARGEST);
             self.scale = self.display * self.ui;
@@ -1154,6 +1159,7 @@ impl Viewer {
             self.alert(format!("cannot write the journal: {err}"));
         }
         self.keep_notes();
+        self.keep_review();
     }
 
     /// The current revision and a snapshot of it to compile.
@@ -2109,6 +2115,7 @@ impl Viewer {
             || self.ui_command(command)
             || self.settings_command(command)
             || self.language_command(command)
+            || self.review_command(command)
             || self.notes_command(command)
             || self.refused_command(command)
             || self.vim_command(command)
@@ -2721,6 +2728,7 @@ impl Viewer {
     /// while the text is the text it complained about.
     fn source_marks(&self) -> Vec<(Range<usize>, Mark)> {
         let mut marked = self.agent_marks();
+        marked.extend(self.review_source_marks());
         marked.extend(self.step_stretches());
         if self.compiled_revision == Some(self.revision) {
             let file = self.file_id();
@@ -3238,6 +3246,7 @@ mod tests {
     mod left_behind;
     mod panels;
     mod parts;
+    mod review;
     mod speed;
     mod typing;
     mod typist;

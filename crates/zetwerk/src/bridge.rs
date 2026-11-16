@@ -1,8 +1,9 @@
 //! Lets the MCP server talk to the window.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zetwerk_app::app::{Handle, Request, Screenshot, Task};
@@ -12,10 +13,11 @@ use zetwerk_app::sections::Way;
 use zetwerk_app::viewer::agent::{AgentEdits, Outcome};
 use zetwerk_app::viewer::export::{Exported, Format, Pages, Wanted, What};
 use zetwerk_app::viewer::notes::{Author, Listed, NoteAnchor as Anchor};
+use zetwerk_app::viewer::review::{Agent, Kind as Suggested, Wanted as WantedSuggestion};
 use zetwerk_app::viewer::{Mode, Panes, Viewer};
 use zetwerk_mcp::{
-    Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, NewNote,
-    NoteAnchor, NoteAnswer, Place, Selection,
+    Caller, Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf,
+    NewNote, NewSuggestion, NoteAnchor, NoteAnswer, Place, Revision, Selection, Suggest,
 };
 
 /// How long the window may take to answer something it can answer at once.
@@ -162,6 +164,35 @@ fn made(
             };
             viewer.agent_move_section(line, way, expected, propose)
         }
+    }
+}
+
+/// The agent `caller` is, as reviewing names it; the one calling on
+/// this thread where none is given.
+fn agent_of(caller: Option<&Caller>) -> Agent {
+    let caller = caller.cloned().or_else(zetwerk_mcp::caller);
+    caller.map_or_else(Agent::unknown, |caller| Agent {
+        name: caller.name,
+        session: caller.session,
+    })
+}
+
+/// A suggestion as reviewing takes it.
+fn wanted(suggestion: NewSuggestion) -> WantedSuggestion {
+    WantedSuggestion {
+        kind: suggestion.kind,
+        old_str: suggestion.old_str,
+        section: suggestion.section,
+        line: suggestion.line,
+        new_str: suggestion.new_str,
+        position: suggestion.position,
+        move_to: suggestion.move_to,
+        reason: suggestion.reason,
+        category: suggestion.category,
+        confidence: suggestion.confidence,
+        importance: suggestion.importance,
+        alternatives: suggestion.alternatives,
+        insist: suggestion.insist,
     }
 }
 
@@ -345,7 +376,9 @@ impl Editor for Bridge {
             propose,
             reason,
         } = change;
-        let (outcome, made_ids, shown) = self.now(move |viewer| {
+        let agent = agent_of(None);
+        let moving = matches!(what, ChangeKind::MoveSection { .. });
+        let (outcome, made_ids, shown, suggestions) = self.now(move |viewer| {
             let first = viewer.next_proposal_id();
             let outcome = made(viewer, what, expected, propose);
             if let (Ok(Outcome::Proposed { .. }), Some(reason)) = (&outcome, &reason) {
@@ -356,15 +389,23 @@ impl Editor for Bridge {
             let ids: Vec<u64> = (first..viewer.next_proposal_id())
                 .filter(|id| viewer.proposals().iter().any(|proposal| proposal.id == *id))
                 .collect();
-            outcome.map(|outcome| (outcome, ids, viewer.shown_document()))
+            // What is proposed is a suggestion of this agent's.
+            let kind = moving.then_some(Suggested::Move);
+            let suggestions = match &outcome {
+                Ok(outcome) => viewer.adopt_outcome(outcome, &agent, kind),
+                Err(_) => Vec::new(),
+            };
+            outcome.map(|outcome| (outcome, ids, viewer.shown_document(), suggestions))
         })??;
         match outcome {
             Outcome::Proposed { id, revision } => Ok(json!({
                 "applied": false,
                 "proposal": id,
                 "proposals": made_ids,
+                "suggestions": suggestions,
                 "revision": revision,
-                "note": "shown to the user, who accepts or rejects it in the window",
+                "note": "shown to the user, who accepts or rejects it in the window; \
+                         list_suggestions tells what became of it",
             })),
             Outcome::Changed { revision, lines } => {
                 // What the compiler says to the text as it is by then, if
@@ -483,8 +524,10 @@ impl Editor for Bridge {
                 .proposals()
                 .iter()
                 .map(|proposal| {
+                    let suggestion = viewer.suggestion_of_proposal(proposal.id).map(|s| s.id);
                     let mut listed = json!({
                         "id": proposal.id,
+                        "suggestion": suggestion,
                         "line": line(proposal.range.start),
                         "old_str": proposal.old,
                         "new_str": proposal.new,
@@ -780,19 +823,107 @@ impl Editor for Bridge {
 
     fn answer_note(&self, answer: NoteAnswer) -> Result<Value, String> {
         let id = answer.id;
-        let proposal = self.now(move |viewer| {
+        let agent = agent_of(None);
+        let (proposal, suggestion) = self.now(move |viewer| {
             let change = answer
                 .change
                 .as_ref()
                 .map(|(old, new)| (old.as_str(), new.as_str()));
-            viewer.agent_answer_note(answer.id, &answer.text, change, answer.expected_revision)
+            let proposal =
+                viewer.agent_answer_note(answer.id, &answer.text, change, answer.expected_revision);
+            let made = viewer.adopt_proposals(Some(&agent), None, None);
+            proposal.map(|proposal| (proposal, made.first().map(|(_, id)| *id)))
         })??;
-        Ok(json!({ "answered": id, "proposal": proposal }))
+        Ok(json!({ "answered": id, "proposal": proposal, "suggestion": suggestion }))
     }
 
     fn resolve_note(&self, id: u64) -> Result<Value, String> {
         self.now(move |viewer| viewer.agent_resolve_note(id))??;
         Ok(json!({ "resolved": id }))
+    }
+
+    fn suggest(&self, caller: &Caller, suggest: Suggest) -> Result<Value, String> {
+        let agent = agent_of(Some(caller));
+        let batch: Vec<WantedSuggestion> = suggest.suggestions.into_iter().map(wanted).collect();
+        self.now(move |viewer| {
+            viewer.agent_suggest(
+                &batch,
+                suggest.request,
+                suggest.request_done,
+                suggest.expected_revision,
+                suggest.all_or_nothing,
+                &agent,
+            )
+        })?
+    }
+
+    fn suggestions(
+        &self,
+        states: &[String],
+        by: Option<&str>,
+        since: Option<u64>,
+    ) -> Result<Value, String> {
+        let (states, by) = (states.to_vec(), by.map(str::to_owned));
+        self.now(move |viewer| viewer.suggestions_listed(&states, by.as_deref(), since))?
+    }
+
+    fn revise_suggestion(&self, caller: &Caller, revision: Revision) -> Result<Value, String> {
+        let agent = agent_of(Some(caller));
+        self.now(move |viewer| {
+            viewer.agent_revise(
+                revision.id,
+                revision.new_str.as_deref(),
+                revision.reason.as_deref(),
+                revision.alternatives,
+                revision.message.as_deref(),
+                revision.expected_revision,
+                &agent,
+            )
+        })?
+    }
+
+    fn withdraw_suggestions(&self, caller: &Caller, ids: &[u64]) -> Result<Value, String> {
+        let (agent, ids) = (agent_of(Some(caller)), ids.to_vec());
+        self.now(move |viewer| viewer.agent_withdraw(&ids, &agent))?
+    }
+
+    fn brief(&self) -> Result<Value, String> {
+        self.now(Viewer::brief_listed)
+    }
+
+    fn brief_text(&self) -> Option<String> {
+        self.now(Viewer::brief_text).ok()
+    }
+
+    fn review_summary(&self) -> Option<Value> {
+        self.now(Viewer::review_summary).ok()
+    }
+
+    fn wait_for_review(
+        &self,
+        since: Option<u64>,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, String> {
+        // Waited for here, on the thread of the agent's call: the window
+        // only bumps a count as the author acts.
+        let signal = self.now(|viewer| viewer.review_signal())?;
+        let since = since.unwrap_or_else(|| signal.now());
+        let until = Instant::now() + timeout;
+        while signal.now() <= since {
+            let left = until.saturating_duration_since(Instant::now());
+            if cancelled.load(Ordering::Relaxed) || left.is_zero() {
+                return Ok(json!({
+                    "cursor": since,
+                    "events": [],
+                    "requests": [],
+                    "brief_changed": false,
+                    "timed_out": left.is_zero(),
+                }));
+            }
+            signal.wait_past(since, left.min(Duration::from_millis(500)));
+        }
+        self.now(move |viewer| viewer.review_news(since))
     }
 }
 
@@ -868,6 +999,7 @@ mod tests {
             inserts: Vec::new(),
             language: zetwerk_language::Settings::default(),
             templates: None,
+            review: zetwerk_app::viewer::review::Settings::default(),
         }
     }
 
@@ -1670,5 +1802,217 @@ mod tests {
             })
             .unwrap();
         assert_eq!(bridge.state().unwrap().open_questions, 0);
+    }
+
+    /// Keys the author types, in the window the session has none of.
+    fn author(bridge: &Bridge, typed: &str) {
+        let typed = typed.to_owned();
+        bridge
+            .now(move |viewer| {
+                for key in keys::parse(&typed).unwrap() {
+                    viewer.key(key);
+                }
+            })
+            .unwrap();
+    }
+
+    fn suggestion(kind: &str, old: &str, new: Option<&str>, category: &str) -> NewSuggestion {
+        NewSuggestion {
+            kind: kind.to_owned(),
+            old_str: Some(old.to_owned()),
+            new_str: new.map(str::to_owned),
+            reason: format!("Better for {category}."),
+            category: Some(category.to_owned()),
+            ..NewSuggestion::default()
+        }
+    }
+
+    #[test]
+    fn a_whole_review_round_is_suggested_decided_answered_and_recorded() {
+        let text = "= Abstract\nWe study the colour of foxes. Our results are new.\n\n\
+                    = Methods\nThe quick brown fox jumps over the lazy dog. We recieve data \
+                    and analyse it carefuly.\n\nResults are good. This is very very important.\n";
+        let session = session(text, AgentEdits::Propose);
+        let bridge = &session.bridge;
+        let claude = Caller {
+            name: "claude-code".to_owned(),
+            session: "s7".to_owned(),
+        };
+        let batch = vec![
+            NewSuggestion {
+                confidence: Some("high".to_owned()),
+                ..suggestion("replace", "recieve", Some("receive"), "spelling")
+            },
+            suggestion("replace", "carefuly", Some("carefully"), "spelling"),
+            suggestion("replace", "very very", Some("very"), "concision"),
+            suggestion(
+                "replace",
+                "Results are good.",
+                Some("The results are good."),
+                "grammar",
+            ),
+            suggestion("replace", "quick brown", Some("fast brown"), "tone"),
+            suggestion("replace", "lazy", Some("sleepy"), "tone"),
+            NewSuggestion {
+                kind: "question".to_owned(),
+                old_str: Some("analyse".to_owned()),
+                reason: "Which method?".to_owned(),
+                ..NewSuggestion::default()
+            },
+            suggestion("replace", "colour", Some("color"), "spelling"),
+            suggestion(
+                "replace",
+                "Our results are new.",
+                Some("Our results are novel."),
+                "tone",
+            ),
+            NewSuggestion {
+                kind: "comment".to_owned(),
+                old_str: None,
+                section: Some("Methods".to_owned()),
+                reason: "Too short.".to_owned(),
+                ..NewSuggestion::default()
+            },
+        ];
+        let suggest = Suggest {
+            suggestions: batch,
+            expected_revision: Some(0),
+            ..Suggest::default()
+        };
+        let answer = bridge.suggest(&claude, suggest).unwrap();
+        assert_eq!(answer["made"], 10, "{answer}");
+        let id = |index: usize| answer["results"][index]["id"].as_u64().unwrap();
+        // Four rejected, one of them made an instruction.
+        author(
+            bridge,
+            &format!(
+                ":review go {}<CR>:reject British spelling stays<CR>g!<CR>",
+                id(7)
+            ),
+        );
+        author(bridge, &format!(":review go {}<CR>gr", id(8)));
+        author(bridge, &format!(":review go {}<CR>gr", id(9)));
+        author(
+            bridge,
+            &format!(":review go {}<CR>:reject keep the emphasis<CR>", id(2)),
+        );
+        // Three accepted, one rewritten, two answered.
+        author(bridge, ":review accept spelling<CR>");
+        author(bridge, &format!(":review go {}<CR>ga", id(3)));
+        author(
+            bridge,
+            &format!(":review go {}<CR>gA<BS><BS><BS><BS><BS>grey<Esc>", id(4)),
+        );
+        author(bridge, &format!(":review go {}<CR>gqtoo cute<CR>", id(5)));
+        author(
+            bridge,
+            &format!(":review go {}<CR>gqthe usual one<CR>", id(6)),
+        );
+        let now = bridge.read_source(None, None).unwrap();
+        assert!(now.contains("The fast grey fox"), "{now}");
+        assert!(
+            now.contains("We receive data and analyse it carefully."),
+            "{now}"
+        );
+        assert!(now.contains("The results are good."), "{now}");
+        assert!(now.contains("the colour of"), "{now}");
+
+        // The agent learns what became of each.
+        let listed = bridge.suggestions(&[], Some("claude-code"), None).unwrap();
+        let state = |index: usize| {
+            let all = listed["suggestions"].as_array().unwrap();
+            let found = all
+                .iter()
+                .find(|s| s["id"].as_u64() == Some(id(index)))
+                .unwrap();
+            found["state"].as_str().unwrap().to_owned()
+        };
+        let states: Vec<String> = (0..10).map(state).collect();
+        assert_eq!(
+            states,
+            [
+                "accepted",
+                "accepted",
+                "rejected",
+                "accepted",
+                "rewritten",
+                "waiting",
+                "waiting",
+                "rejected",
+                "rejected",
+                "rejected"
+            ],
+            "{listed}"
+        );
+        assert_eq!(
+            listed["brief"][0]["text"], "British spelling stays",
+            "{listed}"
+        );
+        let rewritten = &listed["suggestions"].as_array().unwrap()[4];
+        assert_eq!(rewritten["outcome"]["after"], "fast grey", "{listed}");
+        // Told at once what happened since the start; and nothing more
+        // after the cursor it was given.
+        let news = bridge
+            .wait_for_review(Some(0), Duration::from_secs(5), &AtomicBool::new(false))
+            .unwrap();
+        assert!(news.to_string().contains("too cute"), "{news}");
+        let cursor = news["cursor"].as_u64().unwrap();
+        let quiet = bridge
+            .wait_for_review(
+                Some(cursor),
+                Duration::from_millis(50),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(quiet["timed_out"], true, "{quiet}");
+        // It answers the author with a new version; and is refused when
+        // it suggests what the author refused for good.
+        let revised = bridge
+            .revise_suggestion(
+                &claude,
+                Revision {
+                    id: id(5),
+                    new_str: Some("drowsy".to_owned()),
+                    message: Some("Plainer, then.".to_owned()),
+                    ..Revision::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(revised["state"], "answered", "{revised}");
+        let again = bridge
+            .suggest(
+                &claude,
+                Suggest {
+                    suggestions: vec![suggestion("replace", "colour", Some("color"), "spelling")],
+                    ..Suggest::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(again["results"][0]["status"], "contradicts", "{again}");
+        assert!(
+            bridge
+                .brief_text()
+                .unwrap()
+                .contains("British spelling stays")
+        );
+        assert!(bridge.review_summary().unwrap()["open_suggestions"].as_u64() == Some(2));
+        // The record says all of it.
+        author(bridge, ":review record<CR>");
+        let record = std::fs::read_to_string(session.directory.join("main.review.md")).unwrap();
+        for said in [
+            "rejected it: `British spelling stays`",
+            "made it a standing instruction: `British spelling stays`",
+            "accepted it: `recieve` became `receive`",
+            "rewrote it: `quick brown` became `fast grey`",
+            "said: `too cute`",
+            "revised it to `drowsy`",
+            "by claude-code (session s7)",
+            "1. British spelling stays",
+        ] {
+            assert!(record.contains(said), "{said:?} not in\n{record}");
+        }
+        // Withdrawn by the agent: decided ones are not.
+        assert!(bridge.withdraw_suggestions(&claude, &[id(0)]).is_err());
+        assert!(bridge.withdraw_suggestions(&claude, &[id(5)]).is_ok());
     }
 }
