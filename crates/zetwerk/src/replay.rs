@@ -155,7 +155,7 @@ fn drive(
     settled()?;
     let stage = recorded.stage.clone();
     task(Box::new(move |viewer: &mut Viewer| {
-        viewer.report_stage(&stage)
+        viewer.report_stage(&stage);
     }))?;
     settled()?;
     let pauses: Vec<Duration> = recorded

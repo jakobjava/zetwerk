@@ -250,7 +250,7 @@ struct Seen {
 
 /// The thread that writes reports, one after the other.
 struct Worker {
-    jobs: Option<Sender<(Job, Receiver<Result<Picture, String>>)>>,
+    jobs: Option<Sender<(Job, PictureTaken)>>,
     done: Receiver<Result<String, String>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -259,7 +259,7 @@ impl Worker {
     /// Starts the thread; `wake` is called from it whenever a report is
     /// written, or could not be.
     fn spawn(wake: Box<dyn Fn() + Send>) -> std::io::Result<Self> {
-        let (jobs, waiting) = mpsc::channel::<(Job, Receiver<Result<Picture, String>>)>();
+        let (jobs, waiting) = mpsc::channel::<(Job, PictureTaken)>();
         let (finished, done) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("zetwerk-report".into())
@@ -326,6 +326,10 @@ pub(super) struct Recorder {
 
 /// The pixels of the window: width, height, and rows of RGBA.
 type Picture = (u32, u32, Vec<u8>);
+/// What the window gives the thread that writes a report: the picture.
+type PictureTaken = Receiver<Result<Picture, String>>;
+/// Files by their names in the document's directory, and their texts.
+type Files = Vec<(String, Arc<str>)>;
 
 impl Default for Recorder {
     fn default() -> Self {
@@ -874,10 +878,7 @@ impl Viewer {
         };
         let first_time = !reports.exists();
         self.mark_report_keys(chord);
-        let job = match self.report_job(&reports, note) {
-            Ok(job) => job,
-            Err(why) => return self.alert(format!("the report could not be written: {why}")),
-        };
+        let job = self.report_job(&reports, note);
         let first_word = if first_time {
             " — a report holds the text and what was typed; it stays on this machine and \
              is never sent anywhere (:reports lists them, and deletes them)"
@@ -946,7 +947,7 @@ impl Viewer {
 
     /// Gathers what goes into a report: what is quick to copy is copied
     /// here, the rest is done by the thread that writes it.
-    fn report_job(&mut self, reports: &Path, note: String) -> Result<Job, String> {
+    fn report_job(&mut self, reports: &Path, note: String) -> Job {
         let now = SystemTime::now();
         let stamp = stamp(now);
         let mut directory = reports.join(&stamp);
@@ -1001,7 +1002,7 @@ impl Viewer {
             .filter(|path| !open.contains(path))
             .collect();
         let state = self.state_text(now, &note, start.as_ref().map(|start| &*start.kept), &name);
-        Ok(Job {
+        Job {
             directory,
             root,
             note,
@@ -1014,7 +1015,7 @@ impl Viewer {
             state,
             config: self.report.settings.config.clone(),
             document: self.document.clone(),
-        })
+        }
     }
 
     /// What `state.txt` says, but for the fonts the document uses (the
@@ -1244,8 +1245,8 @@ struct Job {
     /// What Vim remembered then (see `Engine::memory`).
     memory: Option<String>,
     /// Texts put in on the way: the number of the moment, and the files.
-    between: Vec<(usize, Vec<(String, Arc<str>)>)>,
-    after: Vec<(String, Arc<str>)>,
+    between: Vec<(usize, Files)>,
+    after: Files,
     needs: Vec<PathBuf>,
     state: String,
     config: Option<String>,
@@ -1255,7 +1256,7 @@ struct Job {
 impl Job {
     /// Writes the report, with the picture of the window if `picture`
     /// brings one. Says where it went.
-    fn run(self, picture: Option<&Receiver<Result<Picture, String>>>) -> Result<String, String> {
+    fn run(self, picture: Option<&PictureTaken>) -> Result<String, String> {
         let directory = &self.directory;
         let private = |path: &Path| {
             let mut builder = std::fs::DirBuilder::new();
@@ -1348,18 +1349,21 @@ impl Job {
 
 /// The fonts the pages of `document` use, each once.
 fn fonts_of(document: &PagedDocument) -> Vec<String> {
-    fn walk(frame: &Frame, found: &mut HashSet<typst::text::Font>) {
+    fn walk(frame: &Frame, found: &mut Vec<typst::text::Font>) {
         for (_, item) in frame.items() {
             match item {
                 FrameItem::Group(group) => walk(&group.frame, found),
                 FrameItem::Text(text) => {
-                    found.insert(text.font.font().clone());
+                    let font = text.font.font();
+                    if !found.contains(font) {
+                        found.push(font.clone());
+                    }
                 }
                 _ => {}
             }
         }
     }
-    let mut found = HashSet::new();
+    let mut found = Vec::new();
     for page in document.pages() {
         walk(&page.frame, &mut found);
     }
@@ -1376,10 +1380,11 @@ fn fonts_of(document: &PagedDocument) -> Vec<String> {
 
 /// The moments as `keys.txt` has them; the texts set on the way go to
 /// `between`, numbered.
+#[allow(clippy::too_many_lines, reason = "a line for each thing that happens")]
 fn keys_text(
     moments: &[Moment],
     name: &dyn Fn(FileId) -> String,
-    between: &mut Vec<(usize, Vec<(String, Arc<str>)>)>,
+    between: &mut Vec<(usize, Files)>,
 ) -> String {
     let mut text = String::new();
     let keys: String = moments
@@ -1601,7 +1606,7 @@ fn stamp(now: SystemTime) -> String {
         .map_or(0, |since| since.as_secs());
     let (days, rest) = (seconds / 86_400, seconds % 86_400);
     // Howard Hinnant's days from the civil calendar, backwards.
-    let z = days as i64 + 719_468;
+    let z = i64::try_from(days).unwrap_or(0) + 719_468;
     let era = z.div_euclid(146_097);
     let day_of_era = z.rem_euclid(146_097);
     let year_of_era =

@@ -108,7 +108,12 @@ fn a_report_holds_what_happened_and_plays_again_to_the_same_text() {
     // The keys from the first, as --keys takes them, lead to the text.
     let recorded = Recorded::read(report).unwrap();
     assert_eq!(recorded.stage.file, "main.typ");
-    assert!(!recorded.steps.is_empty());
+    assert!(
+        recorded
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::Key { .. }))
+    );
     assert_eq!(replayed(report, &directory), Vec::<String>::new());
     // Said once; and nothing was typed into the text by it.
     press(&mut viewer, ":report<CR>");

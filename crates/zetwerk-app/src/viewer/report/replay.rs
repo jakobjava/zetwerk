@@ -36,6 +36,10 @@ pub const CONFIG_MARK: &str = "----- config.toml -----";
 
 /// What the window was like at the first key: enough to set it so again.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the window, not states of one thing"
+)]
 pub struct Stage {
     /// The file being edited, by its name in the document's directory,
     /// and the cursor in it (a byte); whether it was typing.
@@ -234,18 +238,18 @@ impl Recorded {
             std::fs::read_to_string(directory.join(name))
                 .map_err(|err| format!("cannot read {}: {err}", directory.join(name).display()))
         };
-        let state = read(Path::new("state.txt"))?;
-        let (state, config) = match state.split_once(CONFIG_MARK) {
-            Some((state, config)) => (
-                state.to_owned(),
+        let written = read(Path::new("state.txt"))?;
+        let (written, config) = match written.split_once(CONFIG_MARK) {
+            Some((before_mark, config)) => (
+                before_mark.to_owned(),
                 Some(config.strip_prefix('\n').unwrap_or(config).to_owned()),
             ),
-            None => (state, None),
+            None => (written, None),
         };
-        let mut stage = Stage::read(&state)?;
+        let mut stage = Stage::read(&written)?;
         stage.memory = read(Path::new("vim.txt")).unwrap_or_default();
         let field = |name: &str| {
-            state
+            written
                 .lines()
                 .find_map(|line| line.strip_prefix(name)?.strip_prefix(": "))
                 .map(str::to_owned)
@@ -261,7 +265,7 @@ impl Recorded {
             before.push((name.clone(), read(&Path::new("before").join(name))?));
         }
         let mut after = Vec::new();
-        for line in state.lines() {
+        for line in written.lines() {
             if let Some(open) = line.strip_prefix("open: ") {
                 let name = open.trim_end_matches(" (changes not written)");
                 after.push((name.to_owned(), read(&Path::new("after").join(name))?));
@@ -464,7 +468,6 @@ fn steps(keys: &str, directory: &Path, inexact: &mut Vec<String>) -> Result<Vec<
                 steps.push(Step::Cursor(cursor));
             }
             "disk" => inexact.push(format!("a file changed on disk: {rest}")),
-            "agent" => {}
             _ => {}
         }
     }
@@ -563,9 +566,9 @@ pub fn replay_with(
 ) -> Result<Replayed, String> {
     let recorded = Recorded::read(report)?;
     let document = scratch.join("document");
-    let state = scratch.join("state");
+    let journals = scratch.join("state");
     let _ = std::fs::remove_dir_all(&document);
-    let _ = std::fs::remove_dir_all(&state);
+    let _ = std::fs::remove_dir_all(&journals);
     recorded.copy_to(&document)?;
     let env = Environment::new(recorded.font_set);
     let main = document.join(&recorded.main);
@@ -576,12 +579,12 @@ pub fn replay_with(
     let file = project
         .file_id(&edited)
         .ok_or_else(|| format!("{first} is not in the document"))?;
-    let (editor, opened) = Editor::open(&edited, &state, file).map_err(|err| err.to_string())?;
+    let (editor, opened) = Editor::open(&edited, &journals, file).map_err(|err| err.to_string())?;
     let stage = &recorded.stage;
     let mut viewer = Viewer::new(env, project, stage.window, stage.display)
         .ok_or("no usable fonts")?
         .editing(editor, &opened);
-    viewer.state_dir = Some(state);
+    viewer.state_dir = Some(journals);
     viewer.set_keymap(recorded.keymap());
     // The document had been typeset before the first key: so here.
     compile(&mut viewer, None, 3.0);

@@ -922,6 +922,7 @@ pub struct Viewer {
 impl Viewer {
     /// A viewer for `project` in a window of `window` device pixels.
     #[must_use]
+    #[allow(clippy::too_many_lines, reason = "a line for each field")]
     pub fn new(
         env: Arc<Environment>,
         project: Project,

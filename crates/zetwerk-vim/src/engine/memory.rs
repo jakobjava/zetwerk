@@ -89,6 +89,7 @@ impl Engine {
 
     /// Takes back what [`Engine::memory`] wrote, in place of what it
     /// remembers of those things now.
+    #[allow(clippy::too_many_lines, reason = "an arm for each thing remembered")]
     pub fn recall(&mut self, memory: &str) {
         self.registers.clear();
         self.last_search = None;
