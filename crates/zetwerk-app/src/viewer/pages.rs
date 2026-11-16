@@ -476,7 +476,10 @@ impl Viewer {
             "list" => self.list_pages(Some(rest)),
             "open" => self.open_page_entry(rest),
             "go" => self.go_to_page(rest),
-            "choose" => self.choose_what(rest),
+            "choose" => {
+                self.choose_what(rest);
+                Ok(())
+            }
             "file-for" => {
                 let (place, file) = rest.split_once(' ').unwrap_or((rest, ""));
                 self.ask_pages_of(place, file.trim())
@@ -508,7 +511,10 @@ impl Viewer {
                 let shown = self.open_page_entry(rest);
                 switched.and(shown)
             }
-            "file" => self.ask_other_file(&part()),
+            "file" => {
+                self.ask_other_file(&part());
+                Ok(())
+            }
             "file!" => {
                 let (key, file) = (part(), part());
                 let unit = unit_key(&key)?;
@@ -543,20 +549,19 @@ impl Viewer {
         let mut keys: Vec<String> = Vec::new();
         if let Some(facts) = self.page_facts() {
             for (index, fact) in facts.iter().enumerate() {
-                let (key, what, more) = match fact
+                let (key, what, more) = if let Some((unit, page)) = fact
                     .unit
                     .and_then(|unit| pages.get(unit).map(|page| (unit, page)))
                 {
-                    Some((unit, page)) => (format!("u{unit}"), page.called(), described(page)),
-                    None => {
-                        let words = fact.words.trim();
-                        let what = if words.is_empty() {
-                            "(nothing of this file)".to_owned()
-                        } else {
-                            format!("{words}…")
-                        };
-                        (format!("p{index}"), what, String::new())
-                    }
+                    (format!("u{unit}"), page.called(), described(page))
+                } else {
+                    let words = fact.words.trim();
+                    let what = if words.is_empty() {
+                        "(nothing of this file)".to_owned()
+                    } else {
+                        format!("{words}…")
+                    };
+                    (format!("p{index}"), what, String::new())
                 };
                 items.push((
                     format!("{:>3}  {what}\t{more}", index + 1),
@@ -751,7 +756,7 @@ impl Viewer {
     /// What is to be put in `place` (see [`Viewer::resolve_place`]): the
     /// files beside the document, a blank page, a page break, or a file
     /// typed.
-    fn choose_what(&mut self, place: &str) -> Result<(), String> {
+    fn choose_what(&mut self, place: &str) {
         let endings: Vec<&str> = page_text::PDF_ENDINGS
             .iter()
             .chain(page_text::IMAGE_ENDINGS)
@@ -782,7 +787,6 @@ impl Viewer {
         let free = Some(format!("pages file-for {place} "));
         self.open_picker_for("put in", items, 0, String::new(), free);
         self.picker_by_itself();
-        Ok(())
     }
 
     /// Where the file `typed` is: as typed from the folder of the file
@@ -858,7 +862,7 @@ impl Viewer {
         pages: &str,
         sure: bool,
     ) -> Result<(), String> {
-        let chosen = self.chosen_pages(file, pages)?;
+        let chosen = chosen_pages(file, pages)?;
         if !sure && chosen.len() > page_text::MANY_PAGES {
             let count = chosen.len();
             let file_word = word_of(file);
@@ -915,33 +919,6 @@ impl Viewer {
         items.push(("at the end of the document".to_owned(), put("end")));
         self.open_picker("where?", items, 0);
         Ok(())
-    }
-
-    /// The pages of `file` that `pages` names, as they are to be
-    /// written; one of a blank page or a page break for `:blank` and
-    /// `:break`.
-    fn chosen_pages(&self, file: &str, pages: &str) -> Result<Vec<Shows>, String> {
-        match file {
-            ":blank" => return Ok(vec![Shows::Blank]),
-            ":break" => return Ok(vec![Shows::Other]),
-            _ => {}
-        }
-        let (made, name) = read_made(file)?;
-        Ok(match made {
-            Made::Pdf { sizes, .. } => page_text::page_numbers(pages, sizes.len())?
-                .into_iter()
-                .map(|page| Shows::Pdf {
-                    file: String::new(),
-                    page,
-                })
-                .collect(),
-            Made::Image if matches!(pages.trim(), "" | "all" | "1") => {
-                vec![Shows::Image {
-                    file: String::new(),
-                }]
-            }
-            Made::Image => return Err(format!("{name} is an image: it is one page")),
-        })
     }
 
     /// Where `place` is in the text, and how that is said: `para` after
@@ -1028,7 +1005,7 @@ impl Viewer {
     /// a page break, `:break`) in at `place`, as one step: the file is
     /// brought in beside the document first, where it is not there.
     fn put_pages(&mut self, place: &str, file: &str, pages: &str) -> Result<(), String> {
-        let shows = self.chosen_pages(file, pages)?;
+        let shows = chosen_pages(file, pages)?;
         let (at, told) = self.resolve_place(place)?;
         let editor = self.editor.as_ref().ok_or(NOT_EDITING)?;
         let (block, what, copied) = match file {
@@ -1226,7 +1203,7 @@ impl Viewer {
 
     /// Asks which file page put in `key` (and those of its file beside
     /// it) is to show instead.
-    fn ask_other_file(&mut self, key: &str) -> Result<(), String> {
+    fn ask_other_file(&mut self, key: &str) {
         let endings: Vec<&str> = page_text::PDF_ENDINGS
             .iter()
             .chain(page_text::IMAGE_ENDINGS)
@@ -1248,7 +1225,6 @@ impl Viewer {
             Target::Nothing,
         ));
         self.open_picker_for("file", items, 0, format!("pages open {key}"), Some(set));
-        Ok(())
     }
 
     /// Makes page put in `unit`, and those of its file beside it, show
@@ -1753,6 +1729,33 @@ fn folder_of(path: &Path) -> PathBuf {
         Some(folder) if !folder.as_os_str().is_empty() => folder.to_path_buf(),
         _ => PathBuf::from("."),
     }
+}
+
+/// The pages of `file` that `pages` names, as they are to be
+/// written; one of a blank page or a page break for `:blank` and
+/// `:break`.
+fn chosen_pages(file: &str, pages: &str) -> Result<Vec<Shows>, String> {
+    match file {
+        ":blank" => return Ok(vec![Shows::Blank]),
+        ":break" => return Ok(vec![Shows::Other]),
+        _ => {}
+    }
+    let (made, name) = read_made(file)?;
+    Ok(match made {
+        Made::Pdf { sizes, .. } => page_text::page_numbers(pages, sizes.len())?
+            .into_iter()
+            .map(|page| Shows::Pdf {
+                file: String::new(),
+                page,
+            })
+            .collect(),
+        Made::Image if matches!(pages.trim(), "" | "all" | "1") => {
+            vec![Shows::Image {
+                file: String::new(),
+            }]
+        }
+        Made::Image => return Err(format!("{name} is an image: it is one page")),
+    })
 }
 
 /// What the file at `path` is, and its name.

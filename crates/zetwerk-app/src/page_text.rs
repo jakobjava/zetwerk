@@ -572,9 +572,7 @@ pub fn with_put(text: &str, at: usize, block: &str, pages: &[Inserted]) -> (Stri
     } else {
         "\n\n"
     };
-    let trail = if after == text.len() {
-        "\n"
-    } else if page_starts(after) {
+    let trail = if after == text.len() || page_starts(after) {
         "\n"
     } else {
         "\n\n"
@@ -594,9 +592,7 @@ pub fn without(text: &str, range: Range<usize>, pages: &[Inserted]) -> String {
     let page_starts = |at: usize| pages.iter().any(|page| page.range.start == at);
     let between = if before == 0 {
         ""
-    } else if after == text.len() {
-        "\n"
-    } else if page_ends(before) && page_starts(after) {
+    } else if after == text.len() || (page_ends(before) && page_starts(after)) {
         "\n"
     } else {
         "\n\n"
@@ -897,9 +893,8 @@ pub fn brought_in(
                 let name = named(&path, &folder).unwrap_or(name);
                 return Ok((name, None));
             }
-            Ok(_) => continue,
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => continue,
+            Ok(_) | Err(_) => continue,
         }
         let written = std::fs::OpenOptions::new()
             .write(true)
