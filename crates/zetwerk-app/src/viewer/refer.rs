@@ -471,8 +471,50 @@ fn being_typed(source: &Source, cursor: usize) -> Option<usize> {
     let before = source.text().get(..cursor)?;
     let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | ':' | '.');
     let at = before.trim_end_matches(name).len().checked_sub(1)?;
-    let begins = before.get(at..)?.starts_with('@') && !before.get(..at)?.ends_with('\\');
+    let begins = before.get(at..)?.starts_with('@')
+        && (!before.get(..at)?.ends_with('\\') || asked(source, at));
     (begins && typst_text::ground(source, at) == Ground::Markup).then_some(at)
+}
+
+/// Whether the `@` at byte `at` of `source` is written `\@` to be shown
+/// as it is while a reference is asked for: as `@` is typed on a page
+/// (see [`typst_text::typed`]), not behind a letter (an address).
+fn asked(source: &Source, at: usize) -> bool {
+    let text = source.text();
+    let Some(sign) = at.checked_sub(1) else {
+        return false;
+    };
+    let escape = typst::syntax::LinkedNode::new(source.root())
+        .leaf_at(sign, typst::syntax::Side::After)
+        .is_some_and(|leaf| {
+            leaf.kind() == typst::syntax::SyntaxKind::Escape && leaf.range() == (sign..at + 1)
+        });
+    escape && !text[..sign].ends_with(char::is_alphanumeric)
+}
+
+/// Where the reference whose `@` is at byte `at` of `source` begins: at
+/// its backslash, where it is asked for.
+fn reference_start(source: &Source, at: usize) -> usize {
+    if source.text()[..at].ends_with('\\') {
+        at - 1
+    } else {
+        at
+    }
+}
+
+/// `reference`, put in where the cursor is at byte `cursor` of `text`:
+/// with a backslash behind it where `text` goes on there with what would
+/// be more of its name.
+fn sealed(text: &str, cursor: usize, reference: String) -> String {
+    let goes_on = text[cursor..]
+        .chars()
+        .next()
+        .is_some_and(|c| typst::syntax::is_id_continue(c) || matches!(c, '.' | ':'));
+    if goes_on && reference.starts_with('@') {
+        format!("{reference}\\")
+    } else {
+        reference
+    }
 }
 
 /// The offers for the things `marks` found in the file being edited,
@@ -636,11 +678,20 @@ impl Viewer {
                 labels.insert(offer.label.as_str());
             }
         }
-        // What else Typst knows a label of.
-        self.project.set_source(source.clone());
+        // What else Typst knows a label of: asked as if the `@` were not
+        // written to show as itself.
+        let (asked_of, cursor) = if asked(&source, at) {
+            let mut code = source.clone();
+            code.edit(at - 1..at, "");
+            (code, cursor - 1)
+        } else {
+            (source.clone(), cursor)
+        };
+        self.project.set_source(asked_of.clone());
         let world = self.project.snapshot();
+        self.project.set_source(source.clone());
         let document = self.document.as_deref();
-        let own = zetwerk_typst::complete(&world, document, &source, cursor, false);
+        let own = zetwerk_typst::complete(&world, document, &asked_of, cursor, false);
         let mut seen = HashSet::new();
         let others = own
             .map(|(_, candidates)| candidates)
@@ -670,9 +721,10 @@ impl Viewer {
             let (source, cursor) = (editor.source(), editor.cursor());
             let at = being_typed(source, cursor)?;
             let typed = source.text().get(at + 1..cursor)?.to_owned();
-            Some((at, typed, source.text().len(), editor.file()))
+            let start = reference_start(source, at);
+            Some((at, typed, source.text().len(), editor.file(), start))
         });
-        let Some((at, typed, length, file)) = found else {
+        let Some((at, typed, length, file, start)) = found else {
             self.refer.listed = None;
             return false;
         };
@@ -695,7 +747,7 @@ impl Viewer {
                 // else, that of the `@` too.
                 let from = match offer.way() {
                     Way::Plain => at + 1,
-                    Way::Named | Way::Make => at,
+                    Way::Named | Way::Make => start,
                 };
                 let entry = Entry {
                     candidate: candidate.clone(),
@@ -780,18 +832,25 @@ impl Viewer {
         let Some(typed) = editor.text().get(at + 1..cursor).map(str::to_owned) else {
             return false;
         };
+        // Asked for on a page, the `@` is written to show as itself
+        // until something is chosen: it goes with what was typed.
+        let start = reference_start(editor.source(), at);
+        let signs = at + 1 - start;
         match chosen {
             // All of it is typed already: the key is for the text.
-            Chosen::Label(label) if typed == label => return false,
+            Chosen::Label(label) if typed == label && signs == 1 => return false,
             Chosen::Label(label) => {
-                let within = label.len();
-                let press = editor.completed(typed.chars().count(), label, within);
+                let reference = sealed(editor.text(), cursor, format!("@{label}"));
+                let within = label.len() + 1;
+                let replaced = typed.chars().count() + signs;
+                let press = editor.completed(replaced, reference, within);
                 self.completion = None;
                 self.editor_key(press);
             }
             Chosen::Named(reference) => {
                 let within = reference.len();
-                let press = editor.completed(typed.chars().count() + 1, reference, within);
+                let reference = sealed(editor.text(), cursor, reference);
+                let press = editor.completed(typed.chars().count() + signs, reference, within);
                 self.completion = None;
                 self.editor_key(press);
                 self.notice(
@@ -805,6 +864,59 @@ impl Viewer {
             }
         }
         true
+    }
+
+    /// A key that ends a reference asked for on a page and typed out
+    /// without choosing from the list: a blank or a mark, Escape, Enter
+    /// or Tab where nothing is listed. Where something is labelled with
+    /// the name typed, it is referred to; else what was typed stays as it
+    /// shows, an `@` and a word.
+    pub(super) fn refer_end(&mut self, press: KeyPress) {
+        let ends = match press.key {
+            Key::Escape => true,
+            Key::Enter | Key::Tab => self.completion.is_none(),
+            Key::Char(c) => {
+                !(press.ctrl || typst::syntax::is_id_continue(c) || matches!(c, '.' | ':'))
+            }
+            _ => false,
+        };
+        let Some(editor) = self
+            .editor
+            .as_mut()
+            .filter(|editor| ends && editor.mode() == editor::Mode::Insert)
+        else {
+            return;
+        };
+        let (source, cursor) = (editor.source(), editor.cursor());
+        let Some(at) = being_typed(source, cursor).filter(|at| asked(source, *at)) else {
+            return;
+        };
+        let text = source.text();
+        let typed = &text[at + 1..cursor];
+        let name = typed.trim_end_matches(['.', ':']);
+        let Some(listed) = self.refer.listed.as_ref().filter(|listed| listed.at == at) else {
+            return;
+        };
+        let offer = listed
+            .offers
+            .iter()
+            .find(|offer| offer.labelled && offer.label == name);
+        let reference = match offer.map(Offer::way) {
+            Some(Way::Plain) => format!("@{typed}"),
+            Some(Way::Named) => {
+                offer.map(Offer::reference).unwrap_or_default() + &typed[name.len()..]
+            }
+            None if listed.others.iter().any(|other| other.label == name) => format!("@{typed}"),
+            Some(Way::Make) | None => return,
+        };
+        if name.is_empty() {
+            return;
+        }
+        let within = reference.len();
+        let reference = sealed(text, cursor, reference);
+        let replaced = typed.chars().count() + 2;
+        let press = editor.completed(replaced, reference, within);
+        self.editor_key(press);
     }
 
     /// Makes `offer`, a thing of the file being edited, something a
@@ -832,8 +944,18 @@ impl Viewer {
         let label = (!offer.labelled).then_some(offer.label.as_str());
         let number = offer.kind == Kind::Equation && !offer.numbered;
         let reference = offer.reference();
-        let mut edits = vec![(at..cursor, reference)];
+        let length = reference.len();
+        let start = reference_start(editor.source(), at);
+        let mut edits = vec![(start..cursor, sealed(text, cursor, reference))];
         edits.extend(ref_text::prepared(text, target, label, number));
+        // Where the reference will begin: behind what is put in before
+        // it.
+        let shift: isize = edits
+            .iter()
+            .filter(|(range, _)| range.end <= start && range.start < start)
+            .map(|(range, with)| with.len().cast_signed() - range.len().cast_signed())
+            .sum();
+        let sealed = edits[0].1.len() > length;
         // From the last to the first, so that the ranges stay good.
         edits.sort_by_key(|(range, _)| Reverse(range.start));
         let edits: Vec<(std::ops::Range<usize>, &str)> = edits
@@ -843,6 +965,10 @@ impl Viewer {
         if let Err(why) = editor.replace(&edits) {
             self.alert(format!("not referred to: {why}"));
             return;
+        }
+        // Before the backslash that keeps the text behind out of its name.
+        if sealed {
+            editor.set_cursor(start.saturating_add_signed(shift) + length);
         }
         self.text_changed(Edited::Command);
         let thing = match offer.called.as_str() {

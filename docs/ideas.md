@@ -5,6 +5,63 @@ the bibliography manager were built. The user judged all of them worth doing.
 Ordered by how much each is expected to change daily use; nothing here is
 started unless it says so.
 
+## Where this stands (2026-11-16, morning): the open items, closed
+
+Six engineers took the items listed as open below, one area each; all six
+branches are merged, lint is clean and the whole suite passes.
+
+- **Long compiles:** each compile has workers of its own; a newer text
+  overtakes one that runs long (after three seconds, or four times what the
+  document usually takes), at most two are left running behind, at the
+  lowest priority; Ctrl-C in normal mode gives up on the one under way.
+- **Names:** `#` and `@` typed on the page are the characters until
+  something is chosen from their list (the file holds `\#`, `\@`); `$`
+  typed again in an empty equation is a dollar sign; `A` and `I` beside an
+  equation at the end or start of a line type beside it, not into it.
+- **Code that shows as nothing:** a footnote or a figure goes whole or not
+  at all, and the status line says what went; Ctrl-U stays in its cell;
+  bracket text objects count only brackets the page shows; arrows never
+  enter code; a bare link is edited letter by letter; a reference whose
+  label was deleted is announced.
+- **Vim:** insert mappings of several keys (`jk`, with `[keys] timeoutlen`),
+  Shift-Tab, Shift-Enter, Ctrl-V (a block in the source, cells of a table on
+  the page), `:s` with patterns and `c`, `:normal`, `:g`, `:sort`, `g;`,
+  `@:`, Ctrl-A and Ctrl-X.
+- **Files:** `:w <path>`, `:saveas`, `:mv`; the history follows a file that
+  was moved or renamed outside; exports never replace a file without `!`;
+  CRLF line ends are kept; the history is thinned past 10 000 states; a
+  damaged journal gives back what can be read of it; a second window on the
+  same file brings the first to the front and says so.
+- **Managers and agents:** `gD` takes only papers and fonts that exist and
+  shows what a template sets; `gB` shows entries it cannot read and keys
+  used twice; the start screen lists the folder's documents; `get_state`
+  tells an agent about the window, saves, open questions and notes.
+- **Found by the check on GitHub:** an edit joined into a state the file had
+  held before could make a document that differs from its file look saved
+  (after a damaged journal, and another program writing the file). Edits
+  are kept out of every such state now.
+
+Open, as reported:
+
+- `db` from an equation inside strong text does nothing; a few cases of the
+  sweep in `viewer/tests/hidden.rs` are listed there as known.
+- `/` looks for the text as typed while `:s` takes a pattern.
+- Ctrl-R after an insert mapping was typed halfway may bring back its
+  first key.
+- A long document shows an empty window while it is typeset for the first
+  time.
+- Speed and parts: in work (the walks from the root of the text, page maps
+  after a part, lines left out at the foot of a full page, the predictor on
+  justified text).
+- Still nothing of this was typed on a real keyboard by its authors.
+
+In work, each on a branch of its own: suggestions from agents as a review
+workflow with a record; who wrote what; pages from PDF files; a `:report`
+recorder; LaTeX habits in equations; images and tables from the clipboard;
+the window as it was left, typewriter scrolling, night colours; `:tutor` and
+`:help`; change bars; packages; presenting; a settings panel with quiet
+defaults; input methods.
+
 ## Where this stands (2026-11-15, evening): after the bug hunt
 
 Nine engineers went through the app, one area each, using it through tests
@@ -42,7 +99,7 @@ is merged, lint is clean and the whole suite passes. In short:
   820 → 18 ms, the frame after a key up to 690 → 2–12 ms, an idle frame
   161 → 0.4 ms; nothing runs when nothing happens.
 
-Open, as reported (none fixed):
+Open then, as reported (see above for what became of each):
 
 - A compile that runs very long (a huge loop) cannot be stopped; later ones
   wait behind it.

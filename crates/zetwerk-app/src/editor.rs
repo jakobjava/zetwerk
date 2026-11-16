@@ -1299,6 +1299,13 @@ impl Host for DocumentHost<'_> {
         pages.line(at)
     }
 
+    fn line_edge(&self, at: usize, end: bool) -> usize {
+        if !matches!(self.rows, RowsOf::Pages(_)) {
+            return at;
+        }
+        crate::typst_text::line_edge(&self.document.buffer().0, at, end)
+    }
+
     fn open(&self, at: usize, below: bool) -> Option<(usize, String, usize)> {
         matches!(self.rows, RowsOf::Pages(_))
             .then(|| crate::typst_text::open(&self.document.buffer().0, at, below))
