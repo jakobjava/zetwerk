@@ -67,7 +67,7 @@ const CHAPTERS: &[(&str, &str)] = &[
 ];
 
 /// The seeds of the walks, with a small generator of numbers.
-struct Dice(u64);
+pub(super) struct Dice(pub(super) u64);
 
 impl Dice {
     fn next(&mut self) -> u64 {
@@ -79,7 +79,7 @@ impl Dice {
         z ^ (z >> 31)
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         (self.next() % n.max(1) as u64) as usize
     }
 
@@ -87,7 +87,7 @@ impl Dice {
         of[self.below(of.len())]
     }
 
-    fn chance(&mut self, in_hundred: usize) -> bool {
+    pub(super) fn chance(&mut self, in_hundred: usize) -> bool {
         self.below(100) < in_hundred
     }
 }
@@ -114,7 +114,7 @@ const VISUAL_OPS: &[&str] = &["d", "c", "y", "x", "<C-b>", "<Esc>", "~", "J", ">
 
 /// One action of the typist: the keys it presses. `several`: the
 /// document is of several files, which it goes between.
-fn action(dice: &mut Dice, typing: bool, several: bool) -> String {
+pub(super) fn action(dice: &mut Dice, typing: bool, several: bool) -> String {
     if typing {
         match dice.below(100) {
             0..=34 => {
@@ -666,6 +666,7 @@ fn walk(files: &[(&str, &str)], seed: u64, steps: usize, tally: &mut Tally) {
     if let Err(why) = sound(&viewer, false) {
         panic!("{why}: seed {seed} at {start}: {trail:?}, and :wa");
     }
+    super::report::replays_the_same(&mut viewer, &format!("seed {seed} at {start}: {trail:?}"));
     // Every file undone to where it began.
     let names: Vec<String> = viewer
         .buffers()

@@ -9644,6 +9644,7 @@ dependencies = [
  "rayon",
  "serde_json",
  "tiny-skia 0.12.0",
+ "toml 1.2.1+spec-1.1.0",
  "typst",
  "typst-layout",
  "wgpu 30.0.1",

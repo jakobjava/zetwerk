@@ -12,6 +12,7 @@ use crate::text::{Class, Text};
 use crate::took::Took;
 
 mod follow;
+mod memory;
 mod read;
 mod shown;
 
@@ -2296,6 +2297,11 @@ impl Engine {
             // visual mode too, to extend the selection.
             'w' if self.pending.is_idle() => {
                 self.effects.push(Effect::Command("jump".to_owned()));
+            }
+            // Vim has no `g!`: the host's report of what just happened,
+            // to play it again (`:report`).
+            '!' if self.pending.is_idle() => {
+                self.effects.push(Effect::Command("report".to_owned()));
             }
             _ => self.fail(),
         }

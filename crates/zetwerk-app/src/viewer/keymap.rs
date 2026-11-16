@@ -123,6 +123,9 @@ impl Viewer {
 
     /// A key was pressed: it, or what the user's mappings make of it.
     pub fn key(&mut self, press: KeyPress) {
+        if self.report_key(press) {
+            return;
+        }
         let plain = self.keymap.is_empty()
             || self.is_picking()
             || self.is_grid()
@@ -141,6 +144,7 @@ impl Viewer {
             }
         }
         self.hints_keyed();
+        self.report_keyed();
     }
 }
 

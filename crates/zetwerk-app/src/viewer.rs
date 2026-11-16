@@ -28,6 +28,7 @@ mod pointer;
 pub mod refer;
 mod refused;
 mod registers;
+pub mod report;
 mod slides;
 mod sources;
 mod sources_add;
@@ -913,6 +914,8 @@ pub struct Viewer {
     start: start::Start,
     /// The matches of a search and what keys took (see [`find`]).
     find: find::Find,
+    /// What happened lately, for a report (see [`report`]).
+    report: report::Recorder,
     pub stats: Stats,
 }
 
@@ -1021,6 +1024,7 @@ impl Viewer {
             pointer: pointer::Pointer::default(),
             start: start::Start::default(),
             find: find::Find::default(),
+            report: report::Recorder::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1062,6 +1066,7 @@ impl Viewer {
             self.paging = Paging::Slides;
         }
         self.inserts.clone_from(&options.inserts);
+        self.report_configured(&options.report, options.font_set);
         self.set_language(&options.language);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
             self.ui = ui.clamp(UI_SMALLEST, UI_LARGEST);
@@ -1398,6 +1403,7 @@ impl Viewer {
 
     /// A file changed on disk. Returns whether a compile is needed.
     pub fn file_changed(&mut self, path: &Path) -> bool {
+        self.report_disk(path);
         if self.is_edited(path) {
             return self.edited_file_changed();
         }
@@ -1538,6 +1544,7 @@ impl Viewer {
 
     /// A compile finished.
     pub fn compiled(&mut self, output: CompileOutput) {
+        self.report_compiled(&output);
         if self
             .compiled_revision
             .is_some_and(|newest| output.revision < newest)
@@ -1725,6 +1732,7 @@ impl Viewer {
     /// on again to where Ctrl-O came back from. On the command line it
     /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
+        self.report_reached(press);
         self.message = None;
         if self.grid.is_some() {
             return self.grid_key(press);
@@ -2083,6 +2091,7 @@ impl Viewer {
             || self.language_command(command)
             || self.notes_command(command)
             || self.refused_command(command)
+            || self.report_command(command)
         {
             return;
         }
@@ -3198,6 +3207,7 @@ mod tests {
     mod left_behind;
     mod panels;
     mod parts;
+    mod report;
     mod speed;
     mod typing;
     mod typist;
