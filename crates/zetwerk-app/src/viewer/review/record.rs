@@ -47,7 +47,10 @@ fn quoted(text: &str) -> String {
     if text.is_empty() {
         return "> (nothing)\n".to_owned();
     }
-    text.lines().map(|line| format!("> {line}\n")).collect()
+    text.lines().fold(String::new(), |mut out, line| {
+        let _ = writeln!(out, "> {line}");
+        out
+    })
 }
 
 /// `text` in a line, as code: backticks enough that none in it ends it.
@@ -157,6 +160,10 @@ fn instruction_line(instruction: &Instruction) -> String {
 impl Viewer {
     /// The record of the review of the open files, as Markdown; `now` is
     /// when it is written.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the record, part by part, in the order it is read"
+    )]
     pub(super) fn review_record(&mut self, now: u64) -> String {
         self.review_ready();
         let name = self

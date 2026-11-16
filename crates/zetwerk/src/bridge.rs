@@ -1828,6 +1828,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, reason = "one round of a review, step by step")]
     fn a_whole_review_round_is_suggested_decided_answered_and_recorded() {
         let text = "= Abstract\nWe study the colour of foxes. Our results are new.\n\n\
                     = Methods\nThe quick brown fox jumps over the lazy dog. We recieve data \
@@ -1995,7 +1996,7 @@ mod tests {
                 .unwrap()
                 .contains("British spelling stays")
         );
-        assert!(bridge.review_summary().unwrap()["open_suggestions"].as_u64() == Some(2));
+        assert_eq!(bridge.review_summary().unwrap()["open_suggestions"], 2);
         // The record says all of it.
         author(bridge, ":review record<CR>");
         let record = std::fs::read_to_string(session.directory.join("main.review.md")).unwrap();

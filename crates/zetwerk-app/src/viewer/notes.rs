@@ -860,6 +860,9 @@ impl Viewer {
 
     /// The commands of reviewing. Returns whether `command` was one.
     pub(super) fn notes_command(&mut self, command: &str) -> bool {
+        if self.review_command(command) {
+            return true;
+        }
         let (name, rest) = command
             .split_once(' ')
             .map_or((command, ""), |(name, rest)| (name, rest.trim()));

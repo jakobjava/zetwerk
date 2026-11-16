@@ -373,7 +373,7 @@ impl Suggestion {
     /// Whether it is to be shown on the text: not decided, and its text
     /// is there.
     fn shown_on_text(&self) -> bool {
-        !self.state.decided() && !(self.kind.changes() && self.proposal.is_none())
+        !self.state.decided() && (!self.kind.changes() || self.proposal.is_some())
     }
 }
 
@@ -529,6 +529,10 @@ enum Asking {
 }
 
 /// What reviewing keeps between keys.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about what is loaded and to be written"
+)]
 #[derive(Default)]
 pub(super) struct Review {
     all: Vec<Suggestion>,

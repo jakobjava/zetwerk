@@ -46,6 +46,9 @@ pub(super) const REVIEWS: &[(&str, &str)] = &[
     ("anything", "whatever a good reader would say"),
 ];
 
+/// A test a suggestion passes to be chosen.
+type Test<'a> = Box<dyn Fn(&super::Suggestion) -> bool + 'a>;
+
 /// What `:review accept …` and the like are about.
 struct Chosen {
     ids: Vec<u64>,
@@ -93,7 +96,7 @@ impl Viewer {
         let here = self.suggestion_here();
         match (name, rest) {
             ("review", rest) => self.review_subcommand(rest),
-            ("accept", "all") | ("reject", "all") => {
+            ("accept" | "reject", "all") => {
                 let verb = if name == "accept" { "accept" } else { "reject" };
                 self.review_many(verb, "all");
             }
@@ -275,6 +278,10 @@ impl Viewer {
     /// Everything else that keeps to the text is moved by each change
     /// exactly. Unless `rewriting`, each is recorded as accepted. Returns
     /// those made.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the changes made, and all that keeps to the text moved with them"
+    )]
     pub(super) fn make_suggested(&mut self, ids: &[u64], rewriting: bool) -> Vec<u64> {
         let file = self.file_id();
         let mut chosen: Vec<(u64, u64, Range<usize>, String)> = ids
@@ -335,7 +342,7 @@ impl Viewer {
         let first = chosen[0].2.start;
         editor.set_cursor(first);
         let now = editor.text().to_owned();
-        let moves: Vec<(Range<usize>, usize)> = chosen
+        let edits_made: Vec<(Range<usize>, usize)> = chosen
             .iter()
             .map(|(_, _, range, new)| (range.clone(), new.len()))
             .collect();
@@ -343,8 +350,8 @@ impl Viewer {
         self.proposals
             .retain(|proposal| !gone.contains(&proposal.id));
         let moved = |range: &Range<usize>| {
-            let start = shifted(range.start, &moves, false);
-            start..shifted(range.end, &moves, true).max(start)
+            let from = shifted(range.start, &edits_made, false);
+            from..shifted(range.end, &edits_made, true).max(from)
         };
         for proposal in self.proposals.iter_mut().filter(|p| p.file == file) {
             proposal.range = moved(&proposal.range);
@@ -884,7 +891,7 @@ impl Viewer {
             crate::sections::at(&all, cursor).map(|index| all[index].span.clone())
         });
         let agents: Vec<&str> = self.review.all.iter().map(|s| s.by.as_str()).collect();
-        let mut tests: Vec<Box<dyn Fn(&super::Suggestion) -> bool + '_>> = Vec::new();
+        let mut tests: Vec<Test<'_>> = Vec::new();
         let mut later = false;
         let mut said = Vec::new();
         let mut words = words.split_whitespace().peekable();

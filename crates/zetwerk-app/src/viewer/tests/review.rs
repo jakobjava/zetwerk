@@ -295,7 +295,14 @@ fn a_rejection_becomes_an_instruction_that_refuses_it_next_time() {
     let colour = want("replace", "Colour", Some("Color"), "spelling");
     let ids = made(
         &viewer
-            .agent_suggest(&[colour.clone()], None, false, None, false, &agent())
+            .agent_suggest(
+                std::slice::from_ref(&colour),
+                None,
+                false,
+                None,
+                false,
+                &agent(),
+            )
             .unwrap(),
     );
     press(&mut viewer, "gg]p:reject British spelling stays<CR>");
@@ -316,7 +323,14 @@ fn a_rejection_becomes_an_instruction_that_refuses_it_next_time() {
     );
     // The same again is refused, and said why.
     let again = viewer
-        .agent_suggest(&[colour.clone()], None, false, None, false, &agent())
+        .agent_suggest(
+            std::slice::from_ref(&colour),
+            None,
+            false,
+            None,
+            false,
+            &agent(),
+        )
         .unwrap();
     assert_eq!(again["results"][0]["status"], "contradicts", "{again}");
     assert!(viewer.brief_text().contains("British spelling stays"));

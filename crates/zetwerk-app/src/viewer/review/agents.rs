@@ -87,6 +87,10 @@ struct Placed {
 /// Why an item of a batch was not made: its status and what is wrong.
 type Refused = (&'static str, String);
 
+/// An item of a batch checked: where it goes and the instructions it
+/// goes against, or why not and the instruction that refuses it.
+type Checked = Result<(Placed, Vec<u64>), (Refused, Option<u64>)>;
+
 /// The bytes of `text` that `old` is at, once, within `within`.
 fn find_once(text: &str, old: &str, within: &Range<usize>) -> Result<Range<usize>, Refused> {
     let region = &text[within.clone()];
@@ -184,6 +188,10 @@ impl Viewer {
     }
 
     /// Where what `wanted` asks for goes in the text as it is.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each kind of suggestion placed in its way"
+    )]
     fn place_wanted(&self, wanted: &Wanted) -> Result<Placed, Refused> {
         let text = self.text().ok_or(("invalid", NOT_EDITING.to_owned()))?;
         let kind = Kind::named(wanted.kind.trim()).ok_or_else(|| {
@@ -429,7 +437,7 @@ impl Viewer {
             return Err("there is nothing to suggest: give suggestions".to_owned());
         }
         let file = self.file_id();
-        let mut placed: Vec<Result<(Placed, Vec<u64>), (Refused, Option<u64>)>> = Vec::new();
+        let mut placed: Vec<Checked> = Vec::new();
         for wanted in batch {
             let result = self.place_wanted(wanted).map_err(|refused| (refused, None));
             let result = result.and_then(|at| {
@@ -501,13 +509,13 @@ impl Viewer {
         let failed = placed.iter().filter(|result| result.is_err()).count();
         let make = !(all_or_nothing && failed > 0);
         let mut results = Vec::new();
-        let mut made = 0;
+        let mut count = 0;
         for (index, (result, wanted)) in placed.into_iter().zip(batch).enumerate() {
             match result {
                 Ok((at, flagged)) if make => {
                     let line = line_column(self.text().unwrap_or_default(), at.range.start).0;
                     let id = self.make_suggestion(at, wanted, agent, request, flagged.clone());
-                    made += 1;
+                    count += 1;
                     let mut answer = json!({
                         "index": index, "status": "anchored", "id": id, "line": line,
                     });
@@ -529,32 +537,31 @@ impl Viewer {
                 }
             }
         }
-        if let (Some(request), true) = (request, request_done) {
-            if let Some(asked) = self
+        if let (Some(request), true) = (request, request_done)
+            && let Some(asked) = self
                 .review
                 .requests
                 .iter_mut()
                 .find(|asked| asked.id == request)
-            {
-                asked.done = true;
-            }
+        {
+            asked.done = true;
         }
-        if made > 0 {
+        if count > 0 {
             self.review_changed();
-            let words = if made == 1 { "a change" } else { "changes" };
+            let words = if count == 1 { "a change" } else { "changes" };
             self.notice(format!(
                 "{} suggests {}{words}: ]p goes to them, gR lists them",
                 agent.name,
-                if made == 1 {
+                if count == 1 {
                     String::new()
                 } else {
-                    format!("{made} ")
+                    format!("{count} ")
                 },
             ));
         }
         Ok(json!({
             "revision": self.revision,
-            "made": made,
+            "made": count,
             "refused": failed,
             "results": results,
             "note": "shown on the page; the author accepts, rewrites, answers or rejects each. \

@@ -2115,7 +2115,6 @@ impl Viewer {
             || self.ui_command(command)
             || self.settings_command(command)
             || self.language_command(command)
-            || self.review_command(command)
             || self.notes_command(command)
             || self.refused_command(command)
             || self.vim_command(command)

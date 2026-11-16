@@ -242,7 +242,7 @@ pub(super) fn stored_brief(brief: &[&Instruction]) -> String {
 /// What is being read: the thing begun last.
 enum Reading {
     Nothing,
-    Suggestion(Suggestion),
+    Suggestion(Box<Suggestion>),
     Request(Request),
     Instruction(Instruction),
 }
@@ -256,6 +256,10 @@ fn range_of(value: &str) -> Range<usize> {
 
 /// What the store `text` holds, for `file`. An error if it is not a
 /// store of reviewing (or of the brief, with `brief`).
+#[allow(
+    clippy::too_many_lines,
+    reason = "every field of every thing a store holds"
+)]
 pub(super) fn parse(text: &str, file: Option<FileId>, brief: bool) -> Result<Stored, String> {
     let mut lines = text.lines();
     let header = if brief { BRIEF_HEADER } else { HEADER };
@@ -270,7 +274,7 @@ pub(super) fn parse(text: &str, file: Option<FileId>, brief: bool) -> Result<Sto
         match (key, &mut reading, file) {
             ("seq", Reading::Nothing, _) => stored.seq = number.unwrap_or(0),
             ("suggestion", _, Some(file)) => {
-                reading = Reading::Suggestion(Suggestion {
+                reading = Reading::Suggestion(Box::new(Suggestion {
                     id: number.unwrap_or(0),
                     file,
                     kind: Kind::Comment,
@@ -298,7 +302,7 @@ pub(super) fn parse(text: &str, file: Option<FileId>, brief: bool) -> Result<Sto
                     waiting: false,
                     unseen: false,
                     section: String::new(),
-                });
+                }));
             }
             ("request", Reading::Nothing, Some(file)) => {
                 reading = Reading::Request(Request {
@@ -329,7 +333,7 @@ pub(super) fn parse(text: &str, file: Option<FileId>, brief: bool) -> Result<Sto
                 });
             }
             ("end", ..) => match std::mem::replace(&mut reading, Reading::Nothing) {
-                Reading::Suggestion(suggestion) => stored.suggestions.push(suggestion),
+                Reading::Suggestion(suggestion) => stored.suggestions.push(*suggestion),
                 Reading::Request(request) => stored.requests.push(request),
                 Reading::Instruction(instruction) => stored.brief.push(instruction),
                 Reading::Nothing => {}

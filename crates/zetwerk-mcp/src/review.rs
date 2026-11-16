@@ -98,10 +98,10 @@ impl Connection {
 /// A suggestion as an agent makes it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct NewSuggestion {
-    /// `replace` (old_str by new_str), `insert` (new_str put in after
-    /// old_str, or before it with position `before`), `delete` (old_str
-    /// taken out), `move` (old_str taken to move_to), `comment` (a remark
-    /// on old_str, the paragraph on `line`, or the `section`) or
+    /// `replace` (`old_str` by `new_str`), `insert` (`new_str` put in after
+    /// `old_str`, or before it with position `before`), `delete` (`old_str`
+    /// taken out), `move` (`old_str` taken to `move_to`), `comment` (a remark
+    /// on `old_str`, the paragraph on `line`, or the `section`) or
     /// `question` (a question to the author about it).
     pub kind: String,
     /// The text it is about, exactly as in the source (no line numbers),
@@ -110,12 +110,12 @@ pub struct NewSuggestion {
     /// line.
     pub old_str: Option<String>,
     /// The heading of the section (as `get_outline` gives it) to look for
-    /// old_str in, or that a comment is about.
+    /// `old_str` in, or that a comment is about.
     pub section: Option<String>,
     /// A line of the source: the paragraph on it is what it is about, or
-    /// where old_str is looked for.
+    /// where `old_str` is looked for.
     pub line: Option<usize>,
-    /// What to put in place of old_str (`replace`), or to put in
+    /// What to put in place of `old_str` (`replace`), or to put in
     /// (`insert`).
     pub new_str: Option<String>,
     /// For `insert` and `move`: `after` (the default) or `before` the
@@ -134,7 +134,7 @@ pub struct NewSuggestion {
     pub confidence: Option<String>,
     /// How much it matters: `minor`, `normal` (the default) or `major`.
     pub importance: Option<String>,
-    /// Other wordings than new_str, best first: the author steps through
+    /// Other wordings than `new_str`, best first: the author steps through
     /// them on the page and takes one.
     #[serde(default)]
     pub alternatives: Vec<String>,
@@ -254,8 +254,11 @@ you are and how much it matters. Leave alone what is fine. \
 accepted, rewrote, rejected and why, or asked of you; answer with revise_suggestion, and make \
 nothing the author rejected again.";
 
+/// An argument a prompt takes: its name and what it is.
+type Argument = Option<(&'static str, &'static str)>;
+
 /// The prompts: their names, what they are, and their argument if any.
-const PROMPTS: &[(&str, &str, Option<(&str, &str)>)] = &[
+const PROMPTS: &[(&str, &str, Argument)] = &[
     (
         "proofread",
         "Proofread the document: spelling, grammar, punctuation, typos",
@@ -426,11 +429,11 @@ impl Server {
             let mut since: Option<u64> = None;
             while !peer.is_transport_closed() {
                 let (waiter, flag) = (Arc::clone(&editor), Arc::clone(&stop));
-                let waited = tokio::task::spawn_blocking(move || {
+                let answered = tokio::task::spawn_blocking(move || {
                     waiter.wait_for_review(since, Duration::from_secs(60), &flag)
                 })
                 .await;
-                let Ok(Ok(news)) = waited else {
+                let Ok(Ok(news)) = answered else {
                     break;
                 };
                 since = news["cursor"].as_u64().or(since);
@@ -456,14 +459,14 @@ impl Server {
 impl Server {
     /// Suggest changes to the document, or remarks and questions about
     /// it, for the author to decide on in the window: the way to review
-    /// (do not edit_source what you only suggest). Each suggestion is
-    /// placed by its exact text (old_str) or by section or line, and
+    /// (do not `edit_source` what you only suggest). Each suggestion is
+    /// placed by its exact text (`old_str`) or by section or line, and
     /// shown on the page where it stands; the author accepts, rewrites,
     /// answers or rejects it. The batch is checked whole first: each
     /// item is answered in `results` with its `status` (`anchored` and
     /// its `id`; `not_found`, `ambiguous`, `overlaps`, `contradicts`
     /// with the `instruction` of the brief it goes against, `invalid`)
-    /// and a `message` saying what to do. Read get_brief before.
+    /// and a `message` saying what to do. Read `get_brief` before.
     #[tool(annotations(title = "Suggest", read_only_hint = false))]
     async fn suggest(
         &self,
@@ -487,7 +490,7 @@ impl Server {
     /// versions), its `outcome` (the text before and after; for a
     /// rewritten one what the author made of yours; for a rejected one
     /// why), and where it is. Also the review `requests` the author made
-    /// and the `brief`, and a `cursor` for wait_for_review. Learn from
+    /// and the `brief`, and a `cursor` for `wait_for_review`. Learn from
     /// it: make nothing again that was rejected.
     #[tool(annotations(title = "List suggestions", read_only_hint = true))]
     async fn list_suggestions(

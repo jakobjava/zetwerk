@@ -224,6 +224,7 @@ impl Viewer {
 
     /// Draws on page `index` (whose top-left corner is at `origin`) the
     /// marks of the suggestions on it.
+    #[allow(clippy::too_many_lines, reason = "worked out once, then drawn")]
     pub(in super::super) fn review_marks(
         &mut self,
         scene: &mut Scene,
@@ -309,14 +310,19 @@ impl Viewer {
                 (rect.max.x - rect.min.x).to_pt() * zoom,
                 (rect.max.y - rect.min.y).to_pt() * zoom,
             );
-            let (fill, under) = if on {
+            let (strength, line_alpha) = if on {
                 (FILL_FRONT, LINE_FRONT)
             } else {
                 (FILL, LINE)
             };
             if self.review.settings.marks != Marks::None || on {
-                tint(scene, has, [*r, *g, *b, fill], (x, y, w, h));
-                tint(scene, has, [*r, *g, *b, under], (x, y + h - line, w, line));
+                tint(scene, has, [*r, *g, *b, strength], (x, y, w, h));
+                tint(
+                    scene,
+                    has,
+                    [*r, *g, *b, line_alpha],
+                    (x, y + h - line, w, line),
+                );
             }
             if on {
                 slip = Some(

@@ -339,10 +339,10 @@ impl Viewer {
         match (press.key, press.ctrl) {
             (Key::Escape, _) | (Key::Char('c' | '['), true) => self.review.manager = None,
             (Key::Down, _) | (Key::Char('j'), false) | (Key::Char('n'), true) => {
-                self.review_manager_step(1)
+                self.review_manager_step(true);
             }
             (Key::Up, _) | (Key::Char('k'), false) | (Key::Char('p'), true) => {
-                self.review_manager_step(-1)
+                self.review_manager_step(false);
             }
             (Key::Enter, _) => match item {
                 Some(id) => {
@@ -476,12 +476,16 @@ impl Viewer {
     }
 
     /// `j`, `k`: to the next row, and the page to its suggestion.
-    fn review_manager_step(&mut self, by: isize) {
+    fn review_manager_step(&mut self, forward: bool) {
         let Some(manager) = &mut self.review.manager else {
             return;
         };
         let count = manager.rows.len().max(1);
-        manager.chosen = (manager.chosen as isize + by).rem_euclid(count as isize) as usize;
+        manager.chosen = if forward {
+            (manager.chosen + 1) % count
+        } else {
+            (manager.chosen + count - 1) % count
+        };
         if let Some(Row::Item(id)) = manager.rows.get(manager.chosen).cloned() {
             let in_file = self
                 .suggestion_index(id)
@@ -564,6 +568,10 @@ impl Viewer {
 
     /// The manager as markup: a title, the rows in view, the chosen
     /// suggestion and its thread, and the keys.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the list, the chosen one and the keys, in one markup"
+    )]
     fn review_manager_markup(&self) -> String {
         let Some(manager) = &self.review.manager else {
             return String::new();

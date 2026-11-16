@@ -104,10 +104,9 @@ impl Viewer {
             .filter(|(_, then, _)| *then == cursor)
             .map(|(id, _, said)| (*id, said.clone()));
         let (about, words) = match (selected.clone(), here, last) {
-            (Some(_), ..) => (None, String::new()),
             (None, Some(id), _) => (Some(id), String::new()),
             (None, None, Some((id, said))) => (Some(id), said),
-            (None, None, None) => (None, String::new()),
+            (Some(_), ..) | (None, None, None) => (None, String::new()),
         };
         if let Some(range) = selected {
             let file = self.file_id();
