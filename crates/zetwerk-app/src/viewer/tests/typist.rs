@@ -622,9 +622,7 @@ fn walk(files: &[(&str, &str)], seed: u64, steps: usize, tally: &mut Tally) {
     press(&mut viewer, "gsgs");
     // `ZETWERK_TYPIST_NOPARTS=1`: with nothing typeset by itself, to
     // tell what parts have to do with what is found.
-    if std::env::var_os("ZETWERK_TYPIST_NOPARTS").is_some() {
-        viewer.in_parts = false;
-    }
+    viewer.in_parts = std::env::var_os("ZETWERK_TYPIST_NOPARTS").is_none();
     let mut dice = Dice(seed);
     // Somewhere in the text behind its rules.
     let body = text.find("\n\n").unwrap_or(0);
