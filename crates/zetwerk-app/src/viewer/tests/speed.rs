@@ -892,12 +892,14 @@ fn what_opening_costs() {
         resident()
     );
     // Through all of it a screen at a time, as fast as frames come:
-    // what each frame asks to be made.
+    // what each frame asks to be made. As the wheel scrolls: the
+    // cursor stays.
     let at = Instant::now();
     let (mut frames, mut made, mut rendering) = (0, 0, 0.0);
     let pages = viewer.state().pages;
+    let screen = f64::from(viewer.view.height);
     while viewer.state().page < pages && frames < 2000 {
-        press(&mut viewer, "<C-f>");
+        viewer.scroll(0.0, screen);
         let scene = viewer.scene(&|id| held.contains(&id));
         held.extend(scene.images.iter().map(|image| image.id));
         let tiling = Instant::now();
@@ -915,6 +917,15 @@ fn what_opening_costs() {
         rendering / f64::from(made.max(1)),
         resident()
     );
+    // The cursor taken along a screen at a time, from the top.
+    press(&mut viewer, "gg");
+    let at = Instant::now();
+    for _ in 0..20 {
+        press(&mut viewer, "<C-f>");
+        let scene = viewer.scene(&|id| held.contains(&id));
+        held.extend(scene.images.iter().map(|image| image.id));
+    }
+    println!("<C-f>: {:.1} ms a screen, tiles aside", ms(at) / 20.0);
     let _ = std::fs::remove_dir_all(directory);
 }
 

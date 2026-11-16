@@ -1809,7 +1809,25 @@ pub fn bibliography_file(source: &Source) -> Option<String> {
         }
         node.children().find_map(|child| find(&child, text))
     }
-    find(&LinkedNode::new(source.root()), source.text())
+    thread_local! {
+        /// The children of the root of the text last asked about that
+        /// name a file, with the file. Asked after every compile: a walk
+        /// through all of a long text, unless kept.
+        static KEPT: std::cell::RefCell<Option<(Source, kept::Found<String>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let text = source.text();
+    let named = |node: &typst::syntax::SyntaxNode, start: usize| {
+        let within = text.get(start..start + node.len()).unwrap_or("");
+        find(&LinkedNode::new(node), within)
+            .map(|named| (start..start + node.len(), named))
+            .into_iter()
+            .collect()
+    };
+    let found = KEPT.with_borrow(|kept| kept::found_again(kept.as_ref(), source, &named));
+    let first = found.first().map(|(_, named)| named.clone());
+    KEPT.set(Some((source.clone(), found)));
+    first
 }
 
 /// What a part of `source` that begins at byte `at` needs before it to
