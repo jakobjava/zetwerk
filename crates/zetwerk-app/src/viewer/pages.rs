@@ -324,7 +324,7 @@ pub(super) fn not_pages(
 fn tag_markup(called: &str, size: f64) -> String {
     format!(
         "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
-         #set text(font: \"{FONT}\", size: {size}pt, fill: rgb(\"{TAG}\").transparentize(15%))\n\
+         #set text(font: \"{FONT}\", size: {size}pt, top-edge: \"ascender\", bottom-edge: \"descender\", fill: rgb(\"{TAG}\").transparentize(15%))\n\
          {}",
         crate::figure_text::quoted(called)
             .strip_prefix('"')
@@ -387,6 +387,8 @@ impl Viewer {
                 .entry(index)
                 .or_insert_with(|| PageMap::build(&world, &page.frame));
             let mut fact = Fact::default();
+            // The line the last word was on: a word on another is apart.
+            let mut line: Option<f64> = None;
             for glyph in map.glyphs().iter().filter(|glyph| !glyph.furniture) {
                 let (range, words) = match &glyph.origin {
                     Origin::Text { file: of, range } if *of == file => (range, true),
@@ -401,6 +403,14 @@ impl Viewer {
                     (a.min(range.start), b.max(range.end))
                 }));
                 if words && fact.words.chars().count() < 48 {
+                    let top = glyph.rect.min.y.to_pt();
+                    let height = (glyph.rect.max.y - glyph.rect.min.y).to_pt();
+                    if line.is_some_and(|last| (top - last).abs() > height / 2.0)
+                        && !fact.words.ends_with(' ')
+                    {
+                        fact.words.push(' ');
+                    }
+                    line = Some(top);
                     let piece = text.get(range.clone()).unwrap_or("");
                     let piece = if piece.trim().is_empty() { " " } else { piece };
                     if !(piece == " " && fact.words.ends_with(' ')) {
