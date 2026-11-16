@@ -367,6 +367,7 @@ impl Viewer {
                 }
             }
         }
+        self.tutor_welcome();
     }
 
     /// Whether the window has no document: the empty page of nothing is

@@ -970,7 +970,6 @@ impl Viewer {
     }
 
     /// Whether the panel is up.
-    #[cfg(test)]
     pub(super) fn refused_up(&self) -> bool {
         self.refused.up
     }

@@ -882,6 +882,29 @@ pub fn has_unsaved_changes(path: &Path, state_dir: &Path) -> bool {
     unsaved && !in_file
 }
 
+/// Forgets what the journal under `state_dir` knows of the file at
+/// `path`: its history, and text that was never saved. For a file that is
+/// made anew each time, as a lesson of the tutor is: what was done to the
+/// copy before is no history of this one. Forgets nothing, and returns
+/// `false`, where a window has the file open.
+pub fn forget(path: &Path, state_dir: &Path) -> io::Result<bool> {
+    let path = std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_owned());
+    let journal = journal_path(state_dir, &path);
+    if !journal.exists() {
+        return Ok(true);
+    }
+    let Some(_lock) = Lock::acquire(&journal.with_extension("lock"))? else {
+        return Ok(false);
+    };
+    match std::fs::remove_file(&journal) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(err) => Err(err),
+    }
+}
+
 /// Asks the window that has the file at `path` open to say so, and to ask
 /// for the user's attention: another start of zetwerk wanted the file
 /// too. The window notices the file this leaves (see [`knock_path`]).

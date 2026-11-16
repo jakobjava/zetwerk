@@ -15,6 +15,7 @@ pub mod export;
 mod figures;
 mod find;
 mod focus;
+mod help;
 mod hints;
 mod history;
 mod inplace;
@@ -41,6 +42,7 @@ mod sources_undo;
 pub mod start;
 mod structure;
 mod styles;
+pub mod tutor;
 mod vim;
 mod waiting;
 mod written;
@@ -927,6 +929,8 @@ pub struct Viewer {
     find: find::Find,
     /// What the window waits for (see [`waiting`]).
     waiting: waiting::Waiting,
+    /// The lesson the window shows, if it does (see [`tutor`]).
+    tutor: tutor::Tutor,
     pub stats: Stats,
 }
 
@@ -1039,6 +1043,7 @@ impl Viewer {
             start: start::Start::default(),
             find: find::Find::default(),
             waiting: waiting::Waiting::default(),
+            tutor: tutor::Tutor::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1652,6 +1657,7 @@ impl Viewer {
         }
         self.margin_compiled(&output.world);
         self.refused_compiled(&output.world);
+        self.tutor_compiled();
     }
 
     /// The user turned the wheel or dragged on the touchpad, by this many
@@ -1753,6 +1759,9 @@ impl Viewer {
         }
         if self.grid.is_some() {
             return self.grid_key(press);
+        }
+        if self.tutor_key(press) || self.help_key(press) {
+            return;
         }
         if self.start_key(press) || self.refused_key(press) || self.margin_key(press) {
             return;
@@ -2103,6 +2112,9 @@ impl Viewer {
         if self.start_command(command) {
             return;
         }
+        if self.tutor_command(command) || self.help_command(command) {
+            return;
+        }
         let unwritten = self.unwritten();
         let modified = !unwritten.is_empty();
         if self.file_command(command)
@@ -2386,6 +2398,7 @@ impl Viewer {
             }
             self.line_numbers(scene, has, visible.index, origin);
             self.step_marks(scene, has, visible.index, origin);
+            self.tutor_marks(scene, has, visible.index, origin);
             self.language_page(scene, has, visible.index, origin);
             self.find_marks(scene, has, visible.index, origin);
             self.margin_page(scene, has, visible.index, origin);
@@ -2932,6 +2945,7 @@ impl Viewer {
             state.page, state.pages
         );
         let right = format!("{}{right}", self.search_count());
+        let right = format!("{}{right}", self.tutor_status());
         let status = Status {
             mode,
             left,
@@ -3239,6 +3253,7 @@ mod tests {
     mod panels;
     mod parts;
     mod speed;
+    mod tutor;
     mod typing;
     mod typist;
     mod vim;
