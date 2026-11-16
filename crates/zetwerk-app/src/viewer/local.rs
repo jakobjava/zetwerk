@@ -181,14 +181,6 @@ impl Viewer {
         if self.back_at_whole(&on_screen) {
             return Ok(());
         }
-        // What typing put in to be seen (a refused equation as it is
-        // written) is on the page typeset whole: once typing is over, it
-        // is not to stay beside a part, nor anywhere.
-        let typing = (self.editor.as_ref())
-            .is_some_and(|editor| editor.mode() == crate::editor::Mode::Insert);
-        if !typing && on_screen.world.shows_more() {
-            return Err("the pages show what typing put in".to_owned());
-        }
         // The page: where the cursor was last found, or one beside it.
         let near = self.cursor_page.get();
         let page_of = |region: &local::Region| {

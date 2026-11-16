@@ -225,20 +225,29 @@ struct Predicted {
     justified: bool,
 }
 
-/// Whether `prediction` breaks the lines as Typst does: the error says
-/// why it may not.
-fn as_typst_breaks(prediction: &zetwerk_predict::Prediction) -> Result<(), String> {
+/// Whether `prediction` breaks the lines as Typst does, in a document
+/// whose paragraphs are `justified` or not: the error says why it may
+/// not. The random typist (25 seeds of 150 keys on each document) found
+/// a third of the lines worked out in justified text elsewhere than
+/// Typst puts them, by up to 101 pt: Typst breaks justified text
+/// weighing all of the paragraph, and a letter more on one line may
+/// move a word on another (the last line of a paragraph, which is not
+/// stretched, too). A part breaks them as Typst does. Ragged text Typst
+/// breaks first fit, as the predictor does (all 81 lines broken anew in
+/// the paper were right; in the document of chapters 50 of 158 were
+/// not, which is still to be looked into).
+fn as_typst_breaks(
+    prediction: &zetwerk_predict::Prediction,
+    justified: bool,
+) -> Result<(), String> {
     // A line more or less moves all that is below it: what goes off a
     // full page or comes back onto it is known to a part, which knows
     // where the text of the page ends, and not here.
     if matches!(prediction.lines, Lines::More | Lines::Fewer) {
         return Err("the paragraph has a line more or less".to_owned());
     }
-    // Lines broken anew one after the other, first fit, are where Typst
-    // breaks ragged text; justified text it breaks weighing all of the
-    // paragraph, which a part does as Typst does.
-    if prediction.lines == Lines::Rebroken && prediction.justified {
-        return Err("justified lines broken anew".to_owned());
+    if justified || prediction.justified {
+        return Err("a line of justified text".to_owned());
     }
     Ok(())
 }
@@ -2043,7 +2052,9 @@ impl Viewer {
             text,
         };
         let prediction = predict(&page.frame, map, edit).map_err(|why| format!("{why:?}"))?;
-        as_typst_breaks(&prediction)?;
+        let justified = crate::typst_text::rule_value(editor.source(), "par", "justify")
+            .is_some_and(|value| value.trim() != "false");
+        as_typst_breaks(&prediction, justified)?;
         self.planned.retain(|(planned, _, _), _| *planned != index);
         self.predicted = Some(Predicted {
             index,

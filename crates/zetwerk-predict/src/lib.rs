@@ -245,7 +245,7 @@ fn pull_up(
     let mut out = container.clone();
     let mut typed = None;
     let mut column: Option<(Abs, Abs)> = None;
-    let mut lines = Lines::Rebroken;
+    let mut lines = Lines::Kept;
     for _ in 0..MAX_LINES {
         let origin = origin_of(place).ok_or(Decline::Inconsistent)?;
         let (left, right) = line.span();
@@ -271,6 +271,7 @@ fn pull_up(
         });
         let mut following = None;
         if let Some((next_place, next, words)) = taken {
+            lines = Lines::Rebroken;
             line.append(words)?;
             line.settle()?;
             following = Some((next_place, next));
