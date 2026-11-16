@@ -10,6 +10,7 @@ mod aids;
 mod assist;
 mod buffers;
 pub mod export;
+mod far;
 mod figures;
 mod find;
 mod focus;
@@ -2270,6 +2271,7 @@ impl Viewer {
             return scene;
         }
         self.pages(&mut scene, has);
+        self.forget_far_pages();
         self.lens(&mut scene, has);
         // Drawn after the pages: a page zoomed wider than its pane must
         // not reach over the source.

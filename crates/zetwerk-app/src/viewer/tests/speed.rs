@@ -1000,3 +1000,32 @@ fn what_the_text_asks_cost() {
     }
     println!("{line}");
 }
+
+#[test]
+fn what_is_kept_of_pages_does_not_grow_with_scrolling() {
+    // Short pages, many of them: scrolled through, each was mapped and
+    // its map kept, for as long as the pages stayed.
+    let mut text = "#set page(width: 300pt, height: 160pt)\n".to_owned();
+    for page in 0..80 {
+        let _ = write!(text, "Words of page {page}, $x^{page}$.\n#pagebreak()\n");
+    }
+    let (mut viewer, directory) = editing(&text);
+    press(&mut viewer, "gsgs/page<CR>");
+    let mut held = HashSet::new();
+    let screen = f64::from(viewer.view.height);
+    let (mut most, mut planned) = (0, 0);
+    while viewer.state().page < viewer.state().pages {
+        viewer.scroll(0.0, screen / 2.0);
+        let _ = frame(&mut viewer, &mut held);
+        most = most.max(viewer.maps.len());
+        planned = planned.max(viewer.planned.len());
+    }
+    assert!(viewer.state().pages >= 80);
+    assert!((1..=40).contains(&most), "{most} pages mapped");
+    assert!((1..=300).contains(&planned), "{planned} tiles planned");
+    // Back at the cursor, its page is mapped again and shows it.
+    press(&mut viewer, "gg");
+    let _ = frame(&mut viewer, &mut held);
+    assert!(viewer.maps.contains_key(&0));
+    let _ = std::fs::remove_dir_all(directory);
+}
