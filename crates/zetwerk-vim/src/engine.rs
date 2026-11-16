@@ -132,7 +132,8 @@ pub trait Host {
     /// What Backspace takes at byte `at` where that is not what stands
     /// before it: a place to fill in that nothing was filled into (what
     /// was to be raised or lowered, a fraction with no parts) goes as a
-    /// whole, with the marks that made it.
+    /// whole, with the marks that made it; so does a thing whose mark is
+    /// shown before the cursor and whose text is shown elsewhere.
     ///
     /// The bytes that go, and what is left in their place; the cursor
     /// goes to where they began.
@@ -237,10 +238,22 @@ pub trait Host {
     /// text and apart from each other. A host that shows pages keeps the
     /// marks whose partners stay (the one that closes strong text, say),
     /// which would otherwise make all that follows something else.
-    /// `None` where nothing may go.
+    /// What shows as nothing and would be left alone (the `#` before a
+    /// call taken whole) goes along: the first piece may begin before
+    /// `range`. `None` where nothing may go.
     fn pieces(&self, range: Range<usize>, with: &str) -> Option<Vec<Range<usize>>> {
         let _ = with;
         Some(vec![range])
+    }
+
+    /// Where what goes in before the place the host shows at bytes
+    /// `stop` (see [`Host::stop`]) goes into the text: its first byte,
+    /// unless that is in the middle of what the place is written with
+    /// (behind the `#` that begins a call shown as one thing). Then
+    /// before all of it. `P` puts there, and typing goes in there after
+    /// a cursor key that led onto the place.
+    fn front(&self, stop: Range<usize>) -> usize {
+        stop.start
     }
 
     /// A text object of the host's language around byte `at`, named by
@@ -600,6 +613,10 @@ pub struct Engine {
     /// Whether a selection begun with `V` is of lines the host shows:
     /// then it is a selection of characters that is kept to whole lines.
     line_select: bool,
+    /// In such a selection, where the cursor was before it was put at
+    /// the end of its line, and where it was put: Escape leaves it where
+    /// it was, as Vim leaves the cursor of `V`.
+    line_cursor: Option<(usize, usize)>,
     /// Where what is shown under the cursor ends in the text, and what
     /// is shown under the other end of a selection, where the host shows
     /// other things than characters.
@@ -696,6 +713,7 @@ impl Engine {
             rows_first: false,
             pairs: false,
             line_select: false,
+            line_cursor: None,
             extent: None,
             texts: Vec::new(),
             row_goal: None,
@@ -974,6 +992,7 @@ impl Engine {
     fn rest_on_shown(&mut self, before: usize, host: &impl Host) {
         if self.mode != Mode::Visual {
             self.line_select = false;
+            self.line_cursor = None;
         }
         self.extent = None;
         if !self.rows_first || !matches!(self.mode, Mode::Normal | Mode::Visual) {
@@ -1040,11 +1059,14 @@ impl Engine {
                 lines.1.map(|row| Self::rows_of_paragraph(row, host)),
             );
             if let (Some(anchor), Some(cursor)) = lines {
+                let put = self.line_cursor.filter(|(_, put)| *put == self.cursor);
+                let was = put.map_or(self.cursor, |(was, _)| was);
                 if self.cursor >= self.anchor {
                     (self.anchor, self.cursor) = (anchor.start, cursor.last);
                 } else {
                     (self.anchor, self.cursor) = (anchor.last, cursor.start);
                 }
+                self.line_cursor = Some((was, self.cursor));
             }
         }
         let end = |at: usize| host.stop(at, Seek::At).map(|stop| stop.end);
@@ -1812,6 +1834,7 @@ impl Engine {
                 Key::Escape => {
                     self.reset_pending();
                     if visual {
+                        self.leave_line_select();
                         self.mode = Mode::Normal;
                         self.cursor = clamp(Text(host.text()), self.cursor, false);
                         self.wanted_column = None;
@@ -2526,6 +2549,7 @@ impl Engine {
             self.pending = Pending::default();
             let lines = c == 'V';
             if self.mode == Mode::Visual && self.line_select == lines {
+                self.leave_line_select();
                 self.mode = Mode::Normal;
                 self.line_select = false;
             } else {
@@ -2568,6 +2592,9 @@ impl Engine {
         let (count, _) = self.take_count();
         let pos = self.cursor;
         let visual = self.selecting();
+        if !self.shown_pair(c, pos, count, host) {
+            return self.object_failed();
+        }
         // Words and brackets are found as Vim finds them, as a motion from
         // one end to the other, with all that follows from that for the
         // operator.
@@ -3555,6 +3582,15 @@ impl Engine {
                 } else {
                     (format!("{body}\n\n"), at)
                 };
+                // Not lines that Typst could not read as paragraphs:
+                // half of a block of raw text, say.
+                let edit = Edit {
+                    range: at..at,
+                    text: put.clone(),
+                };
+                if host.refuses(std::slice::from_ref(&edit)) {
+                    return self.fail();
+                }
                 self.edit(host, at..at, &put);
                 self.took = Some(Took::Put(start..start + body.len()));
                 self.cursor = Text(host.text()).first_non_blank(start);
@@ -3588,7 +3624,7 @@ impl Engine {
                     if after {
                         stop.end
                     } else {
-                        stop.start
+                        host.front(stop)
                     }
                 }
                 _ if after && !text.line_is_empty(self.cursor) => text.next(self.cursor),
@@ -4167,7 +4203,9 @@ impl Engine {
                     .wanted_column
                     .unwrap_or_else(|| text.column(self.cursor));
                 self.row_goal = Some((column, across));
-                Some(to)
+                // Before what is shown there: not into the code it is
+                // written with (`#|figure(…)`), where typing breaks it.
+                Some(host.stop(to, Seek::At).map_or(to, |stop| host.front(stop)))
             }
             Key::Home => host.shown_line(self.cursor).map(|line| line.start),
             Key::End => host.shown_line(self.cursor).map(|line| line.end),
@@ -4245,7 +4283,8 @@ impl Engine {
                     to = motion::word_backward(text, to, 1, false).0.max(start);
                 }
                 let to = self.stop_at_insert_start(host.text(), to);
-                if host.parted(to..self.cursor) {
+                // Nor, on a page, what would cut what it shows in two.
+                if host.parted(to..self.cursor) || host.cuts(to..self.cursor) {
                     return false;
                 }
                 self.insert_delete(to, host);
@@ -4256,6 +4295,9 @@ impl Engine {
                     return self.insert_backspace(host);
                 }
                 let to = self.stop_at_insert_start(host.text(), start);
+                if host.parted(to..self.cursor) || host.cuts(to..self.cursor) {
+                    return false;
+                }
                 self.insert_delete(to, host);
             }
             (Key::Char(c @ ('b' | 'i')), true) if self.rows_first => {
@@ -4415,6 +4457,18 @@ impl Engine {
                     .stop(self.cursor, Seek::After)
                     .filter(|stop| stop.start < line_end);
                 (self.cursor, end) = match shown {
+                    // Not over what is no text (the number of a figure,
+                    // a reference): over that, it took all the figure.
+                    Some(stop)
+                        if typed.chars().count() == 1
+                            && typed
+                                .chars()
+                                .next()
+                                .is_some_and(|c| host.put_over(stop.clone(), c).is_none()) =>
+                    {
+                        self.failed = true;
+                        return;
+                    }
                     Some(stop) => (stop.start, stop.end.max(stop.start)),
                     None => (self.cursor, self.cursor),
                 };
@@ -4495,8 +4549,14 @@ impl Engine {
                 && place.start < place.end
                 && place.end <= host.text().len()
             {
+                let taken = host.text().get(place.clone()).unwrap_or("").to_owned();
                 self.edit(host, place.clone(), &left);
                 self.cursor = place.start;
+                self.took = Some(Took::Deleted {
+                    text: taken,
+                    at: place.start,
+                    linewise: false,
+                });
                 return true;
             }
             // What the host shows before the cursor goes, not the markup
@@ -4547,10 +4607,10 @@ impl Engine {
                     return true;
                 }
                 if to == stop.start {
-                    if self.delete_pieces(host, stop.clone()).is_none() {
+                    let Some(first) = self.delete_pieces(host, stop.clone()) else {
                         return false;
-                    }
-                    self.cursor = stop.start;
+                    };
+                    self.cursor = stop.start.min(first);
                     return true;
                 }
             }
@@ -4697,24 +4757,31 @@ impl Engine {
 
     /// Deletes from `to` up to the cursor.
     fn insert_delete(&mut self, to: usize, host: &mut impl Host) {
-        if self.delete_pieces(host, to..self.cursor).is_some() {
-            self.cursor = to;
+        if let Some(first) = self.delete_pieces(host, to..self.cursor) {
+            self.cursor = to.min(first);
         }
     }
 
     /// Deletes bytes `range` of the text as the host says it goes (see
-    /// [`Host::pieces`]). Returns the text that went, or `None` if
-    /// nothing could.
-    fn delete_pieces(&mut self, host: &mut impl Host, range: Range<usize>) -> Option<String> {
-        let pieces = host.pieces(range, "")?;
-        let taken = pieces
+    /// [`Host::pieces`]), and notes what went. Returns where the first
+    /// of it was (before `range`, where something went along), or `None`
+    /// if nothing could go.
+    fn delete_pieces(&mut self, host: &mut impl Host, range: Range<usize>) -> Option<usize> {
+        let pieces = host.pieces(range.clone(), "")?;
+        let taken: String = pieces
             .iter()
             .filter_map(|piece| host.text().get(piece.clone()))
             .collect();
+        let first = pieces.first().map_or(range.start, |piece| piece.start);
         for piece in pieces.into_iter().rev() {
             self.edit(host, piece, "");
         }
-        Some(taken)
+        self.took = Some(Took::Deleted {
+            text: taken,
+            at: first,
+            linewise: false,
+        });
+        Some(first)
     }
 
     fn leave_insert(&mut self, host: &mut impl Host) {

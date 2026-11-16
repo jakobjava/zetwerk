@@ -19,7 +19,7 @@ mod slots;
 pub use back::{line_break_within, prev_field};
 
 pub use shown::{breaks, cuts, join, letters, put_over, raw_blank};
-pub use shown::{parted, pieces};
+pub use shown::{front, parted, pieces};
 pub use slots::{Around, Enclosure, enclosing, has_rules, slot_name, spot_name};
 
 /// The innermost node at byte `at` of `source` and its ancestors, from
@@ -746,6 +746,32 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
             }
         }
         _ => {}
+    }
+    // Before strong text, against its first mark, a letter would make
+    // that mark a character like any other: the function says it then.
+    let opened = LinkedNode::new(source.root())
+        .leaf_at(at, Side::After)
+        .filter(|mark| matches!(mark.kind(), SyntaxKind::Star | SyntaxKind::Underscore))
+        .filter(|mark| mark.range().start == at)
+        .and_then(|mark| mark.parent().cloned())
+        .filter(|marked| matches!(marked.kind(), SyntaxKind::Strong | SyntaxKind::Emph))
+        .filter(|marked| marked.range().start == at && marked.range().len() >= 2);
+    if let Some(marked) = opened.filter(|_| c.is_alphanumeric()) {
+        let mark = if marked.kind() == SyntaxKind::Strong {
+            SyntaxKind::Star
+        } else {
+            SyntaxKind::Underscore
+        };
+        if closing(&marked, mark) > 0 {
+            let function = if mark == SyntaxKind::Star {
+                "strong"
+            } else {
+                "emph"
+            };
+            let range = marked.range();
+            let body = text.get(range.start + 1..range.end - 1)?;
+            return Some((range, format!("{c}#{function}[{body}]"), c.len_utf8()));
+        }
     }
     let line = before.rfind('\n').map_or(0, |found| found + 1);
     let begins_line = before[line..].trim().is_empty();
@@ -1569,11 +1595,16 @@ fn scripts_in(node: &LinkedNode, text: &str, end: usize, found: &mut Vec<Range<u
 /// What Backspace takes at byte `at` of `source` where it is in a place
 /// of an equation that nothing was filled into: the mark that raises or
 /// lowers nothing, with its brackets; a call all of whose arguments are
-/// empty.
+/// empty. Right behind the mark of a footnote, the footnote, whole: what
+/// stands before the cursor in the text is the end of the footnote's
+/// own text, which the page shows elsewhere.
 #[must_use]
 pub fn unmake(source: &Source, at: usize) -> Option<(Range<usize>, String)> {
     let text = source.text();
     let gone = |range: Range<usize>| Some((range, String::new()));
+    if let Some(note) = footnote_before(source, at) {
+        return gone(note);
+    }
     // The last row of a table, if nothing is in it: the cursor goes to
     // the end of the cell before it.
     if let Some(table) = table_at(source, at)
@@ -1627,6 +1658,25 @@ pub fn unmake(source: &Source, at: usize) -> Option<(Range<usize>, String)> {
         (empty && args.range().start < at && at < args.range().end)
             .then(|| (node.range(), String::new()))
     })
+}
+
+/// The footnote written right before byte `at` of `source` in running
+/// text, with the `#` it begins with: its bytes.
+fn footnote_before(source: &Source, at: usize) -> Option<Range<usize>> {
+    let call = LinkedNode::new(source.root())
+        .leaf_at(at, Side::Before)?
+        .parent()?
+        .parent()?
+        .parent()?
+        .clone();
+    let named = call.children().next().is_some_and(|callee| {
+        callee.kind() == SyntaxKind::Ident && callee.leaf_text() == "footnote"
+    });
+    let hash = call
+        .prev_sibling()
+        .filter(|hash| hash.kind() == SyntaxKind::Hash)?;
+    (call.kind() == SyntaxKind::FuncCall && named && call.range().end == at)
+        .then(|| hash.range().start..at)
 }
 
 /// What Tab does at byte `at` of `source`: leads to the next place to
