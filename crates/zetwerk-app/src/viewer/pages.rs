@@ -249,7 +249,9 @@ pub(super) fn lines_of(
     file: FileId,
 ) -> PageLines {
     let lines = PageMap::build(world, frame).lines();
-    if !lines.is_empty() {
+    let mut images = Vec::new();
+    images_on(frame, &mut images);
+    if !lines.is_empty() || (images.is_empty() && !is_empty(frame)) {
         return lines;
     }
     let found = written_pages(world, file).and_then(|(_, pages)| {
@@ -285,10 +287,13 @@ pub(super) fn page_showing(
     file: FileId,
     then: usize,
 ) -> Option<usize> {
-    let (source, pages) = written_pages(world, file)?;
+    // Asked of every cursor that the pages show nothing of: the look at
+    // its line first, which costs no more than the line.
+    let source = world.written(file).ok()?;
     if !on_page_line(source.text(), then) {
         return None;
     }
+    let pages = page_text::inserted(&source);
     let unit = pages.iter().position(|page| page.range.contains(&then))?;
     (0..document.pages().len())
         .find(|index| unit_on(document, world, file, *index, &pages) == Some(unit))
