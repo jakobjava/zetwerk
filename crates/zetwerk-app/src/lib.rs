@@ -13,6 +13,7 @@ pub mod reading;
 pub mod ref_text;
 pub mod sections;
 pub mod style_text;
+pub mod table_text;
 pub mod typst_text;
 pub mod view;
 pub mod viewer;
