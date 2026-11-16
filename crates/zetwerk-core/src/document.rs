@@ -1196,8 +1196,14 @@ impl<B: Buffer> Document<B> {
         }
         let changes = change::perform(&mut self.buffer, edits)?;
         let current = self.history.current();
-        // Never fold changes into the saved state: it would stop being it.
-        let join = join && self.history.can_extend() && self.saved != Some(current);
+        // Never fold changes into a state the file has held: it would stop
+        // being it. Not only the one saved last: a file that is found to
+        // hold the bytes of an earlier save is taken to be at that state
+        // (see `reconcile`), which must then still have that text.
+        let join = join
+            && self.history.can_extend()
+            && self.saved != Some(current)
+            && self.saves.iter().all(|(state, _)| *state != current);
         let record = if join {
             Record::Extend {
                 state: current,
