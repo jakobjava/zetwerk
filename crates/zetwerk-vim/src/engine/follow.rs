@@ -63,6 +63,12 @@ const G: &[(&str, &str, When)] = &[
     ("D", "how the document looks", When::Idle),
     ("B", "the bibliography", When::Idle),
     ("F", "figures and tables", When::Idle),
+    ("H", "table: the first row its header, or not", When::Idle),
+    (
+        "Y",
+        "table: copy it as cells, for a spreadsheet",
+        When::Idle,
+    ),
     ("s", "the page, the source, or both", When::Idle),
     ("?", "all there is to do", When::Idle),
     ("w", "jump to a label in view", When::Unpending),
@@ -107,6 +113,9 @@ const FORWARD: &[(&str, &str)] = &[
     ("p", "to the next proposed change"),
     ("n", "to the next note"),
     ("i", "to the next thing that shows as nothing"),
+    ("r c", "table: a row below, a column right"),
+    ("R C", "table: this row down, this column right"),
+    ("x X", "table: this row, this column out (on to the next)"),
 ];
 const BACKWARD: &[(&str, &str)] = &[
     ("[", "to the page before"),
@@ -115,7 +124,32 @@ const BACKWARD: &[(&str, &str)] = &[
     ("p", "to the proposed change before"),
     ("n", "to the note before"),
     ("i", "to the thing before that shows as nothing"),
+    ("r c", "table: a row above, a column left"),
+    ("R C", "table: this row up, this column left"),
+    (
+        "x X",
+        "table: this row, this column out (back to the one before)",
+    ),
 ];
+
+/// The command a key after `]` (`forward`) or `[` shapes a table with,
+/// for the host to carry out.
+pub(super) fn table_key(key: char, forward: bool) -> &'static str {
+    match (key, forward) {
+        ('r', true) => "table row add below",
+        ('r', false) => "table row add above",
+        ('c', true) => "table column add right",
+        ('c', false) => "table column add left",
+        ('R', true) => "table row move down",
+        ('R', false) => "table row move up",
+        ('C', true) => "table column move right",
+        ('C', false) => "table column move left",
+        ('x', true) => "table row delete",
+        ('x', false) => "table row delete above",
+        ('X', true) => "table column delete",
+        _ => "table column delete left",
+    }
+}
 
 /// What can follow an operator, besides itself doubled.
 const MOTIONS: &[(&str, &str)] = &[
@@ -157,6 +191,10 @@ const REGISTERS: &[(&str, &str)] = &[
     ("-", "what was last deleted in a line"),
     ("_", "nowhere: nothing is kept"),
     ("+", "the system clipboard, where the host has one"),
+    (
+        "*",
+        "the selection, where the host has one: what was selected last",
+    ),
     (":", "the last command line"),
 ];
 

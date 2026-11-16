@@ -457,6 +457,41 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("table delete column"),
     ),
     (
+        "table: a row below, above",
+        "]r  [r  :table row add below",
+        Does::Run("table row add below"),
+    ),
+    (
+        "table: a column right, left",
+        "]c  [c  :table column add right",
+        Does::Run("table column add right"),
+    ),
+    (
+        "table: this row down, up",
+        "]R  [R  :table row move down",
+        Does::Run("table row move down"),
+    ),
+    (
+        "table: this column right, left",
+        "]C  [C  :table column move right",
+        Does::Run("table column move right"),
+    ),
+    (
+        "table: take out this row, this column",
+        "]x  ]X  :table row delete",
+        Does::Run("table row delete"),
+    ),
+    (
+        "table: the first row its header, or not",
+        "gH  :table header",
+        Does::Run("table header"),
+    ),
+    (
+        "table: copy it as cells, for a spreadsheet",
+        "gY  :table copy",
+        Does::Run("table copy"),
+    ),
+    (
         "agents: change the text or propose changes",
         ":agents",
         Does::Run("agents"),
@@ -828,6 +863,9 @@ impl Viewer {
     /// `:table row`, `:table column`, `:table delete row`, `:table
     /// delete column`: of the table the cursor is in.
     fn table_command(&mut self, what: &str) {
+        if self.shape_command(what) {
+            return;
+        }
         let Some(editor) = &mut self.editor else {
             return;
         };

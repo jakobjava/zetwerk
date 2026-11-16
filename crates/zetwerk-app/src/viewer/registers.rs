@@ -64,6 +64,12 @@ impl Viewer {
         }
     }
 
+    /// Notes that the clipboard holds `text`, written there by other
+    /// means than a key: not to be written again.
+    pub(super) fn clipboard_known(&mut self, text: &str) {
+        self.clipboard.known = Some(text.to_owned());
+    }
+
     /// After a key: what the key put into `"+` goes into the clipboard.
     pub(super) fn register_to_clipboard(&mut self) {
         let Some(editor) = &self.editor else {

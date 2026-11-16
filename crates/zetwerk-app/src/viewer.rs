@@ -31,6 +31,7 @@ pub mod refer;
 mod refused;
 mod registers;
 mod saving;
+mod shape;
 mod slides;
 mod sources;
 mod sources_add;
@@ -3238,6 +3239,7 @@ mod tests {
     mod left_behind;
     mod panels;
     mod parts;
+    mod paste;
     mod speed;
     mod typing;
     mod typist;
