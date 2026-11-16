@@ -13,6 +13,7 @@ use crate::took::Took;
 
 mod block;
 mod follow;
+mod kept;
 mod more;
 mod read;
 mod shown;
@@ -1779,6 +1780,12 @@ impl Engine {
                     // Not Vim's: a proposed change shown on the page as
                     // it is, or as it would be.
                     Key::Char('p') => Some("proposal flip"),
+                    // Nor these: the host's ways of looking at the page
+                    // for long (see its `comfort`).
+                    Key::Char('T') => Some("typewriter"),
+                    Key::Char('f') => Some("focus"),
+                    Key::Char('n') => Some("night"),
+                    Key::Char('e') => Some("zen"),
                     _ => None,
                 };
                 if let Some(command) = spelling {
