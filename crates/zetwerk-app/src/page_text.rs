@@ -8,7 +8,7 @@
 //!
 //! ```typst
 //! #page(width: auto, height: auto, margin: 0pt, header: none, footer: none)[#image("cover.pdf", page: 1)]
-//! #page(margin: 0pt, header: none, footer: none)[#image("scan.png", width: 100%, height: 100%, fit: "contain")]
+//! #page(columns: 1, margin: 0pt, header: none, footer: none)[#image("scan.png", width: 100%, height: 100%, fit: "contain")]
 //! #page(header: none, footer: none)[]
 //! ```
 //!
@@ -150,7 +150,10 @@ pub fn written(page: &Page) -> String {
     };
     let number = number.map_or(String::new(), |page| format!(", page: {page}"));
     let (size, fit) = if page.fit {
-        ("", ", width: 100%, height: 100%, fit: \"contain\"")
+        (
+            "columns: 1, ",
+            ", width: 100%, height: 100%, fit: \"contain\"",
+        )
     } else {
         ("width: auto, height: auto, ", "")
     };
@@ -199,7 +202,10 @@ fn callee(call: &LinkedNode) -> Option<String> {
 fn arguments<'a>(call: &LinkedNode<'a>) -> (Vec<(String, LinkedNode<'a>)>, Vec<LinkedNode<'a>>) {
     let mut named = Vec::new();
     let mut positional = Vec::new();
-    let Some(args) = call.children().find(|child| child.kind() == SyntaxKind::Args) else {
+    let Some(args) = call
+        .children()
+        .find(|child| child.kind() == SyntaxKind::Args)
+    else {
         return (named, positional);
     };
     for child in args.children() {
@@ -652,9 +658,9 @@ pub fn moved(
             "it is at the end already: nothing comes behind it".to_owned()
         });
     };
-    let past_text = !pages.iter().any(|page| {
-        (up && page.range.start == target) || (!up && page.range.end == target)
-    });
+    let past_text = !pages
+        .iter()
+        .any(|page| (up && page.range.start == target) || (!up && page.range.end == target));
     let moving = &text[block.clone()];
     // The later place first, so that the earlier one stays where it is.
     if up {
@@ -691,8 +697,7 @@ pub fn replacement(old: &str, new: &str) -> (Range<usize>, String) {
         .take(room)
         .take_while(|(a, b)| a == b)
         .count();
-    while !(old.is_char_boundary(old.len() - suffix) && new.is_char_boundary(new.len() - suffix))
-    {
+    while !(old.is_char_boundary(old.len() - suffix) && new.is_char_boundary(new.len() - suffix)) {
         suffix -= 1;
     }
     (
@@ -714,7 +719,10 @@ pub fn run_of(text: &str, pages: &[Inserted], index: usize) -> Range<usize> {
     };
     let same = |page: &Inserted| matches!(&page.shows, Shows::Pdf { file: of, .. } if *of == file);
     let mut first = index;
-    while first > 0 && same(&pages[first - 1]) && blank(text, pages[first - 1].range.end..pages[first].range.start) {
+    while first > 0
+        && same(&pages[first - 1])
+        && blank(text, pages[first - 1].range.end..pages[first].range.start)
+    {
         first -= 1;
     }
     let mut last = index;
@@ -869,9 +877,10 @@ pub fn brought_in(
     }
     let bytes = std::fs::read(&absolute).map_err(|why| format!("{shown} cannot be read: {why}"))?;
     let into = std::path::absolute(into).map_err(|why| format!("{why}"))?;
-    let stem = absolute
-        .file_stem()
-        .map_or_else(|| "page".to_owned(), |stem| stem.to_string_lossy().into_owned());
+    let stem = absolute.file_stem().map_or_else(
+        || "page".to_owned(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
     let ending = absolute
         .extension()
         .map(|ending| format!(".{}", ending.to_string_lossy()))
@@ -906,7 +915,10 @@ pub fn brought_in(
             )),
         };
     }
-    Err(format!("no free name for {stem}{ending} in {}", into.display()))
+    Err(format!(
+        "no free name for {stem}{ending} in {}",
+        into.display()
+    ))
 }
 
 #[cfg(test)]
@@ -923,10 +935,8 @@ pub(crate) mod tests {
 
     /// A fresh directory for one test.
     fn directory(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "zetwerk-page-text-{}-{name}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("zetwerk-page-text-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
         directory
@@ -954,9 +964,10 @@ pub(crate) mod tests {
     /// that say "One", "Two", "Three": made by Typst itself.
     pub(crate) fn slides_pdf() -> Vec<u8> {
         let env = Environment::new(FontSet::Embedded);
-        let text = "#set page(width: 300pt, height: 200pt)\nOne\n#pagebreak()\nTwo\n#pagebreak()\nThree\n";
-        let project = Project::in_memory(env, PathBuf::from("/"), "main.typ", text.to_owned())
-            .unwrap();
+        let text =
+            "#set page(width: 300pt, height: 200pt)\nOne\n#pagebreak()\nTwo\n#pagebreak()\nThree\n";
+        let project =
+            Project::in_memory(env, PathBuf::from("/"), "main.typ", text.to_owned()).unwrap();
         let world = project.snapshot();
         let document = zetwerk_typst::compile(&world).document.unwrap();
         zetwerk_typst::export_pdf(&document, &world).unwrap()
@@ -995,7 +1006,12 @@ pub(crate) mod tests {
 
     fn page_contents(document: &PagedDocument, index: usize) -> (String, Vec<[i64; 4]>) {
         let (mut text, mut images) = (String::new(), Vec::new());
-        contents(&document.pages()[index].frame, (0.0, 0.0), &mut text, &mut images);
+        contents(
+            &document.pages()[index].frame,
+            (0.0, 0.0),
+            &mut text,
+            &mut images,
+        );
         (text, images)
     }
 
@@ -1041,7 +1057,8 @@ pub(crate) mod tests {
             blank(true),
             blank(false),
         ]);
-        let text = format!("{rules}Before.\n\n{block}\n\nAfter #context counter(page).get().first().\n");
+        let text =
+            format!("{rules}Before.\n\n{block}\n\nAfter #context counter(page).get().first().\n");
         let document = typeset(&directory, &text).unwrap();
         let a5 = (420, 595);
         assert_eq!(
@@ -1049,10 +1066,13 @@ pub(crate) mod tests {
             [a5, (300, 200), a5, a5, (75, 300), a5, a5, a5]
         );
         // As large as it is: the page is the slide.
-        assert_eq!(page_contents(&document, 1), (String::new(), vec![[0, 0, 300, 200]]));
+        assert_eq!(
+            page_contents(&document, 1),
+            (String::new(), vec![[0, 0, 300, 200]])
+        );
         // Fit to the paper: as wide as the paper, in the middle of it.
         assert_eq!(page_contents(&document, 2).1, vec![[0, 158, 420, 280]]);
-        assert_eq!(page_contents(&document, 3).1, vec![[136, 0, 149, 595]]);
+        assert_eq!(page_contents(&document, 3).1, vec![[135, 0, 149, 595]]);
         // No number on a page put in, nor on a blank one; the last page
         // is the eighth, less the two that do not count.
         assert_eq!(page_contents(&document, 0).0, "Before.1");
@@ -1166,7 +1186,10 @@ Inline #page[] is no page of its own line.
         let (end, _) = with_put(&two, content_end(&two), "#page[]", &pages);
         assert!(end.ends_with("Two.\n\n#page[]\n"), "{end}");
         let (start, _) = with_put(text, content_start(&Source::detached(text)), "#page[]", &[]);
-        assert!(start.starts_with("#set page(paper: \"a5\")\n\n#page[]\n\nOne one."), "{start}");
+        assert!(
+            start.starts_with("#set page(paper: \"a5\")\n\n#page[]\n\nOne one."),
+            "{start}"
+        );
         // Taken out again, the text is as it was; a page between two
         // lines of one paragraph leaves them two paragraphs.
         let source = Source::detached(put.as_str());
@@ -1175,7 +1198,10 @@ Inline #page[] is no page of its own line.
         let tight = format!("A.\n{block}\nB.\n");
         let source = Source::detached(tight.as_str());
         let pages = inserted(&source);
-        assert_eq!(without(&tight, pages[0].range.clone(), &pages), "A.\n\nB.\n");
+        assert_eq!(
+            without(&tight, pages[0].range.clone(), &pages),
+            "A.\n\nB.\n"
+        );
         let first = format!("{block}\n\nB.\n");
         let source = Source::detached(first.as_str());
         let pages = inserted(&source);
@@ -1209,7 +1235,14 @@ Inline #page[] is no page of its own line.
         let source = Source::detached(up.as_str());
         let pages = inserted(&source);
         let (top, _, _) = moved(&source, &pages, 0, 1, true).unwrap();
-        assert!(top.starts_with(&format!("#set text(size: 11pt)\n\n{}\n{}\n\nIntro.", page(1), page(2))), "{top}");
+        assert!(
+            top.starts_with(&format!(
+                "#set text(size: 11pt)\n\n{}\n{}\n\nIntro.",
+                page(1),
+                page(2)
+            )),
+            "{top}"
+        );
         let source = Source::detached(top.as_str());
         let pages = inserted(&source);
         assert!(moved(&source, &pages, 0, 1, true).is_err());
@@ -1217,11 +1250,24 @@ Inline #page[] is no page of its own line.
         // text.
         let (swapped, start, past) = moved(&source, &pages, 0, 0, false).unwrap();
         assert!(!past);
-        assert!(swapped.contains(&format!("{}\n{}\n\nIntro.", page(2), page(1))), "{swapped}");
+        assert!(
+            swapped.contains(&format!("{}\n{}\n\nIntro.", page(2), page(1))),
+            "{swapped}"
+        );
         assert_eq!(&swapped[start..start + page(1).len()], page(1));
         // Down from the first place to the end, past all text.
-        let (down, start, _) = moved(&Source::detached(text.as_str()), &inserted(&Source::detached(text.as_str())), 0, 1, false).unwrap();
-        assert!(down.ends_with(&format!("Three.\n\n{}\n{}\n", page(1), page(2))), "{down}");
+        let (down, start, _) = moved(
+            &Source::detached(text.as_str()),
+            &inserted(&Source::detached(text.as_str())),
+            0,
+            1,
+            false,
+        )
+        .unwrap();
+        assert!(
+            down.ends_with(&format!("Three.\n\n{}\n{}\n", page(1), page(2))),
+            "{down}"
+        );
         assert_eq!(&down[start..start + page(1).len()], page(1));
         let (range, with) = replacement(&text, &down);
         let mut again = text.clone();
@@ -1280,7 +1326,10 @@ Inline #page[] is no page of its own line.
         );
         // From elsewhere: copied, then taken as it is.
         let copied = brought_in(&elsewhere.join("cover.pdf"), &document, &document).unwrap();
-        assert_eq!(copied, ("cover.pdf".to_owned(), Some(document.join("cover.pdf"))));
+        assert_eq!(
+            copied,
+            ("cover.pdf".to_owned(), Some(document.join("cover.pdf")))
+        );
         assert_eq!(
             brought_in(&elsewhere.join("cover.pdf"), &document, &document),
             Ok(("cover.pdf".to_owned(), None))
@@ -1288,16 +1337,29 @@ Inline #page[] is no page of its own line.
         // Another file of that name gets a name of its own.
         std::fs::create_dir_all(elsewhere.join("b")).unwrap();
         std::fs::write(elsewhere.join("b/cover.pdf"), b"two").unwrap();
-        let other = brought_in(&elsewhere.join("b/cover.pdf"), &document, &document.join("figures"));
+        let other = brought_in(
+            &elsewhere.join("b/cover.pdf"),
+            &document,
+            &document.join("figures"),
+        );
         assert_eq!(
             other,
-            Ok(("figures/cover.pdf".to_owned(), Some(document.join("figures/cover.pdf"))))
+            Ok((
+                "figures/cover.pdf".to_owned(),
+                Some(document.join("figures/cover.pdf"))
+            ))
         );
         std::fs::write(elsewhere.join("b/cover.pdf"), b"three").unwrap();
         let third = brought_in(&elsewhere.join("b/cover.pdf"), &document, &document);
-        assert_eq!(third, Ok(("cover-2.pdf".to_owned(), Some(document.join("cover-2.pdf")))));
+        assert_eq!(
+            third,
+            Ok(("cover-2.pdf".to_owned(), Some(document.join("cover-2.pdf"))))
+        );
         assert_eq!(std::fs::read(document.join("cover.pdf")).unwrap(), b"one");
-        assert_eq!(std::fs::read(elsewhere.join("b/cover.pdf")).unwrap(), b"three");
+        assert_eq!(
+            std::fs::read(elsewhere.join("b/cover.pdf")).unwrap(),
+            b"three"
+        );
         let nowhere = brought_in(&elsewhere.join("none.pdf"), &document, &document);
         assert!(nowhere.is_err_and(|why| why.contains("no file")));
         let _ = std::fs::remove_dir_all(directory);

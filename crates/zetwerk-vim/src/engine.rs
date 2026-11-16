@@ -2255,6 +2255,10 @@ impl Engine {
             'x' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("written".to_owned()));
             }
+            // Not Vim's: the host's list of the pages (sheets, Seiten).
+            'S' if self.pending.is_idle() && !self.selecting() => {
+                self.effects.push(Effect::Command("pages".to_owned()));
+            }
             // Nor Vim's `gF`: the host's list of the figures and tables.
             'F' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("figures".to_owned()));

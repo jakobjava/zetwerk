@@ -23,6 +23,7 @@ mod local;
 mod manager;
 mod margin;
 pub mod notes;
+mod pages;
 mod palette;
 mod pointer;
 pub mod refer;
@@ -546,6 +547,9 @@ impl PageRows<'_> {
         if covering.is_some() {
             return covering;
         }
+        if let Some(page) = pages::page_showing(self.document, self.world, self.file, then) {
+            return Some(page);
+        }
         let source = self.world.source(self.file).ok()?;
         let then = self.world.shown_at(self.file, then);
         zetwerk_typst::locate(self.document, &source, then, near).map(|position| position.page)
@@ -555,9 +559,9 @@ impl PageRows<'_> {
     fn on<T>(&self, index: usize, ask: impl FnOnce(&PageLines) -> T) -> Option<T> {
         let page = self.document.pages().get(index)?;
         let mut lines = self.lines.borrow_mut();
-        let lines = lines
-            .entry(index)
-            .or_insert_with(|| PageMap::build(self.world, &page.frame).lines());
+        let lines = lines.entry(index).or_insert_with(|| {
+            pages::lines_of(self.world, self.document, index, &page.frame, self.file)
+        });
         Some(ask(lines))
     }
 }
@@ -913,6 +917,8 @@ pub struct Viewer {
     start: start::Start,
     /// The matches of a search and what keys took (see [`find`]).
     find: find::Find,
+    /// What the pages put in whole keep between keys (see [`pages`]).
+    pages: pages::Pages,
     pub stats: Stats,
 }
 
@@ -1021,6 +1027,7 @@ impl Viewer {
             pointer: pointer::Pointer::default(),
             start: start::Start::default(),
             find: find::Find::default(),
+            pages: pages::Pages::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1514,6 +1521,7 @@ impl Viewer {
                 y: cell.min.y.to_pt(),
             })
         });
+        let there = there.or_else(|| pages::shown_on(document, world, file, cursor));
         let shown = world.shown_at(file, cursor);
         let Some(position) =
             there.or_else(|| zetwerk_typst::locate(document, &source, shown, near))
@@ -1729,7 +1737,11 @@ impl Viewer {
         if self.grid.is_some() {
             return self.grid_key(press);
         }
-        if self.start_key(press) || self.refused_key(press) || self.margin_key(press) {
+        if self.start_key(press)
+            || self.refused_key(press)
+            || self.margin_key(press)
+            || self.pages_key(press)
+        {
             return;
         }
         if self.editor.is_some() {
@@ -2353,6 +2365,7 @@ impl Viewer {
             self.find_marks(scene, has, visible.index, origin);
             self.margin_page(scene, has, visible.index, origin);
             self.page_cursor(scene, has, visible.index, origin);
+            self.pages_marks(scene, has, visible.index, origin);
             self.review_page(scene, has, visible.index, origin);
             self.focus_marks(scene, has, visible.index, origin);
             // Last: the labels lie over all else.
@@ -3196,6 +3209,7 @@ mod tests {
     #[path = "keys.rs"]
     mod keyboard;
     mod left_behind;
+    mod pages;
     mod panels;
     mod parts;
     mod speed;

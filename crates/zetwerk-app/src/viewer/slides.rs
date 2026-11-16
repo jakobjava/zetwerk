@@ -115,7 +115,8 @@ impl Viewer {
         let first = match (&self.document, &self.compiled_world, self.places()) {
             (Some(document), Some(world), Some(change)) => {
                 document.pages().get(index).and_then(|page| {
-                    let lines = zetwerk_typst::PageMap::build(world, &page.frame).lines();
+                    let lines =
+                        super::pages::lines_of(world, document, index, &page.frame, self.file_id());
                     let line = lines.enter(true)?;
                     let (file, offset) = lines.first(line)?;
                     let here = file == self.file_id();

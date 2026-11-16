@@ -326,6 +326,16 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("bib undo"),
     ),
     (
+        "pages: list — put in a PDF, an image, a blank page; move, take out",
+        "gS",
+        Does::Run("pages"),
+    ),
+    (
+        "put pages in: of a PDF (2, 1-3, all), an image, a blank page",
+        ":page add [file] [pages]",
+        Does::Ask("page add "),
+    ),
+    (
         "figures and tables: list — caption, label, width, rows, …",
         "gF",
         Does::Run("figures"),
@@ -746,6 +756,7 @@ impl Viewer {
             // out as an image (see `export`).
             ("figure", "") => self.figures_command("here"),
             ("structure", command) => self.structure_command(command),
+            ("pages" | "page", rest) if self.pages_command(name, rest) => {}
             ("section", what) => self.section_command(what),
             ("table", what) => self.table_command(what),
             ("tags" | "errors" | "invisible" | "invisibles", _) => {

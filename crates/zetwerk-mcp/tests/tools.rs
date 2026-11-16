@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Map, Value, json};
 use zetwerk_mcp::{
     Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, NewNote,
-    NoteAnchor, NoteAnswer, Output, Place, Selection, Tools, call, serve, socket_of,
+    NoteAnchor, NoteAnswer, Output, PagesWanted, Place, Selection, Tools, call, serve, socket_of,
 };
 
 /// An editor that records the keys it was sent and the changes it was
@@ -746,4 +746,56 @@ fn an_agent_is_put_to_work_in_the_window_of_its_document() {
     assert_eq!(of("/home/someone/thesis.typ"), Ok(older));
     assert_eq!(of("/home/someone/notes.typ"), Ok(newer));
     assert!(of("/home/someone/other.typ").is_err());
+}
+
+#[test]
+fn pages_are_put_in_by_file_pages_and_place() {
+    let (_scratch_socket, socket) = socket("pages");
+    let editor = Arc::new(FakeEditor::default());
+    let _server = serve(&socket, Arc::clone(&editor) as Arc<dyn Editor>, PLAIN)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    let all = json!({ "file": "cover.pdf", "expected_revision": 7 });
+    assert_eq!(
+        answer(&socket, "insert_pages", &all),
+        Ok(json!({ "applied": true, "revision": 8 }))
+    );
+    let some = json!({
+        "file": "paper.pdf", "pages": "1,4-6", "where": "after:12", "fit": true,
+        "counted": false, "mode": "propose"
+    });
+    assert_eq!(
+        answer(&socket, "insert_pages", &some),
+        Ok(json!({ "applied": false, "revision": 8 }))
+    );
+    // A file is needed; a revision of the past is refused.
+    assert!(answer(&socket, "insert_pages", &json!({ "pages": "2" })).is_err());
+    let stale = json!({ "file": "cover.pdf", "expected_revision": 3 });
+    assert!(answer(&socket, "insert_pages", &stale).is_err());
+    let changes = editor.changes.lock().map(|changes| changes.clone()).ok();
+    assert_eq!(
+        changes,
+        Some(vec![
+            Change {
+                what: ChangeKind::InsertPages(PagesWanted {
+                    file: "cover.pdf".to_owned(),
+                    ..PagesWanted::default()
+                }),
+                expected_revision: Some(7),
+                propose: false,
+                reason: None,
+            },
+            Change {
+                what: ChangeKind::InsertPages(PagesWanted {
+                    file: "paper.pdf".to_owned(),
+                    pages: Some("1,4-6".to_owned()),
+                    place: Some("after:12".to_owned()),
+                    fit: Some(true),
+                    counted: Some(false),
+                }),
+                expected_revision: None,
+                propose: true,
+                reason: None,
+            },
+        ])
+    );
 }
