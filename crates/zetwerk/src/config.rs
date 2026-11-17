@@ -28,6 +28,14 @@
 //! languagetool = "http://localhost:8081"
 //! allow_remote = false
 //!
+//! [packages]
+//! # Whether Typst packages a document imports and this machine lacks are
+//! # fetched from packages.typst.org: "ask" (g in :why, or :package get,
+//! # each time), "always" (as soon as a document lacks one; not those an
+//! # agent imports) or "never". What is sent is a request for the package
+//! # by name and version, nothing of the document.
+//! download = "ask"
+//!
 //! # Your own keys, as in Vim's nnoremap and inoremap.
 //! [[insert]]            # your own things for the `#` menu
 //! name = "diagram"
@@ -64,6 +72,8 @@ pub struct Config {
     pub language: Checking,
     #[serde(default)]
     pub keys: Keys,
+    #[serde(default)]
+    pub packages: Packages,
     /// The user's own things to put in.
     #[serde(default)]
     pub insert: Vec<Insert>,
@@ -212,6 +222,40 @@ impl Checking {
                     url: url.clone(),
                     remote: self.allow_remote,
                 }),
+        }
+    }
+}
+
+/// Whether Typst packages are fetched from packages.typst.org.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Packages {
+    #[serde(default)]
+    pub download: Download,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Download {
+    #[default]
+    Ask,
+    Always,
+    Never,
+}
+
+impl Packages {
+    /// The settings as the viewer takes them: packages kept where
+    /// Typst's own program keeps them.
+    #[must_use]
+    pub fn settings(&self) -> zetwerk_app::viewer::packages::Settings {
+        use zetwerk_app::viewer::packages::Download as Viewer;
+        zetwerk_app::viewer::packages::Settings {
+            download: match self.download {
+                Download::Ask => Viewer::Ask,
+                Download::Always => Viewer::Always,
+                Download::Never => Viewer::Never,
+            },
+            ..Default::default()
         }
     }
 }
@@ -385,6 +429,25 @@ mod tests {
         let wrong = parse("[ai]\nedit_mode = \"yolo\"\n");
         assert!(wrong.is_err_and(|why| why.starts_with("line 2")));
         assert!(parse("[ia]\n").is_err());
+    }
+
+    #[test]
+    fn packages_are_fetched_when_asked_unless_the_settings_say_otherwise() {
+        use zetwerk_app::viewer::packages::Download as Viewer;
+        assert_eq!(Config::default().packages.settings().download, Viewer::Ask);
+        for (said, meant) in [
+            ("ask", Viewer::Ask),
+            ("always", Viewer::Always),
+            ("never", Viewer::Never),
+        ] {
+            let config = parse(&format!("[packages]\ndownload = \"{said}\"\n"));
+            assert_eq!(
+                config.map(|config| config.packages.settings().download),
+                Ok(meant)
+            );
+        }
+        assert!(parse("[packages]\ndownload = \"sometimes\"\n").is_err());
+        assert!(parse("[packages]\nfetch = \"ask\"\n").is_err());
     }
 
     #[test]

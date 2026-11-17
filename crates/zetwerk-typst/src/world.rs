@@ -2,7 +2,8 @@
 //!
 //! Three layers, from long-lived to short-lived:
 //!
-//! - [`Environment`]: standard library, fonts and package access. Expensive to
+//! - [`Environment`]: standard library, fonts and where packages are kept
+//!   (see [`crate::packages`]: a compile never fetches one). Expensive to
 //!   build (system font scan), shared by every project and every compile.
 //! - [`Project`]: one document on disk plus the sources the editor owns. The
 //!   editor mutates sources here; they are authoritative over what is on disk.
@@ -15,17 +16,17 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use typst::diag::{FileError, FileResult};
+use typst::diag::{FileError, FileResult, PackageError};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 use typst_kit::datetime::Time;
-use typst_kit::downloader::SystemDownloader;
 use typst_kit::files::FsRoot;
 use typst_kit::fonts::{self, FontStore};
-use typst_kit::packages::SystemPackages;
+
+use crate::packages::PackageDirs;
 
 /// Which fonts an [`Environment`] offers to documents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub enum FontSet {
 pub struct Environment {
     library: LazyHash<Library>,
     fonts: FontStore,
-    packages: SystemPackages,
+    packages: PackageDirs,
 }
 
 impl Environment {
@@ -50,6 +51,13 @@ impl Environment {
     /// once and share it.
     #[must_use]
     pub fn new(font_set: FontSet) -> Arc<Self> {
+        Self::with_packages(font_set, PackageDirs::system())
+    }
+
+    /// The same, with packages found in `packages` and not where Typst's
+    /// own program keeps them.
+    #[must_use]
+    pub fn with_packages(font_set: FontSet, packages: PackageDirs) -> Arc<Self> {
         let mut store = FontStore::new();
         store.extend(fonts::embedded());
         if font_set == FontSet::EmbeddedAndSystem {
@@ -58,11 +66,14 @@ impl Environment {
         Arc::new(Self {
             library: LazyHash::new(Library::default()),
             fonts: store,
-            packages: SystemPackages::new(SystemDownloader::new(concat!(
-                "zetwerk/",
-                env!("CARGO_PKG_VERSION")
-            ))),
+            packages,
         })
+    }
+
+    /// Where packages are kept.
+    #[must_use]
+    pub fn packages(&self) -> &PackageDirs {
+        &self.packages
     }
 }
 
@@ -244,6 +255,18 @@ impl Project {
             VirtualRoot::Project => self.root.resolve(id.vpath()).ok(),
             VirtualRoot::Package(_) => None,
         }
+    }
+
+    /// Where the packages the document imports are kept.
+    #[must_use]
+    pub fn packages(&self) -> &PackageDirs {
+        self.env.packages()
+    }
+
+    /// Tells the project that packages were put in place or taken away:
+    /// the next compile looks for them again.
+    pub fn packages_changed(&mut self) {
+        self.external.forget_packages();
     }
 
     /// Replaces the whole text of the main source, reparsing only what
@@ -486,7 +509,11 @@ impl ProjectWorld {
     fn load_external(&self, id: FileId) -> FileResult<Bytes> {
         match id.root() {
             VirtualRoot::Project => self.root.load(id.vpath()),
-            VirtualRoot::Package(spec) => self.env.packages.obtain(spec)?.load(id.vpath()),
+            // Never fetched here: see `crate::packages`.
+            VirtualRoot::Package(spec) => match crate::packages::find(&self.env.packages, spec) {
+                Some((dir, _)) => FsRoot::new(dir).load(id.vpath()),
+                None => Err(FileError::Package(PackageError::NotFound(spec.clone()))),
+            },
         }
     }
 }
@@ -549,6 +576,12 @@ impl ExternalFiles {
     /// Drops what is cached for `id`. Returns whether anything was.
     fn forget(&self, id: FileId) -> bool {
         self.lock().remove(&id).is_some()
+    }
+
+    /// Drops what is cached of the files of packages.
+    fn forget_packages(&self) {
+        self.lock()
+            .retain(|id, _| !matches!(id.root(), VirtualRoot::Package(_)));
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<FileId, ExternalSlot>> {

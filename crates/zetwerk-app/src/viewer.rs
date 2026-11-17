@@ -25,6 +25,7 @@ mod local;
 mod manager;
 mod margin;
 pub mod notes;
+pub mod packages;
 mod palette;
 mod pointer;
 pub mod refer;
@@ -927,6 +928,8 @@ pub struct Viewer {
     find: find::Find,
     /// What the window waits for (see [`waiting`]).
     waiting: waiting::Waiting,
+    /// What is kept of packages (see [`packages`]).
+    packages: packages::Packages,
     pub stats: Stats,
 }
 
@@ -1039,6 +1042,7 @@ impl Viewer {
             start: start::Start::default(),
             find: find::Find::default(),
             waiting: waiting::Waiting::default(),
+            packages: packages::Packages::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1083,6 +1087,7 @@ impl Viewer {
         }
         self.inserts.clone_from(&options.inserts);
         self.set_language(&options.language);
+        self.set_packages(&options.packages);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
             self.ui = ui.clamp(UI_SMALLEST, UI_LARGEST);
             self.scale = self.display * self.ui;
@@ -1754,6 +1759,9 @@ impl Viewer {
         if self.grid.is_some() {
             return self.grid_key(press);
         }
+        if self.packages_key(press) {
+            return;
+        }
         if self.start_key(press) || self.refused_key(press) || self.margin_key(press) {
             return;
         }
@@ -2101,6 +2109,9 @@ impl Viewer {
 
     fn execute(&mut self, command: &str) {
         if self.start_command(command) {
+            return;
+        }
+        if self.packages_command(command) {
             return;
         }
         let unwritten = self.unwritten();
@@ -3236,6 +3247,7 @@ mod tests {
     #[path = "keys.rs"]
     mod keyboard;
     mod left_behind;
+    mod packages;
     mod panels;
     mod parts;
     mod speed;

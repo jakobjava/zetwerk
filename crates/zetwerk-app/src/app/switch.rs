@@ -181,6 +181,7 @@ impl Session {
         self.viewer.sync();
         self.viewer = viewer;
         self.viewer.export_in_background(wake());
+        self.viewer.packages_in_background(wake());
         self.window.set_title(&title(&options.path));
         self.watch_dependencies();
         welcome(&mut self.viewer, options, new);

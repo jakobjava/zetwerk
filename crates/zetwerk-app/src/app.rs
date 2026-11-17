@@ -63,6 +63,8 @@ pub struct Options {
     pub language: zetwerk_language::Settings,
     /// Where the user's own starters for new documents are.
     pub templates: Option<PathBuf>,
+    /// Whether packages are fetched, and where they are kept.
+    pub packages: viewer::packages::Settings,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -359,7 +361,7 @@ impl Session {
         proxy: &EventLoopProxy<Event>,
         event_loop: &ActiveEventLoop,
     ) -> Result<Self, String> {
-        let env = Environment::new(options.font_set);
+        let env = Environment::with_packages(options.font_set, options.packages.dirs.clone());
         let document = switch::Document::open(&env, options)?;
         let attributes = Window::default_attributes()
             .with_title(switch::title(&options.path))
@@ -454,6 +456,7 @@ impl Session {
             waiting: Vec::new(),
         };
         session.viewer.export_in_background(wake(proxy));
+        session.viewer.packages_in_background(wake(proxy));
         session.watch_dependencies();
         switch::welcome(&mut session.viewer, options, false);
         session.scheduler.request(Urgency::Now, Instant::now());
@@ -634,6 +637,9 @@ impl Session {
             self.after_keys();
         }
         self.viewer.export_progress();
+        if self.viewer.packages_progress() {
+            self.scheduler.request(Urgency::Now, Instant::now());
+        }
         for tile in self.rasterizer.poll() {
             let (width, height) = (tile.pixmap.width(), tile.pixmap.height());
             self.gpu

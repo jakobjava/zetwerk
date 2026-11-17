@@ -629,6 +629,10 @@ impl Editor for Bridge {
         Ok(json!({ "figures": listed }))
     }
 
+    fn packages(&self) -> Result<Value, String> {
+        self.now(|viewer| viewer.packages_listed())
+    }
+
     fn targets(&self) -> Result<Value, String> {
         let shown = self.shown()?;
         let (targets, revision) = self.compiled_for(shown, |viewer| {
@@ -745,7 +749,9 @@ impl Editor for Bridge {
 
     fn send_keys(&self, keys: &str) -> Result<(), String> {
         let keys = keys::parse(keys)?;
-        if self.handle.send(Request::Keys(keys)) {
+        // An agent's keys fetch no package (see `viewer::packages`).
+        let task: Task = Box::new(move |viewer| viewer.keys_of_agent(&keys));
+        if self.handle.send(Request::Do(task)) {
             Ok(())
         } else {
             Err("the zetwerk window has closed".to_owned())
@@ -868,6 +874,7 @@ mod tests {
             inserts: Vec::new(),
             language: zetwerk_language::Settings::default(),
             templates: None,
+            packages: zetwerk_app::viewer::packages::Settings::default(),
         }
     }
 

@@ -9739,12 +9739,18 @@ name = "zetwerk-typst"
 version = "0.1.0"
 dependencies = [
  "comemo",
+ "flate2",
+ "native-tls",
  "rayon",
+ "serde_json",
+ "tar",
+ "toml 1.2.1+spec-1.1.0",
  "typst",
  "typst-ide",
  "typst-kit",
  "typst-layout",
  "typst-pdf",
+ "ureq",
 ]
 
 [[package]]
