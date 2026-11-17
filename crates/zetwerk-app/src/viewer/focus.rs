@@ -50,6 +50,9 @@ const LEAST: f64 = 4.0;
 /// how far it stands off its box.
 const HINT_SIZE: f64 = 4.5;
 const HINT_GAP: f64 = 0.5;
+/// How large the word is where it has no room of its own: over the text
+/// beside it, it is to be little more than a mark.
+const FAINT_SIZE: f64 = 3.0;
 /// The places whose word stands above their box: those above the rest
 /// of what they are part of. All others have it below theirs.
 const ABOVE: &[&str] = &["numerator", "exponent", "upper", "upper limit", "index"];
@@ -110,6 +113,17 @@ enum Side {
     Below,
     /// Behind the cursor, on its line.
     Behind,
+    /// Above or below, where there is no room on any side: smaller and
+    /// fainter, over what is there.
+    FaintAbove,
+    FaintBelow,
+}
+
+impl Side {
+    /// Whether the word stands small and faint on this side.
+    fn is_faint(self) -> bool {
+        matches!(self, Side::FaintAbove | Side::FaintBelow)
+    }
 }
 
 /// The markup for the word that says what an empty place is for: small,
@@ -123,6 +137,16 @@ fn hint_markup(word: &str) -> String {
          bottom-edge: \"descender\")\n\
          {word}"
     )
+}
+
+/// [`hint_markup`] where the word has no room: smaller and fainter.
+fn faint_markup(word: &str) -> String {
+    hint_markup(word)
+        .replace(
+            &format!("size: {HINT_SIZE}pt"),
+            &format!("size: {FAINT_SIZE}pt"),
+        )
+        .replace("transparentize(45%)", "transparentize(70%)")
 }
 
 /// The bytes of the file a glyph shows, if it is of `file`.
@@ -459,7 +483,12 @@ impl Viewer {
             &[]
         };
         for (rect, side, word) in words {
-            let Some(image) = self.chrome.render(&hint_markup(word), zoom) else {
+            let markup = if side.is_faint() {
+                faint_markup(word)
+            } else {
+                hint_markup(word)
+            };
+            let Some(image) = self.chrome.render(&markup, zoom) else {
                 continue;
             };
             let (width, height) = (
@@ -470,8 +499,8 @@ impl Viewer {
             let gap = HINT_GAP * zoom;
             let middle = f64::midpoint(left, right) - width / 2.0;
             let (x, y) = match side {
-                Side::Above => (middle, top - height - gap),
-                Side::Below => (middle, bottom + gap),
+                Side::Above | Side::FaintAbove => (middle, top - height - gap),
+                Side::Below | Side::FaintBelow => (middle, bottom + gap),
                 Side::Behind => (right + 2.0 * gap, f64::midpoint(top, bottom) - height / 2.0),
             };
             scene.quads.push(Quad {
@@ -525,13 +554,19 @@ fn slot_hints(
                 Side::Below
             };
             // Not over the line above or below: behind the box, if there
-            // is room there.
+            // is room there, or on its other side. Where there is room
+            // nowhere (text behind it, lines above and below), smaller
+            // and fainter where it would stand.
             let over = |side| covers_text(map, hint_area(glyph.rect, side, word));
-            let side = if over(side) && !over(Side::Behind) {
-                Side::Behind
+            let (other, faint) = if side == Side::Above {
+                (Side::Below, Side::FaintAbove)
             } else {
-                side
+                (Side::Above, Side::FaintBelow)
             };
+            let side = [side, Side::Behind, other]
+                .into_iter()
+                .find(|side| !over(*side))
+                .unwrap_or(faint);
             hints.push((glyph.rect, side, word));
         }
     }
@@ -543,13 +578,18 @@ fn slot_hints(
 /// its monospaced font about 0.6 of its size wide, and as high as it
 /// is large and a fifth.
 fn hint_area(rect: Rect, side: Side, word: &str) -> Rect {
-    let (width, height) = (0.6 * HINT_SIZE * word.len() as f64, 1.2 * HINT_SIZE);
+    let points = if side.is_faint() {
+        FAINT_SIZE
+    } else {
+        HINT_SIZE
+    };
+    let (width, height) = (0.6 * points * word.len() as f64, 1.2 * points);
     let (left, right) = (rect.min.x.to_pt(), rect.max.x.to_pt());
     let (top, bottom) = (rect.min.y.to_pt(), rect.max.y.to_pt());
     let middle = f64::midpoint(left, right) - width / 2.0;
     let (x, y) = match side {
-        Side::Above => (middle, top - height - HINT_GAP),
-        Side::Below => (middle, bottom + HINT_GAP),
+        Side::Above | Side::FaintAbove => (middle, top - height - HINT_GAP),
+        Side::Below | Side::FaintBelow => (middle, bottom + HINT_GAP),
         Side::Behind => (
             right + 2.0 * HINT_GAP,
             f64::midpoint(top, bottom) - height / 2.0,
@@ -703,6 +743,32 @@ mod tests {
                 .is_some_and(|text| text.contains("frac(a, b)"))
         );
         assert_eq!(hinted(&mut viewer, "denominator"), 0);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_word_with_no_room_is_small_and_faint() {
+        // Text right behind the exponent and lines close above and below
+        // it: the word would stand over a line whichever side it is on.
+        let text = "#set page(width: 300pt, height: 300pt)\n\
+                    #set par(leading: 0.2em)\n\
+                    Some words over the line of it to fill the line above it.\n\
+                    Words and $x^2$ and more words behind it to the end of it.\n\
+                    Some words under the line of it to fill the line below it.\n";
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "gsgs");
+        type_at(&mut viewer, "2$");
+        press(&mut viewer, "<Del>");
+        compile(&mut viewer);
+        let id = Chrome::id(&faint_markup("exponent"), viewer.view.zoom);
+        let faint = |viewer: &mut Viewer| {
+            let scene = viewer.scene(&|_| false);
+            scene.quads.iter().filter(|quad| quad.texture == id).count()
+        };
+        assert_eq!(
+            (hinted(&mut viewer, "exponent"), faint(&mut viewer)),
+            (0, 1)
+        );
         let _ = std::fs::remove_dir_all(directory);
     }
 
