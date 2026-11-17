@@ -1,4 +1,5 @@
 pub mod app;
+pub mod authorship;
 pub mod bib;
 pub mod chrome;
 pub mod clipboard;

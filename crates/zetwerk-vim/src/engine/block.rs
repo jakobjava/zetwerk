@@ -481,6 +481,7 @@ impl Engine {
                 let last = time + 1 == count;
                 put.push_str(if last && !more { piece } else { &padded });
             }
+            host.putting(piece);
             self.edit(host, place..place, &put);
         }
         let text = Text(host.text());

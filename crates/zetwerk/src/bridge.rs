@@ -38,6 +38,16 @@ type Shown = (Option<PathBuf>, Option<PathBuf>);
 
 /// Why a request that waited is not answered: the user went to another
 /// document meanwhile.
+/// The agent whose request this thread answers, as it introduced
+/// itself to the MCP server.
+fn caller() -> Option<zetwerk_app::viewer::authors::Agent> {
+    zetwerk_mcp::caller().map(|caller| zetwerk_app::viewer::authors::Agent {
+        name: caller.name,
+        version: caller.version,
+        session: caller.session,
+    })
+}
+
 const SWITCHED: &str = "the window shows another document now: what you asked of the one it \
                         showed was not done; see get_state for what it shows";
 
@@ -345,9 +355,10 @@ impl Editor for Bridge {
             propose,
             reason,
         } = change;
+        let agent = caller();
         let (outcome, made_ids, shown) = self.now(move |viewer| {
             let first = viewer.next_proposal_id();
-            let outcome = made(viewer, what, expected, propose);
+            let outcome = viewer.as_agent(agent, |viewer| made(viewer, what, expected, propose));
             if let (Ok(Outcome::Proposed { .. }), Some(reason)) = (&outcome, &reason) {
                 viewer.explain_proposals(first, reason);
             }
@@ -780,12 +791,15 @@ impl Editor for Bridge {
 
     fn answer_note(&self, answer: NoteAnswer) -> Result<Value, String> {
         let id = answer.id;
+        let agent = caller();
         let proposal = self.now(move |viewer| {
-            let change = answer
-                .change
-                .as_ref()
-                .map(|(old, new)| (old.as_str(), new.as_str()));
-            viewer.agent_answer_note(answer.id, &answer.text, change, answer.expected_revision)
+            viewer.as_agent(agent, |viewer| {
+                let change = answer
+                    .change
+                    .as_ref()
+                    .map(|(old, new)| (old.as_str(), new.as_str()));
+                viewer.agent_answer_note(answer.id, &answer.text, change, answer.expected_revision)
+            })
         })??;
         Ok(json!({ "answered": id, "proposal": proposal }))
     }
@@ -793,6 +807,10 @@ impl Editor for Bridge {
     fn resolve_note(&self, id: u64) -> Result<Value, String> {
         self.now(move |viewer| viewer.agent_resolve_note(id))??;
         Ok(json!({ "resolved": id }))
+    }
+
+    fn authorship(&self, lines: Option<(usize, usize)>) -> Result<Value, String> {
+        self.now(move |viewer| viewer.authorship(lines))?
     }
 }
 
@@ -868,6 +886,7 @@ mod tests {
             inserts: Vec::new(),
             language: zetwerk_language::Settings::default(),
             templates: None,
+            authors: zetwerk_app::viewer::authors::Settings::default(),
         }
     }
 

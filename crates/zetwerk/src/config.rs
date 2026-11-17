@@ -18,6 +18,10 @@
 //! [power]
 //! mode = "auto"       # or "saver", "performance"
 //!
+//! [authors]
+//! view = "off"        # or "origin", "age", "unread": how pages are tinted
+//! hide_unknown = false # leave text of unknown origin untinted
+//!
 //! [language]
 //! spelling = true     # words no dictionary knows are marked on the page
 //! grammar = true      # and what a grammar checker finds
@@ -60,6 +64,8 @@ pub struct Config {
     pub view: View,
     #[serde(default)]
     pub power: Power,
+    #[serde(default)]
+    pub authors: Authors,
     #[serde(default)]
     pub language: Checking,
     #[serde(default)]
@@ -126,6 +132,42 @@ impl From<Layout> for Panes {
             Layout::Split => Self::Split,
             Layout::Source => Self::Source,
             Layout::Page => Self::Page,
+        }
+    }
+}
+
+/// How who wrote what is shown (see `zetwerk_app::viewer::authors`).
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Authors {
+    /// How the pages are tinted when the window opens.
+    pub view: Option<AuthorsView>,
+    /// Whether text of unknown origin is left untinted.
+    #[serde(default)]
+    pub hide_unknown: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorsView {
+    Off,
+    Origin,
+    Age,
+    Unread,
+}
+
+impl Authors {
+    #[must_use]
+    pub fn settings(&self) -> zetwerk_app::viewer::authors::Settings {
+        use zetwerk_app::viewer::authors::Tint;
+        zetwerk_app::viewer::authors::Settings {
+            view: match self.view {
+                None | Some(AuthorsView::Off) => None,
+                Some(AuthorsView::Origin) => Some(Tint::Origin),
+                Some(AuthorsView::Age) => Some(Tint::Age),
+                Some(AuthorsView::Unread) => Some(Tint::Unread),
+            },
+            hide_unknown: self.hide_unknown,
         }
     }
 }

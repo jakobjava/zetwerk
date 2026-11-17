@@ -754,7 +754,24 @@ impl Attribution {
         let new_words: Vec<&str> = to.iter().map(|at| &change.new[at.clone()]).collect();
         let mut new = Vec::new();
         let (mut old_at, mut new_at) = (0, 0);
-        let kept = aligned(&old_words, &new_words);
+        // A blank or a sign is kept only beside a word that is kept: a
+        // sentence rewritten is not the old one's for its full stop.
+        let word = |token: &str| token.chars().any(char::is_alphanumeric);
+        let aligned = aligned(&old_words, &new_words);
+        let kept_words: std::collections::HashSet<usize> = aligned
+            .iter()
+            .filter(|(_, b)| word(new_words[*b]))
+            .map(|(_, b)| *b)
+            .collect();
+        let kept: Vec<(usize, usize)> = aligned
+            .into_iter()
+            .filter(|(_, b)| {
+                word(new_words[*b])
+                    || b.checked_sub(1)
+                        .is_some_and(|before| kept_words.contains(&before))
+                    || kept_words.contains(&(b + 1))
+            })
+            .collect();
         let ends = kept.iter().copied().chain([(from.len(), to.len())]);
         for (index, (a, b)) in ends.enumerate() {
             if new_at < b {
@@ -1723,10 +1740,9 @@ mod tests {
         assert_eq!(document.history().len(), 3, "the history is all there");
         let unknown = |document: &crate::Document<String>| {
             let origins = document.origins();
-            origins
-                .map()
-                .iter()
-                .all(|(_, mark)| origins.kind(mark) == Kind::Unknown && origins.credit(mark.by).when == 0)
+            origins.map().iter().all(|(_, mark)| {
+                origins.kind(mark) == Kind::Unknown && origins.credit(mark.by).when == 0
+            })
         };
         assert!(unknown(&document), "nothing is said of what is not known");
         assert_eq!(document.origins().map().len(), 2);
@@ -1737,7 +1753,10 @@ mod tests {
             .edit(&[crate::Replace::insert(2, "c")], false)
             .unwrap_or_else(|err| panic!("{err}"));
         let origins = document.origins();
-        assert_eq!(origins.map().at(2).map(|mark| origins.kind(mark)), Some(Kind::Own));
+        assert_eq!(
+            origins.map().at(2).map(|mark| origins.kind(mark)),
+            Some(Kind::Own)
+        );
         drop(document);
         let _ = std::fs::remove_dir_all(&root);
     }

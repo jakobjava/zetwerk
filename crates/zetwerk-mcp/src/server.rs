@@ -51,6 +51,19 @@ struct ReadSourceArgs {
     /// Last line to read (default: the last). At most 2000 lines are
     /// given at once.
     to_line: Option<usize>,
+    /// Also say who wrote each stretch of these lines (as
+    /// `get_authorship` does), after them (default false).
+    #[serde(default)]
+    with_origins: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AuthorshipArgs {
+    /// First line whose stretches to list, counting from 1. Without
+    /// it, only the shares are given.
+    from_line: Option<usize>,
+    /// Last line whose stretches to list (default: `from_line`).
+    to_line: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -309,11 +322,40 @@ impl Server {
         Parameters(args): Parameters<ReadSourceArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let editor = Arc::clone(&self.editor);
-        let read = blocking(move || editor.read_source(args.from_line, args.to_line)).await?;
+        let read = blocking(move || {
+            let text = editor.read_source(args.from_line, args.to_line)?;
+            if !args.with_origins {
+                return Ok(text);
+            }
+            let from = args.from_line.unwrap_or(1);
+            let to = args.to_line.unwrap_or(usize::MAX);
+            let origins = editor.authorship(Some((from, to)))?;
+            Ok(format!("{text}\norigins: {}", origins["runs"]))
+        })
+        .await?;
         Ok(match read {
             Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
             Err(message) => failure(message),
         })
+    }
+
+    /// Who wrote the document, as zetwerk recorded it: the shares of its
+    /// text (characters and words) that the user typed, that agents
+    /// wrote (as written, or edited by the user since), that were pasted,
+    /// changed outside zetwerk, or are of unknown origin; per section;
+    /// and, for the lines asked for, each stretch with who wrote it and
+    /// when. Ask it before changing text the user wrote: leave the
+    /// user's own sentences alone unless asked to change them. It cannot
+    /// be changed: whatever you change is credited to you.
+    #[tool(annotations(title = "Authorship", read_only_hint = true))]
+    async fn get_authorship(
+        &self,
+        Parameters(args): Parameters<AuthorshipArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let lines = args
+            .from_line
+            .map(|from| (from, args.to_line.unwrap_or(from)));
+        self.value(move |editor| editor.authorship(lines)).await
     }
 
     /// The compile errors of the document as it is now (waits for the
@@ -741,6 +783,18 @@ impl Server {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Server {
+    /// Every tool call, with its caller known to the editor calls it
+    /// makes (see `caller`).
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
+        let caller = crate::caller::of(&context.peer);
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        crate::caller::scope(caller, self.tool_router.call(call)).await
+    }
+
     fn get_info(&self) -> ServerConfig {
         let instructions = if self.headless {
             HEADLESS
@@ -776,7 +830,8 @@ const HEADLESS_SAVE: &str = "Write the text to the document's file. This session
 async fn blocking<T: Send + 'static>(
     call: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ErrorData> {
-    tokio::task::spawn_blocking(call)
+    let caller = crate::caller::current();
+    tokio::task::spawn_blocking(move || crate::caller::on_thread(caller, call))
         .await
         .map_err(|err| ErrorData::internal_error(format!("editor call failed: {err}"), None))
 }

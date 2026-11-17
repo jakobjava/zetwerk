@@ -89,7 +89,10 @@ fn credits_of(document: &Document<String>) -> Credits {
     let mut credits = Vec::new();
     for (range, mark) in origins.map().iter() {
         let Credited { by, over } = origins.credited(mark);
-        credits.extend(std::iter::repeat_n((by.origin, over.map(|over| over.origin)), range.len()));
+        credits.extend(std::iter::repeat_n(
+            (by.origin, over.map(|over| over.origin)),
+            range.len(),
+        ));
     }
     credits
 }
@@ -111,7 +114,8 @@ static CASE: AtomicUsize = AtomicUsize::new(0);
 impl Session {
     fn new(initial: &str) -> Self {
         let case = CASE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("zetwerk-origins-{}-{case}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("zetwerk-origins-{}-{case}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("work")).unwrap();
         std::fs::write(root.join("work/doc.typ"), initial).unwrap();
@@ -271,12 +275,13 @@ impl Session {
             assert_eq!(self.doc().history().len(), states + 1);
             let text = self.doc().text().to_owned();
             let credits = credits_of(self.doc());
-            assert!(
-                credits
-                    .iter()
-                    .all(|credit| credit.0 == Origin::Outside || credit.0 != Origin::Author
-                        || self.states.iter().any(|(_, known)| known.as_ref().is_some_and(|known| known.contains(credit))))
-            );
+            assert!(credits.iter().all(|credit| {
+                credit.0 == Origin::Outside
+                    || credit.0 != Origin::Author
+                    || self.states.iter().any(|(_, known)| {
+                        known.as_ref().is_some_and(|known| known.contains(credit))
+                    })
+            }));
             self.states.push((text, Some(credits)));
         }
     }
@@ -312,7 +317,8 @@ impl Session {
             {
                 for credit in &credits {
                     assert!(
-                        known.contains(credit) || matches!(credit.0, Origin::Outside | Origin::Unknown),
+                        known.contains(credit)
+                            || matches!(credit.0, Origin::Outside | Origin::Unknown),
                         "{credit:?} after a torn journal"
                     );
                 }
@@ -340,7 +346,10 @@ impl Session {
         assert_eq!(self.doc().history().len(), self.states.len());
         let text = self.doc().text().to_owned();
         let credits = credits_of(self.doc());
-        assert_eq!(text, self.states[state].0, "state {state} has the wrong text");
+        assert_eq!(
+            text, self.states[state].0,
+            "state {state} has the wrong text"
+        );
         assert_eq!(credits.len(), text.len(), "the attribution covers the text");
         match &self.states[state].1 {
             Some(known) => assert_eq!(&credits, known, "state {state} credited otherwise"),
@@ -401,7 +410,10 @@ fn a_word_the_author_changed_in_an_agents_sentence() {
     // `cw` on "cat": deleted, then typed letter by letter, one step.
     session.doc().edit(&[Replace::delete(4..7)], false).unwrap();
     for (at, letter) in [(4, "d"), (5, "o"), (6, "g")] {
-        session.doc().edit(&[Replace::insert(at, letter)], true).unwrap();
+        session
+            .doc()
+            .edit(&[Replace::insert(at, letter)], true)
+            .unwrap();
     }
     let kinds = |session: &mut Session| -> Vec<Kind> {
         let origins = session.doc().origins();
@@ -429,7 +441,11 @@ fn a_word_the_author_changed_in_an_agents_sentence() {
     let after = kinds(&mut session);
     assert_eq!(&after[4..7], &[Kind::Edited; 3], "the author's word stays");
     let credits = credits_of(session.doc());
-    assert_eq!(credits[19].0, origin(3), "the new word is the other agent's");
+    assert_eq!(
+        credits[19].0,
+        origin(3),
+        "the new word is the other agent's"
+    );
     assert_eq!(credits[0].0, agent);
     session.doc().undo().unwrap();
     session.doc().undo().unwrap();
@@ -462,4 +478,42 @@ fn a_file_changed_on_disk_is_outside_only_where_it_changed() {
     assert_eq!(credits[6].0, origin(1), "three stays the agent's");
     assert_eq!(credits[43].0, Origin::Outside);
     assert_eq!(credits[40].0, origin(1));
+}
+
+/// What keeping origins costs a key on a long text whose attribution is
+/// in many pieces: typed letters, in an agent's text and in the author's.
+/// `cargo test --release --workspace --test origins what_a_key_costs -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement: prints the time a key takes"]
+fn what_a_key_costs_on_a_long_text() {
+    let mut session = Session::new("");
+    // About 3 MB, as 350 copies of a corpus article are, in 40 000
+    // stretches by turns of the author and of agents.
+    let paragraph = "Some words of a paragraph, typed by someone or other. ";
+    let mut at = 0;
+    for stretch in 0..40_000_u32 {
+        let by = By::Origin(&origin((stretch % 4) as u8));
+        let text = paragraph.repeat(1 + stretch as usize % 2);
+        session
+            .doc()
+            .edit_by(&[Replace::insert(at, text.as_str())], false, &by)
+            .unwrap();
+        at += text.len();
+    }
+    let len = session.doc().text().len();
+    let started = std::time::Instant::now();
+    let keys = 2000;
+    let mut place = len / 2;
+    for key in 0..keys {
+        session
+            .doc()
+            .edit(&[Replace::insert(place, "x")], key > 0)
+            .unwrap();
+        place += 1;
+    }
+    let per_key = started.elapsed().as_secs_f64() * 1e6 / f64::from(keys);
+    println!(
+        "{len} bytes in {} runs: {per_key:.1} µs a key, journal and all",
+        session.doc().origins().map().iter().count()
+    );
 }
