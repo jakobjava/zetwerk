@@ -258,6 +258,9 @@ impl Viewer {
             self.history_looked();
             return true;
         }
+        if self.review_key(press) {
+            return true;
+        }
         if let Some(taken) = self.hint_key(press) {
             return taken;
         }

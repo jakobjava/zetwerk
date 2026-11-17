@@ -502,6 +502,46 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("proposal flip"),
     ),
     (
+        "suggestion: rewrite, answer, other wordings, put aside",
+        "gA  gq  gp  gz",
+        Does::Tells,
+    ),
+    (
+        "review: all suggestions of agents, to walk through and decide",
+        "gR  :review",
+        Does::Run("review"),
+    ),
+    (
+        "review: accept or reject many at once (a category, sure, here, by)",
+        ":review accept spelling",
+        Does::Ask("review accept "),
+    ),
+    (
+        "review: take back the last decision",
+        ":review undo",
+        Does::Run("review undo"),
+    ),
+    (
+        "ask agents to review what is selected, or this section",
+        "gQ",
+        Does::Run("request"),
+    ),
+    (
+        "instruction to agents, for good (what you said, or the selection)",
+        "g!  :always",
+        Does::Run("always"),
+    ),
+    (
+        "the brief: the instructions agents are given",
+        ":brief",
+        Does::Run("brief"),
+    ),
+    (
+        "review: write all of it out beside the document",
+        ":review record",
+        Does::Run("review record"),
+    ),
+    (
         "lines say how far they are from the cursor (for 5j): on or off",
         ":numbers",
         Does::Run("numbers"),

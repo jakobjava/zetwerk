@@ -10,12 +10,16 @@
 //! not depend on windows or GPUs and can serve a headless editor later.
 
 mod client;
+mod review;
 mod server;
 mod socket;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 pub use client::{Output, call};
+pub use review::{Caller, NewSuggestion, Revision, Suggest, caller};
 pub use server::{Running, Tools, serve, serve_stdio};
 pub use socket::{find_socket, find_socket_of, proxy_stdio, socket_of, socket_path};
 
@@ -124,7 +128,81 @@ pub trait Editor: Send + Sync + 'static {
 
     /// Marks note `id` resolved.
     fn resolve_note(&self, id: u64) -> Result<serde_json::Value, String>;
+
+    /// Makes the suggestions of `suggest`, as `caller` asks: each is
+    /// answered (see `zetwerk_app::viewer::review`).
+    fn suggest(&self, caller: &Caller, suggest: Suggest) -> Result<serde_json::Value, String> {
+        let _ = (caller, suggest);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// The suggestions in `states` (all where none are named), of the
+    /// agent named `by` only where it is given, changed since step
+    /// `since`; with the reviews asked for and the brief.
+    fn suggestions(
+        &self,
+        states: &[String],
+        by: Option<&str>,
+        since: Option<u64>,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (states, by, since);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// A new version of a suggestion, other wordings, or a line to the
+    /// author about it.
+    fn revise_suggestion(
+        &self,
+        caller: &Caller,
+        revision: Revision,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (caller, revision);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// Takes back the suggestions `ids`: all, or none where one cannot be.
+    fn withdraw_suggestions(
+        &self,
+        caller: &Caller,
+        ids: &[u64],
+    ) -> Result<serde_json::Value, String> {
+        let _ = (caller, ids);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// The author's standing instructions to agents.
+    fn brief(&self) -> Result<serde_json::Value, String> {
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// The brief as lines of words, for the instructions an agent is
+    /// given as it connects; `None` where there is none.
+    fn brief_text(&self) -> Option<String> {
+        None
+    }
+
+    /// What `get_state` says of reviewing: how many suggestions wait,
+    /// requests, the brief.
+    fn review_summary(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Waits until the author did something with suggestions, reviews
+    /// or the brief since step `since` (by default: since now), at most
+    /// `timeout` or until `cancelled`; then what it was.
+    fn wait_for_review(
+        &self,
+        since: Option<u64>,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (since, timeout, cancelled);
+        Err(NO_REVIEW.to_owned())
+    }
 }
+
+/// What an agent is told by an editor that keeps no review.
+const NO_REVIEW: &str = "this editor keeps no review";
 
 /// A note an agent leaves on the text.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -199,6 +199,30 @@ impl Editor for FakeEditor {
     fn resolve_note(&self, id: u64) -> Result<Value, String> {
         Ok(json!({ "resolved": id }))
     }
+
+    fn suggest(
+        &self,
+        caller: &zetwerk_mcp::Caller,
+        suggest: zetwerk_mcp::Suggest,
+    ) -> Result<Value, String> {
+        let kinds: Vec<String> = suggest.suggestions.iter().map(|s| s.kind.clone()).collect();
+        Ok(json!({
+            "by": caller.name, "session": caller.session, "kinds": kinds,
+            "request": suggest.request, "expected_revision": suggest.expected_revision,
+        }))
+    }
+
+    fn brief(&self) -> Result<Value, String> {
+        Ok(json!({ "instructions": [{ "id": 1, "text": "British spelling stays" }] }))
+    }
+
+    fn brief_text(&self) -> Option<String> {
+        Some("1. British spelling stays".to_owned())
+    }
+
+    fn review_summary(&self) -> Option<Value> {
+        Some(json!({ "open_suggestions": 3 }))
+    }
 }
 
 /// What a tool answered, as JSON.
@@ -828,4 +852,118 @@ fn pages_are_put_in_by_file_pages_and_place() {
             },
         ])
     );
+}
+
+#[test]
+fn review_tools_know_who_calls_and_take_a_batch() {
+    let (_scratch_socket, socket) = socket("review");
+    let _server = serve(&socket, Arc::new(FakeEditor::default()), PLAIN)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    let batch = json!({
+        "suggestions": [
+            { "kind": "replace", "old_str": "teh", "new_str": "the", "reason": "A typo.",
+              "category": "spelling", "confidence": "high" },
+            { "kind": "question", "line": 4, "reason": "Which year?" },
+        ],
+        "request": 2,
+        "expected_revision": 7,
+    });
+    let made = answer(&socket, "suggest", &batch).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(made["kinds"], json!(["replace", "question"]));
+    assert_eq!(
+        (&made["request"], &made["expected_revision"]),
+        (&json!(2), &json!(7))
+    );
+    assert!(
+        !made["by"].as_str().unwrap_or_default().is_empty(),
+        "{made}"
+    );
+    assert!(
+        !made["session"].as_str().unwrap_or_default().is_empty(),
+        "{made}"
+    );
+    // A suggestion without the fields it needs is refused before it
+    // reaches the editor.
+    assert!(
+        call(
+            &socket,
+            "suggest",
+            arguments(&json!({ "suggestions": [{ "kind": "x" }] }))
+        )
+        .is_err()
+    );
+    let brief = answer(&socket, "get_brief", &json!({})).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(brief["instructions"][0]["text"], "British spelling stays");
+    assert!(call(&socket, "withdraw_suggestion", Map::new()).is_err());
+    // What the editor keeps no review of says so.
+    let listed = call(&socket, "list_suggestions", Map::new());
+    assert_eq!(listed, Err("this editor keeps no review".to_owned()));
+    // get_state tells of the review.
+    let state = answer(&socket, "get_state", &json!({})).unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(state["review"]["open_suggestions"], 3);
+}
+
+#[test]
+fn prompts_start_a_review_with_the_working_agreement() {
+    use rmcp::ServiceExt;
+    let (_scratch_socket, socket) = socket("prompts");
+    let _server = serve(&socket, Arc::new(FakeEditor::default()), PLAIN)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|err| panic!("{err}"));
+    runtime.block_on(async {
+        let stream = tokio::net::UnixStream::connect(&socket)
+            .await
+            .unwrap_or_else(|err| panic!("{err}"));
+        let client = ().serve(stream).await.unwrap_or_else(|err| panic!("{err}"));
+        let info = client
+            .peer_info()
+            .unwrap_or_else(|| panic!("the server says who it is"));
+        let instructions = info.instructions.clone().unwrap_or_default();
+        assert!(
+            instructions.contains("Suggest, do not edit"),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains("British spelling stays"),
+            "{instructions}"
+        );
+        let prompts = client
+            .list_prompts(None)
+            .await
+            .unwrap_or_else(|err| panic!("{err}"));
+        let names: Vec<&str> = prompts.prompts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "proofread",
+                "review_for_clarity",
+                "check_maths",
+                "review_section",
+                "answer_questions"
+            ]
+        );
+        let mut arguments = Map::new();
+        arguments.insert("section".to_owned(), json!("Methods"));
+        let prompt = client
+            .get_prompt(
+                rmcp::model::GetPromptRequestParams::new("review_section")
+                    .with_arguments(arguments),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{err}"));
+        let text = format!("{:?}", prompt.messages);
+        assert!(
+            text.contains("Methods") && text.contains("get_brief"),
+            "{text}"
+        );
+        let resources = client
+            .list_resources(None)
+            .await
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(resources.resources.len(), 2);
+        let _ = client.cancel().await;
+    });
 }

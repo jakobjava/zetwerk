@@ -191,6 +191,7 @@ fn options(
         inserts: config.inserts(),
         language: config.language.settings(),
         templates: config::templates(),
+        review: config.review.settings(),
     })
 }
 

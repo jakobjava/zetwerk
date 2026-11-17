@@ -29,11 +29,13 @@ const DEFAULT_MAX_PX: u32 = 1500;
 const LIMIT_MAX_PX: u32 = 4000;
 
 #[derive(Clone)]
-struct Server {
-    editor: SharedEditor,
+pub(crate) struct Server {
+    pub(crate) editor: SharedEditor,
     tool_router: ToolRouter<Self>,
     /// Whether there is no window: nobody but the agent saves then.
     headless: bool,
+    /// Who is connected (see `review`).
+    connection: Arc<crate::review::Connection>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -284,9 +286,20 @@ impl Server {
     #[tool(annotations(title = "Editor state", read_only_hint = true))]
     async fn get_state(&self) -> Result<CallToolResult, ErrorData> {
         let editor = Arc::clone(&self.editor);
-        let state = blocking(move || editor.state()).await?;
+        let state = blocking(move || {
+            let review = editor.review_summary();
+            editor.state().map(|state| (state, review))
+        })
+        .await?;
         Ok(
-            match state.and_then(|state| serde_json::to_value(state).map_err(|e| e.to_string())) {
+            match state.and_then(|(state, review)| {
+                let mut value = serde_json::to_value(state).map_err(|e| e.to_string())?;
+                // What reviewing says, where the editor keeps a review.
+                if let (Some(fields), Some(review)) = (value.as_object_mut(), review) {
+                    fields.insert("review".to_owned(), review);
+                }
+                Ok(value)
+            }) {
                 Ok(value) => CallToolResult::structured(value),
                 Err(message) => failure(message),
             },
@@ -313,13 +326,16 @@ impl Server {
 }
 
 impl Server {
-    /// Runs an editor call that answers with a value.
-    async fn value(
+    /// Runs an editor call that answers with a value, with the caller
+    /// known to it (see [`crate::caller`]).
+    pub(crate) async fn value(
         &self,
         call: impl FnOnce(&dyn crate::Editor) -> Result<serde_json::Value, String> + Send + 'static,
     ) -> Result<CallToolResult, ErrorData> {
         let editor = Arc::clone(&self.editor);
-        Ok(match blocking(move || call(&*editor)).await? {
+        let caller = self.caller();
+        let answer = blocking(move || crate::review::with_caller(caller, || call(&*editor)));
+        Ok(match answer.await? {
             Ok(value) => CallToolResult::structured(value),
             Err(message) => failure(message),
         })
@@ -815,9 +831,83 @@ impl ServerHandler for Server {
              undo steps in the user's editor and are saved by the user, unless a save \
              tool is offered."
         };
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        let mut instructions = format!("{instructions}\n\n{}", crate::review::AGREEMENT);
+        if let Some(brief) = self
+            .editor
+            .brief_text()
+            .filter(|brief| !brief.trim().is_empty())
+        {
+            instructions.push_str("\n\nThe author's brief (standing instructions, follow them):\n");
+            instructions.push_str(&brief);
+        }
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_prompts()
+            .enable_resources()
+            .enable_resources_subscribe()
+            .build();
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("zetwerk", env!("CARGO_PKG_VERSION")))
             .with_instructions(instructions)
+    }
+
+    async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
+        if let Some(info) = context.peer.peer_info() {
+            self.connection.named(&info.client_info.name);
+        }
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListPromptsResult, ErrorData> {
+        Ok(crate::review::prompts())
+    }
+
+    async fn get_prompt(
+        &self,
+        request: rmcp::model::GetPromptRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::GetPromptResponse, ErrorData> {
+        crate::review::prompt(&request.name, request.arguments.as_ref()).map(Into::into)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, ErrorData> {
+        Ok(crate::review::resources())
+    }
+
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResponse, ErrorData> {
+        self.read_review_resource(&request.uri)
+            .await
+            .map(Into::into)
+    }
+
+    #[allow(deprecated, reason = "the subscriptions clients of today make")]
+    async fn subscribe(
+        &self,
+        request: rmcp::model::SubscribeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), ErrorData> {
+        self.watch_review(request.uri, &context);
+        Ok(())
+    }
+
+    #[allow(deprecated, reason = "the subscriptions clients of today make")]
+    async fn unsubscribe(
+        &self,
+        _request: rmcp::model::UnsubscribeRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), ErrorData> {
+        Ok(())
     }
 }
 
@@ -836,7 +926,7 @@ const HEADLESS_SAVE: &str = "Write the text to the document's file. This session
                              changed by another program since it was read.";
 
 /// Runs an editor call off the async thread; editor calls block.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     call: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ErrorData> {
     tokio::task::spawn_blocking(call)
@@ -846,7 +936,7 @@ async fn blocking<T: Send + 'static>(
 
 /// A tool result reporting that the tool could not do what was asked. The
 /// calling model sees the message and can react to it.
-fn failure(message: String) -> CallToolResult {
+pub(crate) fn failure(message: String) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(message)])
 }
 
@@ -905,6 +995,7 @@ impl Server {
         let mut tool_router =
             Self::document_tools() + Self::reading_tools() + Self::editing_tools();
         tool_router += Self::notes_tools();
+        tool_router += Self::review_tools();
         if tools.save {
             tool_router += Self::saving_tools();
             if let (true, Some(save)) = (tools.headless, tool_router.map.get_mut("save")) {
@@ -918,7 +1009,21 @@ impl Server {
             editor,
             tool_router,
             headless: tools.headless,
+            connection: crate::review::Connection::new(),
         }
+    }
+
+    /// The same server, for another connection: another session.
+    fn for_connection(&self) -> Self {
+        Self {
+            connection: crate::review::Connection::new(),
+            ..self.clone()
+        }
+    }
+
+    /// Who calls.
+    pub(crate) fn caller(&self) -> crate::Caller {
+        self.connection.caller()
     }
 }
 
@@ -977,7 +1082,7 @@ pub fn serve(socket: &Path, editor: SharedEditor, tools: Tools) -> std::io::Resu
                         _ = &mut stopped => break,
                         accepted = listener.accept() => {
                             let Ok((stream, _)) = accepted else { break };
-                            let server = server.clone();
+                            let server = server.for_connection();
                             tokio::spawn(async move {
                                 // A client that speaks nonsense or hangs up only
                                 // ends its own connection.

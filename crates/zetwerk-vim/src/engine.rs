@@ -2318,6 +2318,7 @@ impl Engine {
                 let command = if c == 'n' { "note" } else { "ask" };
                 self.effects.push(Effect::Command(command.to_owned()));
             }
+            'A' | 'p' | 'z' | 'R' | '!' | 'Q' => self.g_review(c),
             // Nor Vim's `gw` (which formats): the host's labels on the
             // words in view, to jump to one by typing its label. In
             // visual mode too, to extend the selection.
@@ -2329,6 +2330,27 @@ impl Engine {
             '&' if self.pending.is_idle() && !self.selecting() => self.substitute_all(),
             _ => self.fail(),
         }
+    }
+
+    /// Nor Vim's `gA`, `gp`, `gz` and `gR`: what the host does with an
+    /// agent's suggestion under the cursor (its text put in to be
+    /// rewritten, other wordings asked for, put aside), and its list of
+    /// all of them; nor `g!` and `gQ`: a standing instruction to agents,
+    /// and a review asked of them, about what is selected or here.
+    fn g_review(&mut self, c: char) {
+        let command = match c {
+            'A' => "rewrite",
+            'p' => "alternatives",
+            'z' => "aside",
+            'R' => "review",
+            '!' => "always",
+            _ => "request",
+        };
+        let selecting = matches!(c, 'A' | 'p' | 'z' | 'R') && self.selecting();
+        if !self.pending.is_idle() || selecting {
+            return self.fail();
+        }
+        self.effects.push(Effect::Command(command.to_owned()));
     }
 
     /// An operator key: starts the operator, or with the operator already

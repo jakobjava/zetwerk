@@ -31,6 +31,7 @@ mod pointer;
 pub mod refer;
 mod refused;
 mod registers;
+pub mod review;
 mod saving;
 mod slides;
 mod sources;
@@ -951,6 +952,8 @@ pub struct Viewer {
     language: language::Language,
     /// The notes on the text, and what reviewing keeps (see [`notes`]).
     notes: notes::Notes,
+    /// Suggestions of agents and what is made of them (see [`review`]).
+    review: review::Review,
     /// What is beside the pages: tags for what they show as nothing, and
     /// the compiler's complaints (see [`margin`]).
     margin: margin::Margin,
@@ -1077,6 +1080,7 @@ impl Viewer {
             clipboard: registers::Clipboard::default(),
             language: language::Language::default(),
             notes: notes::Notes::default(),
+            review: review::Review::default(),
             margin: margin::Margin::default(),
             refused: refused::Refused::default(),
             caret_at: None,
@@ -1132,6 +1136,7 @@ impl Viewer {
         }
         self.inserts.clone_from(&options.inserts);
         self.set_language(&options.language);
+        self.set_review(options.review);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
             self.ui = ui.clamp(UI_SMALLEST, UI_LARGEST);
             self.scale = self.display * self.ui;
@@ -1203,6 +1208,7 @@ impl Viewer {
             self.alert(format!("cannot write the journal: {err}"));
         }
         self.keep_notes();
+        self.keep_review();
     }
 
     /// The current revision and a snapshot of it to compile.
@@ -2781,6 +2787,7 @@ impl Viewer {
     /// while the text is the text it complained about.
     fn source_marks(&self) -> Vec<(Range<usize>, Mark)> {
         let mut marked = self.agent_marks();
+        marked.extend(self.review_source_marks());
         marked.extend(self.step_stretches());
         if self.compiled_revision == Some(self.revision) {
             let file = self.file_id();
@@ -3301,6 +3308,7 @@ mod tests {
     mod pages;
     mod panels;
     mod parts;
+    mod review;
     mod speed;
     mod typing;
     mod typist;
@@ -5109,21 +5117,24 @@ mod tests {
             .map(|proposal| &now[proposal.range.clone()])
             .collect();
         assert_eq!(ranges, ["lazy dog", "end"]);
+        // Undone, the accepted one waits again.
         press(&mut viewer, "u");
         assert_eq!(viewer.text(), Some(text));
+        assert_eq!(viewer.proposals().len(), 3);
 
         // Typing in the text of one makes it stale: it can only go.
         press(&mut viewer, "/dog<CR>x");
-        assert!(viewer.proposals()[0].stale && !viewer.proposals()[1].stale);
+        let stale: Vec<bool> = viewer.proposals().iter().map(|p| p.stale).collect();
+        assert_eq!(stale, [false, true, false]);
         press(&mut viewer, "0]p");
         assert!(panel(&mut viewer));
         press(&mut viewer, "ga");
         assert!(viewer.text().unwrap().contains("lazy og"), "not made");
-        assert_eq!(viewer.proposals().len(), 2);
+        assert_eq!(viewer.proposals().len(), 3);
         // Undoing the typing makes it good again.
         press(&mut viewer, "u");
-        assert!(!viewer.proposals()[0].stale);
-        press(&mut viewer, "gg]pgr");
+        assert!(!viewer.proposals()[1].stale);
+        press(&mut viewer, "gg0]pgrgg0]pgr");
         assert_eq!(viewer.proposals().len(), 1);
         press(&mut viewer, ":accept all<CR>");
         assert_eq!(

@@ -204,6 +204,7 @@ impl Viewer {
         self.agent_edits = before.agent_edits;
         self.revision = self.revision.max(before.revision + 1);
         self.next_proposal = self.next_proposal.max(before.next_proposal);
+        self.review_take_over(before);
     }
 
     /// Whether the pages show another state of the text than the one it
@@ -483,6 +484,7 @@ impl Viewer {
     /// Moves the proposals along with a change of the text; those whose
     /// text was changed are stale from then on.
     pub(super) fn sync_proposals(&mut self) {
+        self.sync_review();
         self.sync_notes();
         if self.proposals.is_empty() {
             self.proposal_text = None;
@@ -529,14 +531,19 @@ impl Viewer {
     pub(super) fn agent_marks(&self) -> Vec<(Range<usize>, Mark)> {
         let mut marks = Vec::new();
         marks.extend(self.agent_mark.clone().map(|range| (range, Mark::Changed)));
-        marks.extend(self.proposals.iter().map(|proposal| {
-            let mark = if proposal.stale {
-                Mark::Stale
-            } else {
-                Mark::Proposed
-            };
-            (proposal.range.clone(), mark)
-        }));
+        let proposals = self.proposals.iter();
+        marks.extend(
+            proposals
+                .filter(|p| !self.review_marks_proposal(p.id))
+                .map(|proposal| {
+                    let mark = if proposal.stale {
+                        Mark::Stale
+                    } else {
+                        Mark::Proposed
+                    };
+                    (proposal.range.clone(), mark)
+                }),
+        );
         marks
     }
 

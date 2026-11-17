@@ -252,6 +252,7 @@ impl Viewer {
         let (new, source) = (editor.file(), editor.source().clone());
         self.project.renamed(old, source, to);
         self.notes_renamed(old, new);
+        self.review_renamed(old, new);
         for file in self.opened.iter_mut().chain(&mut self.stale_files) {
             if *file == old {
                 *file = new;

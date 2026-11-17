@@ -58,7 +58,23 @@ const G: &[(&str, &str, When)] = &[
     ("O", "the headings, to rearrange", When::Idle),
     ("d", "to where it is defined", When::Idle),
     ("f", "open the file named here", When::Idle),
-    ("a r", "accept, reject the proposed change", When::Idle),
+    ("a r", "accept, reject the suggestion here", When::Idle),
+    (
+        "A",
+        "rewrite the suggestion here, from its text",
+        When::Idle,
+    ),
+    (
+        "p z",
+        "other wordings of the suggestion, put it aside",
+        When::Idle,
+    ),
+    ("R", "all suggestions of agents, to review", When::Idle),
+    (
+        "! Q",
+        "an instruction to agents, a review asked of them",
+        When::Unpending,
+    ),
     ("h", "the history of the text", When::Idle),
     ("D", "how the document looks", When::Idle),
     ("B", "the bibliography", When::Idle),
@@ -74,7 +90,7 @@ const G: &[(&str, &str, When)] = &[
     ("x", "show the equation as it is written", When::Idle),
     (
         "n q",
-        "a note, a question for agents, on this",
+        "a note, a question for agents (on a suggestion: an answer)",
         When::Unpending,
     ),
     (
@@ -98,7 +114,10 @@ const Z: &[(&str, &str)] = &[
     ("z .", "this line to the middle"),
     ("t Enter", "this line to the top"),
     ("b -", "this line to the bottom"),
-    ("p", "the proposed change: as it would be, as it is"),
+    (
+        "p",
+        "the suggestion: as it would be, its other wordings, as it is",
+    ),
 ];
 
 /// The keys after `Z`.
@@ -109,7 +128,7 @@ const FORWARD: &[(&str, &str)] = &[
     ("]", "to the next page"),
     ("d", "to the next problem"),
     ("s", "to the next thing about spelling"),
-    ("p", "to the next proposed change"),
+    ("p", "to the next suggestion"),
     ("n", "to the next note"),
     ("i", "to the next thing that shows as nothing"),
 ];
@@ -117,7 +136,7 @@ const BACKWARD: &[(&str, &str)] = &[
     ("[", "to the page before"),
     ("d", "to the problem before"),
     ("s", "to the thing about spelling before"),
-    ("p", "to the proposed change before"),
+    ("p", "to the suggestion before"),
     ("n", "to the note before"),
     ("i", "to the thing before that shows as nothing"),
 ];
