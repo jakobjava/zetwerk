@@ -111,7 +111,7 @@ const DONE_COLOUR: &str = "#79740e";
 const NOW_COLOUR: &str = "#d65d0e";
 /// How far left of an instruction its mark stands, and how large it is,
 /// in points of the page.
-const MARK_GAP: f64 = 16.0;
+const MARK_GAP: f64 = 3.5;
 const MARK_SIZE: f64 = 10.0;
 
 /// Notes, where `state_dir` is not there yet, that the program is

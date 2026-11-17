@@ -6,7 +6,7 @@
   fill: luma(238), inset: (x: 3pt), outset: (y: 2.5pt), radius: 2pt, it,
 )
 #let task(body) = block(
-  above: 1.8em, below: 1em, inset: (left: 10pt, y: 4pt),
+  above: 1.8em, below: 1em, inset: (left: 17pt, y: 4pt),
   stroke: (left: 2pt + rgb("#d79921")),
   text(fill: rgb("#3c3836"), body),
 )
@@ -29,8 +29,9 @@ Boats come in at dusk and leave before the sun is up, and the gulls know
 the hour better than the fishermen do.
 
 #task[The quickest way anywhere: `/`, a word, then `Enter` goes to where
-the page next reads it, and `n` on to the place after that. Try it
-with `/lantern` and `Enter`.]
+the page next reads it, and `n` on to the place after that. Type
+`/lantern` and `Enter`: the first place it finds is in this very box;
+`n` goes on to the one below.]
 
 At night the keeper lights the lantern in the tower and climbs down the
 hundred steps again, counting them as he goes.
@@ -52,13 +53,13 @@ That is the end: the last line of the page. `gg` takes you back up.
 title: Moving on the page
 
 step: down with j, into the paragraph about the harbour
-keys: jjjjjjjjjjjj
+keys: jjjjjjj
 hint: j, j, j … until the cursor is in “The old harbour …”
 done: below The old harbour
 
 step: to the word “lantern” with /
-keys: /lantern<CR>
-hint: /lantern then Enter (n goes on to the next one)
+keys: /lantern<CR>n
+hint: /lantern then Enter, then n until you are below
 done: cursor lantern in the tower
 
 step: on to “tower” with w

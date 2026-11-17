@@ -6,7 +6,7 @@
   fill: luma(238), inset: (x: 3pt), outset: (y: 2.5pt), radius: 2pt, it,
 )
 #let task(body) = block(
-  above: 1.8em, below: 1em, inset: (left: 10pt, y: 4pt),
+  above: 1.8em, below: 1em, inset: (left: 17pt, y: 4pt),
   stroke: (left: 2pt + rgb("#d79921")),
   text(fill: rgb("#3c3836"), body),
 )
