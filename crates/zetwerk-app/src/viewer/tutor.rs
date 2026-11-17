@@ -18,9 +18,9 @@
 //! English, which has them all; `de` and `nl` may have their own of any
 //! of them, of the same name, and English stands in for those they do
 //! not have. The lessons are taken in the order of their names, which
-//! begin with a number: 01 to 12 are the ground (moving, typing, undo,
+//! begin with a number: 01 to 13 are the ground (moving, typing, undo,
 //! formats, equations, figures, references, a page that stops changing,
-//! the managers, search, saving, agents), **13 to 79 are free for what
+//! the managers, search, saving, agents, comfort), **14 to 79 are free for what
 //! came later**, and 80 and 81 end the course (for Vim users, and for
 //! those who never used Vim). Adding a lesson is writing its file: the
 //! build finds it.

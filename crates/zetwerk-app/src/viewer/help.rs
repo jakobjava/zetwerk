@@ -6,8 +6,8 @@
 //! gone. `:help` alone (and `g?`) puts up that list, narrowed by typing
 //! as always, and under it what the chosen entry does on the page (and
 //! as written, where that differs), what goes with it, and an example;
-//! Enter runs or begins its command, where it has one, and else says
-//! its keys. `:help dd`, `:help gD`, `:help :pdf`, `:help footnote`,
+//! Enter runs or begins its command, where it has one, as the list
+//! always did. `:help dd`, `:help gD`, `:help :pdf`, `:help footnote`,
 //! `:help tab` put up the same list with the entry chosen that is about
 //! that: by its keys first, then by the words it is about.
 //!
@@ -67,9 +67,6 @@ const fn help(
 
 /// How wide a line of help is, in characters.
 const WIDTH: usize = 78;
-
-/// The command that does what entry `n` of the list does.
-const DO: &str = "help do ";
 
 /// What there is to say of each entry of the list of all there is to do.
 pub(super) const HELP: &[Help] = &[
@@ -1741,7 +1738,7 @@ fn told(help: &Help, command: Option<(&str, bool)>) -> String {
     lines.push(match command {
         Some((_, false)) => "Enter: does it".to_owned(),
         Some((_, true)) => "Enter: begins it, for you to finish".to_owned(),
-        None => "Enter: says its keys".to_owned(),
+        None => "Esc, then the keys".to_owned(),
     });
     lines.join("\n")
 }
@@ -1813,12 +1810,6 @@ impl Viewer {
     /// `:help`, `:help <what>`, and what an entry of its list does when
     /// it is chosen. Returns whether `command` was one of them.
     pub(super) fn help_command(&mut self, command: &str) -> bool {
-        if let Some(index) = command.strip_prefix(DO) {
-            if let Ok(index) = index.parse::<usize>() {
-                self.do_entry(index);
-            }
-            return true;
-        }
         let asked = match command.split_once(' ') {
             Some(("help" | "h", asked)) => asked.trim(),
             None if matches!(command, "help" | "h") => "",
@@ -1852,7 +1843,7 @@ impl Viewer {
         let items: Vec<(String, Target)> = palette::all()
             .enumerate()
             .filter(|(index, _)| only.is_none_or(|only| only.contains(index)))
-            .map(|(index, (what, keys, _))| {
+            .map(|(index, (what, keys, command))| {
                 if index == chosen {
                     at = only.map_or(index, |only| {
                         only.iter().position(|of| *of == index).unwrap_or(0)
@@ -1860,10 +1851,12 @@ impl Viewer {
                 }
                 // The keys apart: they are what is looked for, and a
                 // long description is cut at its end.
-                (
-                    format!("{what}\t{keys}"),
-                    Target::Command(format!("{DO}{index}")),
-                )
+                let target = match command {
+                    Some((command, false)) => Target::Command(command.to_owned()),
+                    Some((command, true)) => Target::Ask(command.to_owned()),
+                    None => Target::Nothing,
+                };
+                (format!("{what}\t{keys}"), target)
             })
             .collect();
         self.open_picker("help", items, at);
@@ -1875,28 +1868,10 @@ impl Viewer {
             .picker
             .as_ref()
             .filter(|picker| picker.title() == "help")?;
-        let Some(Target::Command(command)) = picker.chosen() else {
-            return None;
-        };
-        let index: usize = command.strip_prefix(DO)?.parse().ok()?;
-        let (_, keys, command) = palette::all().nth(index)?;
+        let chosen = picker.chosen_label()?;
+        let (_, keys, command) = palette::all()
+            .find(|(what, keys, _)| chosen.split_once('\t') == Some((*what, *keys)))?;
         Some(told(help_on(keys)?, command))
-    }
-
-    /// What entry `index` of the list does, chosen in the list of help.
-    fn do_entry(&mut self, index: usize) {
-        let Some((what, keys, command)) = palette::all().nth(index) else {
-            return;
-        };
-        match command {
-            Some((command, false)) => self.execute(command),
-            Some((command, true)) => {
-                for c in format!(":{command}").chars() {
-                    self.editor_key(KeyPress::plain(Key::Char(c)));
-                }
-            }
-            None => self.notice(format!("{keys}   {what}")),
-        }
     }
 
     /// `?` while the list of what can follow the keys typed is up: the

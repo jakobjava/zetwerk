@@ -1030,6 +1030,12 @@ impl Picker {
         self.title
     }
 
+    /// What the chosen entry is listed as, if one is chosen.
+    pub(super) fn chosen_label(&self) -> Option<&str> {
+        let item = *self.shown.get(self.chosen)?;
+        self.items.get(item).map(|(label, _)| label.as_str())
+    }
+
     /// Where the chosen entry leads, if one is chosen.
     pub(super) fn chosen(&self) -> Option<&Target> {
         let item = *self.shown.get(self.chosen)?;
