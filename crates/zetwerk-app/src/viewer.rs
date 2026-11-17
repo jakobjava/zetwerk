@@ -11,10 +11,12 @@ mod aids;
 mod assist;
 mod buffers;
 mod cells;
+mod deck;
 pub mod export;
 mod figures;
 mod find;
 mod focus;
+mod handout;
 mod hints;
 mod history;
 mod inplace;
@@ -28,6 +30,8 @@ pub mod notes;
 mod pages;
 mod palette;
 mod pointer;
+mod present;
+mod present_scene;
 pub mod refer;
 mod refused;
 mod registers;
@@ -71,6 +75,7 @@ use zetwerk_vim::{Effect, Seek, Shown as ShownLine};
 use self::agent::{AgentEdits, Mark, Proposal};
 pub use self::keymap::Keymap;
 pub use self::language::{Check, Issue, Report};
+pub use self::present::{Talk, parse_duration as present_duration};
 pub use self::slides::Paging;
 use crate::chrome::{self, Chrome, Image, ROW_HEIGHT, RowText, STATUS_HEIGHT, Status};
 use crate::editor::{self, Editor, Rows, Unseen};
@@ -978,6 +983,8 @@ pub struct Viewer {
     waiting: waiting::Waiting,
     /// What the pages put in whole keep between keys (see [`pages`]).
     pages: pages::Pages,
+    /// The talk being given, and what is known of the deck (see [`present`]).
+    present: present::Present,
     pub stats: Stats,
 }
 
@@ -1092,6 +1099,7 @@ impl Viewer {
             find: find::Find::default(),
             waiting: waiting::Waiting::default(),
             pages: pages::Pages::default(),
+            present: present::Present::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1135,6 +1143,7 @@ impl Viewer {
             self.paging = Paging::Slides;
         }
         self.inserts.clone_from(&options.inserts);
+        self.set_talk(options.talk.clone());
         self.set_language(&options.language);
         self.set_review(options.review);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
@@ -1713,6 +1722,9 @@ impl Viewer {
     /// The user turned the wheel or dragged on the touchpad, by this many
     /// device pixels.
     pub fn scroll(&mut self, dx: f64, dy: f64) {
+        if self.present_scroll(dy) {
+            return;
+        }
         match self.paging {
             Paging::Scroll => self.view.scroll_by(dx, dy, &self.layout),
             Paging::Slides => self.push_slides(dy),
@@ -1805,6 +1817,9 @@ impl Viewer {
         self.message = None;
         let press = self.shift_enter(press);
         if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
+            return;
+        }
+        if self.present_key(press) {
             return;
         }
         if self.grid.is_some() {
@@ -2164,6 +2179,7 @@ impl Viewer {
         self.predicted.is_some()
     }
 
+    #[allow(clippy::too_many_lines, reason = "a line for every command")]
     fn execute(&mut self, command: &str) {
         if self.start_command(command) {
             return;
@@ -2177,6 +2193,8 @@ impl Viewer {
             || self.notes_command(command)
             || self.refused_command(command)
             || self.vim_command(command)
+            || self.present_command(command)
+            || self.slide_command(command)
         {
             return;
         }
@@ -2356,6 +2374,9 @@ impl Viewer {
     /// What the window should show right now. `has` tells which images the
     /// compositor already holds.
     pub fn scene(&mut self, has: &dyn Fn(TextureId) -> bool) -> Scene {
+        if let Some(scene) = self.present_scene(has) {
+            return scene;
+        }
         let mut scene = Scene::default();
         let (width, height) = (f64::from(self.window.0), f64::from(self.window.1));
         solid(&mut scene, has, BACKDROP, (0.0, 0.0, width, height));
@@ -3308,6 +3329,7 @@ mod tests {
     mod pages;
     mod panels;
     mod parts;
+    mod present;
     mod review;
     mod speed;
     mod typing;

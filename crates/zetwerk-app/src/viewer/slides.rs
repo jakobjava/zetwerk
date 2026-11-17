@@ -19,7 +19,7 @@ pub enum Paging {
 
 /// The overview of all pages, and the one picked out in it.
 pub(super) struct Grid {
-    chosen: usize,
+    pub(super) chosen: usize,
 }
 
 /// How wide a page is in the overview, about, in logical pixels, and the
@@ -144,6 +144,9 @@ impl Viewer {
     /// `]]` and `[[`: to the page after the one the cursor is on, or the
     /// one before.
     pub(super) fn step_page(&mut self, forward: bool) {
+        if self.step_slide(forward) {
+            return;
+        }
         let current = match self.paging {
             Paging::Slides => self.slide,
             Paging::Scroll => self.cursor_page.get(),
@@ -202,6 +205,9 @@ impl Viewer {
     /// A key while the overview is up: the arrows and `hjkl` pick a page,
     /// Enter goes to it, Escape leaves things as they were.
     pub(super) fn grid_key(&mut self, press: KeyPress) {
+        if self.grid_slide_key(press) {
+            return;
+        }
         let (Some(cells), Some(grid)) = (self.cells(), &mut self.grid) else {
             self.grid = None;
             return;

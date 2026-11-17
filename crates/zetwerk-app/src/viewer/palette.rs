@@ -328,6 +328,56 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("pages as slides", ":slides", Does::Run("slides")),
     ("all pages at a glance", ":grid", Does::Run("grid")),
+    (
+        "give the talk, from the slide at the cursor, full screen",
+        ":present  gP  F5",
+        Does::Run("present"),
+    ),
+    (
+        "while presenting: on, back, a slide by number, first, last",
+        "Space  BS  12 Enter  gg  G",
+        Does::Tells,
+    ),
+    (
+        "while presenting: back from a jump; blank black, white",
+        "`  Ctrl-O  b  w",
+        Does::Tells,
+    ),
+    (
+        "while presenting: all slides, the clock, the presenter's view, leave",
+        "o  t  p  q",
+        Does::Tells,
+    ),
+    (
+        "rehearse the talk: how long each slide is up",
+        ":present rehearse",
+        Does::Run("present rehearse"),
+    ),
+    (
+        "the talk is to take this long: time left, ahead or behind",
+        ":present 20min",
+        Does::Ask("present "),
+    ),
+    (
+        "how long each slide took when the talk was rehearsed",
+        ":present times",
+        Does::Run("present times"),
+    ),
+    (
+        "a new slide behind this one",
+        ":slide new",
+        Does::Run("slide new"),
+    ),
+    (
+        "move this slide before the one before, behind the next",
+        ":slide up  :slide down",
+        Does::Tells,
+    ),
+    (
+        "in the overview: move the slide picked out; a new one behind it",
+        "H  L  n",
+        Does::Tells,
+    ),
     ("zoom in, out, to the width", "+  -  =", Does::Tells),
     (
         "pointer: put the cursor there; held and moved, select",

@@ -593,6 +593,9 @@ impl Viewer {
     fn press(&mut self, at: (f64, f64), shift: bool, count: u8) {
         self.pointer.held = None;
         self.tooltip = None;
+        if self.present_click(at) {
+            return;
+        }
         if self.grid.is_some() {
             self.pointer.last = None;
             return self.grid_click(at);

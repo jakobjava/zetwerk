@@ -236,6 +236,7 @@ impl Viewer {
             || self.is_picking()
             || self.is_reviewing()
             || self.is_grid()
+            || self.is_presenting()
             || self.is_jumping()
             || self.is_retyping();
         if plain {

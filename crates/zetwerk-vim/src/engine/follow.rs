@@ -84,6 +84,7 @@ const G: &[(&str, &str, When)] = &[
         "the pages: put in a PDF, an image; move, take out",
         When::Idle,
     ),
+    ("P", "give the talk from this slide", When::Idle),
     ("s", "the page, the source, or both", When::Idle),
     ("?", "all there is to do", When::Idle),
     ("w", "jump to a label in view", When::Unpending),

@@ -43,6 +43,11 @@ Settings are read from ~/.config/zetwerk/config.toml:
                           source are; :ui 1.5, :ui + and :ui - while open
   [power]
   mode = \"auto\"           or \"saver\", \"performance\"
+  [present]
+  clock = false           the time shows in a corner of the slides from the
+                          start of a talk (t shows or hides it)
+  duration = \"20min\"      how long a talk is to take, unless :present 30min
+                          says otherwise
   [language]
   spelling = true         mark words no Hunspell dictionary knows, in the
                           document's language (English, British first,
@@ -192,6 +197,7 @@ fn options(
         language: config.language.settings(),
         templates: config::templates(),
         review: config.review.settings(),
+        talk: config.present.talk(),
     })
 }
 

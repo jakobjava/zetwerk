@@ -1017,6 +1017,7 @@ mod tests {
             language: zetwerk_language::Settings::default(),
             templates: None,
             review: zetwerk_app::viewer::review::Settings::default(),
+            talk: zetwerk_app::viewer::Talk::default(),
         }
     }
 
