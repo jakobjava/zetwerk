@@ -4,6 +4,7 @@
 //! [`Converted::kept`](super::Converted).
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::OnceLock;
 
 use typst::syntax::{SyntaxKind, SyntaxNode};
@@ -139,7 +140,6 @@ impl Back {
             SyntaxKind::MathShorthand => self.shorthand(text),
             SyntaxKind::Escape => escape(text),
             SyntaxKind::Str => string(text),
-            SyntaxKind::MathPrimes => text.to_owned(),
             SyntaxKind::MathAlignPoint => "&".to_owned(),
             SyntaxKind::Linebreak => "\\\\".to_owned(),
             SyntaxKind::MathAttach => self.attach(node),
@@ -176,13 +176,7 @@ impl Back {
             }
             SyntaxKind::MathDelimited => self.delimited(node),
             SyntaxKind::MathCall => self.call(node),
-            SyntaxKind::LeftParen | SyntaxKind::RightParen => text.to_owned(),
             SyntaxKind::LeftBrace | SyntaxKind::RightBrace => delimiter(text, false),
-            SyntaxKind::Dot
-            | SyntaxKind::Comma
-            | SyntaxKind::Semicolon
-            | SyntaxKind::Bang
-            | SyntaxKind::Colon => text.to_owned(),
             SyntaxKind::Hash => String::new(),
             SyntaxKind::FuncCall
             | SyntaxKind::FieldAccess
@@ -312,10 +306,10 @@ impl Back {
                 (sub, sup) => {
                     let mut out = format!("\\mathop{{{inner}}}\\limits");
                     if let Some(sub) = sub {
-                        out.push_str(&format!("_{{{sub}}}"));
+                        let _ = write!(out, "_{{{sub}}}");
                     }
                     if let Some(sup) = sup {
-                        out.push_str(&format!("^{{{sup}}}"));
+                        let _ = write!(out, "^{{{sup}}}");
                     }
                     out
                 }
@@ -328,10 +322,10 @@ impl Back {
         };
         out.push_str(&primes);
         if let Some(sub) = sub {
-            out.push_str(&format!("_{{{sub}}}"));
+            let _ = write!(out, "_{{{sub}}}");
         }
         if let Some(sup) = sup {
-            out.push_str(&format!("^{{{sup}}}"));
+            let _ = write!(out, "^{{{sup}}}");
         }
         out
     }
@@ -408,10 +402,10 @@ impl Back {
                 }
             }
         }
-        if filled || !cell.trim().is_empty() {
-            if let Some(row) = rows.last_mut() {
-                row.push(cell.trim().to_owned());
-            }
+        if (filled || !cell.trim().is_empty())
+            && let Some(row) = rows.last_mut()
+        {
+            row.push(cell.trim().to_owned());
         }
         rows.retain(|row| !row.is_empty());
         (rows, named)
@@ -426,7 +420,7 @@ impl Back {
             .unwrap_or_default();
         let (rows, named) = self.arguments(node);
         let args: Vec<String> = rows.iter().flatten().cloned().collect();
-        let arg = |index: usize| args.get(index).cloned().unwrap_or_default();
+        let nth = |index: usize| args.get(index).cloned().unwrap_or_default();
         let named_value = |key: &str| {
             named
                 .iter()
@@ -434,22 +428,22 @@ impl Back {
                 .map(|(_, value)| value.clone())
         };
         match name.as_str() {
-            "frac" => format!("\\frac{{{}}}{{{}}}", arg(0), arg(1)),
-            "sqrt" => format!("\\sqrt{{{}}}", arg(0)),
-            "root" => format!("\\sqrt[{}]{{{}}}", arg(0), arg(1)),
-            "abs" => format!("\\left| {} \\right|", arg(0)),
-            "norm" => format!("\\left\\| {} \\right\\|", arg(0)),
-            "floor" => format!("\\left\\lfloor {} \\right\\rfloor", arg(0)),
-            "ceil" => format!("\\left\\lceil {} \\right\\rceil", arg(0)),
-            "round" => format!("\\left\\lfloor {} \\right\\rceil", arg(0)),
-            "lr" => lr(&arg(0)),
+            "frac" => format!("\\frac{{{}}}{{{}}}", nth(0), nth(1)),
+            "sqrt" => format!("\\sqrt{{{}}}", nth(0)),
+            "root" => format!("\\sqrt[{}]{{{}}}", nth(0), nth(1)),
+            "abs" => format!("\\left| {} \\right|", nth(0)),
+            "norm" => format!("\\left\\| {} \\right\\|", nth(0)),
+            "floor" => format!("\\left\\lfloor {} \\right\\rfloor", nth(0)),
+            "ceil" => format!("\\left\\lceil {} \\right\\rceil", nth(0)),
+            "round" => format!("\\left\\lfloor {} \\right\\rceil", nth(0)),
+            "lr" => lr(&nth(0)),
             "op" => {
                 let star = if named_value("limits").is_some_and(|value| value.contains("true")) {
                     "*"
                 } else {
                     ""
                 };
-                let inner = arg(0);
+                let inner = nth(0);
                 let inner = inner
                     .strip_prefix("\\text{")
                     .and_then(|inner| inner.strip_suffix('}'))
@@ -459,14 +453,14 @@ impl Back {
             "underbrace" | "overbrace" => {
                 let mark = if name == "underbrace" { '_' } else { '^' };
                 match args.get(1) {
-                    Some(note) => format!("\\{name}{{{}}}{mark}{{{note}}}", arg(0)),
-                    None => format!("\\{name}{{{}}}", arg(0)),
+                    Some(written) => format!("\\{name}{{{}}}{mark}{{{written}}}", nth(0)),
+                    None => format!("\\{name}{{{}}}", nth(0)),
                 }
             }
-            "limits" | "scripts" if args.len() == 1 => arg(0),
-            "display" => format!("{{\\displaystyle {}}}", arg(0)),
-            "inline" => format!("{{\\textstyle {}}}", arg(0)),
-            "hide" => format!("\\phantom{{{}}}", arg(0)),
+            "limits" | "scripts" if args.len() == 1 => nth(0),
+            "display" => format!("{{\\displaystyle {}}}", nth(0)),
+            "inline" => format!("{{\\textstyle {}}}", nth(0)),
+            "hide" => format!("\\phantom{{{}}}", nth(0)),
             "text" => {
                 let colour = named_value("fill")
                     .map(|fill| fill.trim_start_matches('#').to_owned())
@@ -477,12 +471,12 @@ impl Back {
                             .map(|(latex, _)| *latex)
                     });
                 match colour {
-                    Some(colour) => format!("\\textcolor{{{colour}}}{{{}}}", arg(0)),
-                    None => arg(0),
+                    Some(colour) => format!("\\textcolor{{{colour}}}{{{}}}", nth(0)),
+                    None => nth(0),
                 }
             }
-            "box" => format!("\\boxed{{{}}}", arg(0)),
-            "mid" => format!("\\middle{}", arg(0)),
+            "box" => format!("\\boxed{{{}}}", nth(0)),
+            "mid" => format!("\\middle{}", nth(0)),
             "mat" | "vec" | "cases" => {
                 let rows = if name == "vec" || name == "cases" {
                     args.iter().map(|cell| vec![cell.clone()]).collect()
@@ -508,9 +502,9 @@ impl Back {
                 format!("\\begin{{{environment}}} {body} \\end{{{environment}}}")
             }
             _ => match one_argument(&name) {
-                Some(latex) if args.len() == 1 => format!("\\{latex}{{{}}}", arg(0)),
-                Some(latex) if latex == "binom" => {
-                    format!("\\binom{{{}}}{{{}}}", arg(0), arg(1))
+                Some(latex) if args.len() == 1 => format!("\\{latex}{{{}}}", nth(0)),
+                Some("binom") => {
+                    format!("\\binom{{{}}}{{{}}}", nth(0), nth(1))
                 }
                 _ => {
                     // A symbol called as an accent, or a function of the

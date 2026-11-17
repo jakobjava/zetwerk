@@ -17,6 +17,7 @@
 //! The names are in `table`; Typst's are checked against Typst by the
 //! tests, not trusted.
 
+use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod back;
@@ -115,11 +116,11 @@ pub fn markup_to_typst(text: &str) -> Option<Converted> {
         }
         let body = converted.text.trim().to_owned();
         if display {
-            out.push_str(&format!("$ {body} $"));
+            let _ = write!(out, "$ {body} $");
         } else if body.is_empty() {
             out.push_str("$\"\"$");
         } else {
-            out.push_str(&format!("${body}$"));
+            let _ = write!(out, "${body}$");
         }
         at += length;
     }
@@ -179,7 +180,7 @@ fn find_unescaped(text: &str, close: &str) -> Option<usize> {
     while let Some(found) = text[from..].find(close) {
         let at = from + found;
         let backslashes = text[..at].len() - text[..at].trim_end_matches('\\').len();
-        if backslashes % 2 == 0 {
+        if backslashes.is_multiple_of(2) {
             return Some(at);
         }
         from = at + close.len();
@@ -515,15 +516,19 @@ impl<'a> Parser<'a> {
         let node = match c {
             '0'..='9' => {
                 let mut number = c.to_string();
-                while !one {
-                    match (self.peek(), self.tokens.get(self.at + 1)) {
-                        (Some(Token::Char(d)), _) if d.is_ascii_digit() => number.push(d),
-                        (Some(Token::Char('.')), Some(Token::Char(d))) if d.is_ascii_digit() => {
-                            number.push('.');
+                if !one {
+                    loop {
+                        match (self.peek(), self.tokens.get(self.at + 1)) {
+                            (Some(Token::Char(d)), _) if d.is_ascii_digit() => number.push(d),
+                            (Some(Token::Char('.')), Some(Token::Char(d)))
+                                if d.is_ascii_digit() =>
+                            {
+                                number.push('.');
+                            }
+                            _ => break,
                         }
-                        _ => break,
+                        self.at += 1;
                     }
-                    self.at += 1;
                 }
                 Node::Atom(number)
             }
@@ -625,6 +630,7 @@ impl<'a> Parser<'a> {
     }
 
     /// What a command with arguments of `shape` makes of them.
+    #[allow(clippy::too_many_lines, reason = "one arm per shape")]
     fn shaped(&mut self, shape: Shape, until: Until) -> Option<Node> {
         let node = match shape {
             Shape::Frac => {
@@ -713,16 +719,15 @@ impl<'a> Parser<'a> {
                 } else {
                     Node::Seq(self.sequence(until))
                 };
-                match table::colour(name.trim()) {
-                    Some(colour) => Node::Call {
+                if let Some(colour) = table::colour(name.trim()) {
+                    Node::Call {
                         name: "text".to_owned(),
                         args: vec![body],
                         named: vec![format!("fill: #{colour}")],
-                    },
-                    None => {
-                        Converted::keep(&mut self.kept, format!("the colour {}", name.trim()));
-                        body
                     }
+                } else {
+                    Converted::keep(&mut self.kept, format!("the colour {}", name.trim()));
+                    body
                 }
             }
             Shape::Dropped(count) => {
@@ -809,9 +814,9 @@ impl<'a> Parser<'a> {
         };
         let mut parts = Vec::new();
         let mut text = String::new();
-        let mut pieces = tokens.split(|token| *token == Token::Char('$'));
+        let pieces = tokens.split(|token| *token == Token::Char('$'));
         let mut math = false;
-        while let Some(piece) = pieces.next() {
+        for piece in pieces {
             if math {
                 let mut inner = Parser::new(piece.to_vec());
                 inner.depth = self.depth + 1;
@@ -989,14 +994,15 @@ fn written(token: Token) -> String {
 /// A token of `\text{…}` as the text it shows.
 fn in_text(token: Token) -> String {
     match token {
-        Token::Open | Token::Close => String::new(),
         Token::Command(" " | "\\" | "," | ";" | "quad" | "qquad") | Token::Char('~') => {
             " ".to_owned()
         }
         Token::Command(sign @ ("{" | "}" | "%" | "&" | "#" | "_" | "$")) => sign.to_owned(),
         Token::Command("ldots" | "dots") => "…".to_owned(),
         // What sets text off is not followed: its text is.
-        Token::Command(
+        Token::Open
+        | Token::Close
+        | Token::Command(
             "textbf" | "textit" | "emph" | "textrm" | "textsf" | "texttt" | "text" | "mbox",
         ) => String::new(),
         token => written(token),
@@ -1025,11 +1031,7 @@ fn balance(pieces: &mut [String]) {
     for (index, piece) in pieces.iter().enumerate() {
         match piece.as_str() {
             "(" | "[" => open.push(index),
-            ")" | "]" => {
-                if open.pop().is_none() {
-                    lone.push(index);
-                }
-            }
+            ")" | "]" if open.pop().is_none() => lone.push(index),
             _ => {}
         }
     }

@@ -2102,6 +2102,7 @@ impl Viewer {
         self.predicted.is_some()
     }
 
+    #[allow(clippy::too_many_lines, reason = "one arm per command")]
     fn execute(&mut self, command: &str) {
         if self.start_command(command) {
             return;
@@ -6158,7 +6159,14 @@ mod tests {
         // The backslash makes the `$` behind it a character: to Typst
         // the equation goes on to the next one's beginning, that one's
         // text is no equation, and what stands between them is one.
-        press(&mut viewer, "gsgs/Before<CR>A Then $a + b \\");
+        press(&mut viewer, "gsgs/Before<CR>A Then $a + b ");
+        // Typed on the page, a backslash begins a LaTeX name (see
+        // `latex`); the sign itself comes as the source pane puts it.
+        if let Some(editor) = viewer.editor.as_mut() {
+            let at = editor.cursor();
+            let _ = editor.replace(&[(at..at, "\\")]);
+        }
+        viewer.text_changed(Edited::Typing);
         assert!(
             viewer
                 .text()

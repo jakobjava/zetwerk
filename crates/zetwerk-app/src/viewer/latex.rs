@@ -160,7 +160,7 @@ impl Viewer {
             let trail = &body[body.trim_end().len()..];
             let mut text = converted.text.clone();
             if text.trim().is_empty() {
-                text = "\"\"".to_owned();
+                "\"\"".clone_into(&mut text);
             }
             let with = format!("{lead}{text}{trail}");
             (

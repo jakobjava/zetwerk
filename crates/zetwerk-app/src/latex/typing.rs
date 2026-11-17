@@ -389,7 +389,7 @@ fn go_on(source: &Source, pending: &Pending, c: char) -> Option<Typed> {
         if open || c == '{' || (c == '[' && typed.ends_with('}')) {
             return Some(into_name(at, c));
         }
-        return then(source, ended(source, pending, true), &range, c);
+        return Some(then(source, ended(source, pending, true), &range, c));
     }
     if c.is_ascii_alphabetic() {
         return Some(into_name(at, c));
@@ -407,8 +407,14 @@ fn go_on(source: &Source, pending: &Pending, c: char) -> Option<Typed> {
             Some(into_name(at, c))
         }
         (Meaning::Left, _) => Some(left_delimiter(source, &range, &c.to_string())),
-        (Meaning::Right, _) => right_delimiter(source, &range)
-            .or_else(|| then(source, Some((range.clone(), String::new(), 0)), &range, c)),
+        (Meaning::Right, _) => right_delimiter(source, &range).or_else(|| {
+            Some(then(
+                source,
+                Some((range.clone(), String::new(), 0)),
+                &range,
+                c,
+            ))
+        }),
         (Meaning::Not, '=') => {
             let (with, lead) = apart(source, &range, "!=");
             Some((range, with, lead + 2))
@@ -423,9 +429,9 @@ fn go_on(source: &Source, pending: &Pending, c: char) -> Option<Typed> {
         // `\frac1`: what is typed goes into the first place.
         (Meaning::Shaped(_), _) => {
             let done = ended(source, pending, true)?;
-            then_inside(source, done, c)
+            Some(then_inside(source, done, c))
         }
-        _ => then(source, ended(source, pending, true), &range, c),
+        _ => Some(then(source, ended(source, pending, true), &range, c)),
     }
 }
 
@@ -444,7 +450,7 @@ fn said_of(source: &Source, range: &Range<usize>, name: &str, of: &str, c: char)
         "left" => {
             let done = left_delimiter(source, range, &delimiter);
             if more {
-                then_inside(source, done, c)
+                Some(then_inside(source, done, c))
             } else {
                 Some(done)
             }
@@ -452,7 +458,7 @@ fn said_of(source: &Source, range: &Range<usize>, name: &str, of: &str, c: char)
         "right" => {
             let done = right_delimiter(source, range);
             if more {
-                then(source, done, range, c)
+                Some(then(source, done, range, c))
             } else {
                 done.or(Some((range.clone(), String::new(), 0)))
             }
@@ -462,7 +468,7 @@ fn said_of(source: &Source, range: &Range<usize>, name: &str, of: &str, c: char)
             let (with, lead) = apart(source, range, &converted);
             let done = (range.clone(), with, lead + converted.len());
             if more {
-                then(source, Some(done), range, c)
+                Some(then(source, Some(done), range, c))
             } else {
                 Some(done)
             }
@@ -614,7 +620,7 @@ fn right_delimiter(source: &Source, range: &Range<usize>) -> Option<Typed> {
 
 /// What `done` (the end of a name) leaves, and then `c` typed behind it,
 /// as one change: `\alpha+` is `alpha+`, `\alpha$` leaves the equation.
-fn then(source: &Source, done: Option<Typed>, range: &Range<usize>, c: char) -> Option<Typed> {
+fn then(source: &Source, done: Option<Typed>, range: &Range<usize>, c: char) -> Typed {
     // A name that stays text: `c` is typed behind it.
     let (first, mut with, _) = done.unwrap_or_else(|| {
         let kept = source.text()[range.clone()].to_owned();
@@ -630,18 +636,18 @@ fn then(source: &Source, done: Option<Typed>, range: &Range<usize>, c: char) -> 
     changed.edit(first.clone(), &with);
     let at = first.start + with.len();
     let second = typst_text::typed(&changed, at, c).unwrap_or_else(|| paired(&changed, at, c));
-    Some(compose(source.text(), (&first, &with), &second))
+    compose(source.text(), (&first, &with), &second)
 }
 
 /// What `done` puts in, and `c` typed where its cursor is (the first
 /// place of `frac(□, □)`).
-fn then_inside(source: &Source, done: Typed, c: char) -> Option<Typed> {
+fn then_inside(source: &Source, done: Typed, c: char) -> Typed {
     let (first, with, within) = done;
     let mut changed = source.clone();
     changed.edit(first.clone(), &with);
     let at = first.start + within;
     let second = typst_text::typed(&changed, at, c).unwrap_or_else(|| paired(&changed, at, c));
-    Some(compose(source.text(), (&first, &with), &second))
+    compose(source.text(), (&first, &with), &second)
 }
 
 /// `c` typed at byte `at` of `source` where nothing has a say: as the
@@ -808,7 +814,7 @@ fn dollars(source: &Source, at: usize) -> Option<Typed> {
         .map(|(at, _)| at)
         .filter(|at| {
             let run = before[..*at].len() - before[..*at].trim_end_matches('\\').len();
-            run % 2 == 0
+            run.is_multiple_of(2)
         })
         .last();
     if let Some(sign) = sign {

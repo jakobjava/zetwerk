@@ -2,6 +2,7 @@
 //! it (parsed, and typeset), that what it does not know is kept and
 //! said, and that Typst written as LaTeX comes back as it was.
 
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use typst::WorldExt;
@@ -16,7 +17,7 @@ fn refused(equations: &[String]) -> Vec<(String, String)> {
     let mut starts = Vec::new();
     for equation in equations {
         starts.push(text.len());
-        text.push_str(&format!("$ {equation} $\n\n"));
+        let _ = write!(text, "$ {equation} $\n\n");
     }
     let env = Environment::new(FontSet::Embedded);
     let project = Project::in_memory(env, PathBuf::from("/"), "main.typ", text)
@@ -248,10 +249,11 @@ fn what_is_not_known_is_kept_as_text_and_said() {
     let converted = to_typst("\\color{puce} x");
     assert_eq!(converted.text, "x");
     assert_eq!(converted.kept, vec!["the colour puce".to_owned()]);
-    assert!(refused(&[to_typst("\\foo x").text]).is_empty());
+    assert_eq!(refused(&[to_typst("\\foo x").text]), Vec::new());
 }
 
 /// A random LaTeX-ish text: pieces of LaTeX, in any order.
+#[allow(clippy::too_many_lines, reason = "one line per piece")]
 fn random_latex(seed: &mut u64, length: usize) -> String {
     const PIECES: &[&str] = &[
         "\\frac",
