@@ -344,7 +344,7 @@ impl Viewer {
         {
             self.notice("an equation begun · $ again: a dollar sign");
         }
-        if self.refer_complete() {
+        if self.refer_complete() || self.latex_complete() {
             return;
         }
         let Some(editor) = &self.editor else {

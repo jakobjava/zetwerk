@@ -251,6 +251,16 @@ pub(crate) const TABLE: &[Opt] = &[
         |v, value| v.settings.dollar = value.is_on(),
     ),
     opt(
+        "typing.latex",
+        Group::Typing,
+        Kind::Switch,
+        ON,
+        "LaTeX typed or pasted into an equation becomes Typst (\\alpha, \\frac{a}{b})",
+        |_| Value::Switch(crate::latex::typing_on()),
+        |_, value| crate::latex::set_typing(value.is_on()),
+    )
+    .session(&["latex"]),
+    opt(
         "typing.tidy",
         Group::Typing,
         Kind::Switch,

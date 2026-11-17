@@ -22,6 +22,7 @@ pub use zetwerk_vim::Mode;
 
 mod credits;
 mod kept;
+mod latex;
 mod mark;
 pub use mark::Mark;
 
@@ -166,6 +167,7 @@ impl Editor {
             .then(|| self.equation_inside())
             .flatten();
         let cursor = self.engine.cursor();
+        let latex = self.latex_pending(matches!(shown, Shown::Pages(_)));
         // Only pages take the place of lines for `j` and `k`: in the
         // source, a line of the text is what they have always gone by.
         self.engine.set_rows_first(matches!(shown, Shown::Pages(_)));
@@ -199,6 +201,7 @@ impl Editor {
             self.engine
                 .set_cursor(self.engine.cursor(), self.document.text());
         } else if matches!(shown, Shown::Pages(_)) && self.stepped.is_none() {
+            self.latex_left(latex);
             // Not after an undo or a redo, which bring back what was
             // there: nothing is tidied away from that or made of it, or
             // redo would lead nowhere.
@@ -1257,7 +1260,12 @@ impl Host for DocumentHost<'_> {
     }
 
     fn expand(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
-        crate::typst_text::snippet(&self.document.buffer().0, at)
+        let source = &self.document.buffer().0;
+        // A LaTeX name is no snippet's: Tab ends it (see `next_field`).
+        if crate::latex::typing::pending_at(source, at).is_some() {
+            return None;
+        }
+        crate::typst_text::snippet(source, at)
     }
 
     fn typed(&self, at: usize, c: char) -> Option<(Range<usize>, String, usize)> {
@@ -1281,7 +1289,9 @@ impl Host for DocumentHost<'_> {
     }
 
     fn unmake(&self, at: usize) -> Option<(Range<usize>, String)> {
-        crate::typst_text::unmake(&self.document.buffer().0, at)
+        let source = &self.document.buffer().0;
+        crate::latex::typing::backspace(source, at)
+            .or_else(|| crate::typst_text::unmake(source, at))
     }
 
     fn put_over(&self, stop: Range<usize>, c: char) -> Option<(Range<usize>, String, usize)> {
@@ -1341,8 +1351,10 @@ impl Host for DocumentHost<'_> {
     }
 
     fn next_field(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
-        matches!(self.rows, RowsOf::Pages(_))
-            .then(|| crate::typst_text::tab_key(&self.document.buffer().0, at))?
+        let source = &self.document.buffer().0;
+        matches!(self.rows, RowsOf::Pages(_)).then(|| {
+            crate::latex::typing::tab(source, at).or_else(|| crate::typst_text::tab_key(source, at))
+        })?
     }
 
     fn prev_field(&self, at: usize) -> Option<usize> {

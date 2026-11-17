@@ -434,3 +434,20 @@ fn the_register_star_is_the_primary_selection() {
     assert_eq!(PRIMARY.lock().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn latex_pasted_in_running_text_comes_as_typst() {
+    let (mut viewer, directory) = editing("First.\n\nAfter.\n");
+    viewer.paste.read = Some(|_| Ok(Copied::text(" so \\(\\alpha \\leq 1\\) holds")));
+    press(&mut viewer, "gsgs/First<CR>$\"+p");
+    let text = viewer.text().unwrap();
+    assert!(text.contains("$alpha <= 1$ holds"), "{text}");
+    assert!(!text.contains('\\'), "{text}");
+    compile(&mut viewer);
+    assert!(viewer.diagnostics.is_empty(), "{:?}", viewer.diagnostics);
+    // Words with no LaTeX in them come as they are.
+    viewer.paste.read = Some(|_| Ok(Copied::text(" plain words")));
+    press(&mut viewer, "\"+p");
+    assert!(viewer.text().unwrap().contains(" plain words"));
+    let _ = std::fs::remove_dir_all(directory);
+}

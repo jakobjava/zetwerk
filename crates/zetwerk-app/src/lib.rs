@@ -11,6 +11,7 @@ pub mod gpu;
 pub mod headless;
 pub mod image_file;
 pub mod invisible;
+pub mod latex;
 pub mod page_text;
 pub use zetwerk_vim::keys;
 pub mod power;

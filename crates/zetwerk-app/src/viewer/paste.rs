@@ -548,6 +548,8 @@ impl Viewer {
     /// Register `name` gets `text`, and `key` (the put that asked for it,
     /// or the register's name after Ctrl-R) is carried out with it.
     pub(super) fn put_pasted_text(&mut self, text: &str, name: char, key: KeyPress) {
+        let converted = self.pasted_latex(text);
+        let text = converted.as_deref().unwrap_or(text);
         if let Some(editor) = &mut self.editor {
             editor.set_register(name, text);
             if name == '"' {
@@ -563,6 +565,41 @@ impl Viewer {
         self.paste.fresh = true;
         self.plain_key(key);
         self.paste.fresh = false;
+    }
+
+    /// Pasted LaTeX as Typst, as typed LaTeX becomes it (`:latex on`):
+    /// in an equation, LaTeX mathematics; in running text, `$…$`,
+    /// `\(…\)`, `\[…\]` and the environments of equations in it. What
+    /// is not known is kept as written, and said.
+    fn pasted_latex(&mut self, text: &str) -> Option<String> {
+        if !crate::latex::typing_on() {
+            return None;
+        }
+        let editor = self.editor.as_ref()?;
+        let at = editor.cursor().min(editor.text().len());
+        let root = LinkedNode::new(editor.source().root());
+        let in_equation = root
+            .leaf_at(at, Side::Before)
+            .or_else(|| root.leaf_at(at, Side::After))
+            .is_some_and(|leaf| {
+                std::iter::successors(Some(leaf), |node| node.parent().cloned())
+                    .any(|node| node.kind() == SyntaxKind::Equation)
+            });
+        let converted = if in_equation {
+            if !crate::latex::looks_like_latex(text) {
+                return None;
+            }
+            crate::latex::to_typst(text)
+        } else {
+            crate::latex::markup_to_typst(text)?
+        };
+        if !converted.kept.is_empty() {
+            self.notice(format!(
+                "LaTeX pasted as Typst; kept as written: {}",
+                converted.kept.join(" ")
+            ));
+        }
+        Some(converted.text)
     }
 
     /// Puts `copied` on the page as what it is (or as `want` says), the

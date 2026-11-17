@@ -27,6 +27,7 @@ mod inplace;
 mod jump;
 mod keymap;
 mod language;
+mod latex;
 mod local;
 mod manager;
 mod margin;
@@ -1992,6 +1993,7 @@ impl Viewer {
             },
         };
         editor.set_rules(self.settings.rules());
+        let latex = latex::pending(editor);
         let typed = editor.key(press, &shown);
         let typing = editor.mode() == editor::Mode::Insert;
         // A paragraph is one line of the source and may fill pages: the
@@ -2001,6 +2003,7 @@ impl Viewer {
             self.alert(format!("not changed: {failure}"));
         }
         self.agent_mark = None;
+        self.latex_told(latex);
         if typed.changed {
             self.revision += 1;
             self.touched();
@@ -2313,6 +2316,7 @@ impl Viewer {
             "describe" => self.describe(),
             history if self.history_command(history) || self.authors_command(history) => {}
             find if self.find_command(find) => {}
+            latex if self.latex_command(latex) => {}
             "definition" => self.goto_definition(),
             "outline" => self.pick(false),
             "labels" => self.pick(true),
@@ -3418,6 +3422,7 @@ mod tests {
     mod hidden;
     #[path = "keys.rs"]
     mod keyboard;
+    mod latex;
     mod left_behind;
     mod names;
     mod pages;
@@ -6355,7 +6360,14 @@ mod tests {
         // The backslash makes the `$` behind it a character: to Typst
         // the equation goes on to the next one's beginning, that one's
         // text is no equation, and what stands between them is one.
-        press(&mut viewer, "gsgs/Before<CR>A Then $a + b \\");
+        press(&mut viewer, "gsgs/Before<CR>A Then $a + b ");
+        // Typed on the page, a backslash begins a LaTeX name (see
+        // `latex`); the sign itself comes as the source pane puts it.
+        if let Some(editor) = viewer.editor.as_mut() {
+            let at = editor.cursor();
+            let _ = editor.replace(&[(at..at, "\\")]);
+        }
+        viewer.text_changed(Edited::Typing);
         assert!(
             viewer
                 .text()
