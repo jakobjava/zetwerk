@@ -23,7 +23,7 @@ mod back;
 mod table;
 pub mod typing;
 
-pub use back::to_latex;
+pub use back::{symbol_char, to_latex};
 pub use table::{COMMANDS, SYMBOLS, Shape, command, symbol};
 
 /// Whether what is typed in an equation is read as LaTeX, as the

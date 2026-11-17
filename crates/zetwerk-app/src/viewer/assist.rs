@@ -332,7 +332,7 @@ impl Viewer {
         if editor.mode() != editor::Mode::Insert {
             return;
         }
-        if self.refer_complete() {
+        if self.refer_complete() || self.latex_complete() {
             return;
         }
         let Some(editor) = &self.editor else {

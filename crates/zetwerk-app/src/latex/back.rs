@@ -50,9 +50,9 @@ fn push(out: &mut String, piece: &str) {
     out.push_str(piece);
 }
 
-/// The characters of Typst's symbols, and the LaTeX names of them.
-fn characters() -> &'static HashMap<char, &'static str> {
-    static MAP: OnceLock<HashMap<char, &'static str>> = OnceLock::new();
+/// The characters of Typst's symbols, by the LaTeX names of them.
+fn shown() -> &'static HashMap<&'static str, char> {
+    static MAP: OnceLock<HashMap<&'static str, char>> = OnceLock::new();
     MAP.get_or_init(|| {
         use typst::foundations::Value;
         use typst::{Library, LibraryExt};
@@ -79,9 +79,27 @@ fn characters() -> &'static HashMap<char, &'static str> {
                 continue;
             };
             let mut chars = symbol.get().chars();
-            if let (Some(c), None) = (chars.next(), chars.next())
-                && !c.is_ascii()
-            {
+            if let (Some(c), None) = (chars.next(), chars.next()) {
+                map.insert(*latex, c);
+            }
+        }
+        map
+    })
+}
+
+/// The character the LaTeX symbol `latex` (without its backslash) shows.
+#[must_use]
+pub fn symbol_char(latex: &str) -> Option<char> {
+    shown().get(latex).copied()
+}
+
+/// The characters of Typst's symbols, and the LaTeX names of them.
+fn characters() -> &'static HashMap<char, &'static str> {
+    static MAP: OnceLock<HashMap<char, &'static str>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map = HashMap::new();
+        for (latex, _) in table::SYMBOLS {
+            if let Some(c) = symbol_char(latex).filter(|c| !c.is_ascii()) {
                 map.entry(c).or_insert(*latex);
             }
         }

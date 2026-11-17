@@ -636,6 +636,9 @@ fn goes_on(text: &str, at: usize) -> bool {
     reason = "one case after the other of what is typed where"
 )]
 pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, String, usize)> {
+    if let Some(meant) = crate::latex::typing::typed(source, at, c) {
+        return Some(meant);
+    }
     let text = source.text();
     let plain = |with: String| {
         let within = with.len();

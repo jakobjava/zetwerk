@@ -84,6 +84,11 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("hide the matches of the search", ":noh", Does::Run("noh")),
     (
+        "LaTeX under the cursor made Typst; the equation copied as LaTeX",
+        ":latex  :latex copy",
+        Does::Run("latex"),
+    ),
+    (
         "show the matches of searches, or not",
         ":hlsearch",
         Does::Run("hlsearch"),

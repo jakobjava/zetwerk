@@ -21,6 +21,7 @@ mod inplace;
 mod jump;
 mod keymap;
 mod language;
+mod latex;
 mod local;
 mod manager;
 mod margin;
@@ -1850,6 +1851,7 @@ impl Viewer {
                 columns: self.source_size.0,
             },
         };
+        let latex = latex::pending(editor);
         let typed = editor.key(press, &shown);
         let typing = editor.mode() == editor::Mode::Insert;
         // A paragraph is one line of the source and may fill pages: the
@@ -1859,6 +1861,7 @@ impl Viewer {
             self.alert(format!("not changed: {failure}"));
         }
         self.agent_mark = None;
+        self.latex_told(latex);
         if typed.changed {
             self.revision += 1;
             self.touched();
@@ -2155,6 +2158,7 @@ impl Viewer {
             "describe" => self.describe(),
             history if self.history_command(history) => {}
             find if self.find_command(find) => {}
+            latex if self.latex_command(latex) => {}
             "definition" => self.goto_definition(),
             "outline" => self.pick(false),
             "labels" => self.pick(true),
@@ -3235,6 +3239,7 @@ mod tests {
     mod frames;
     #[path = "keys.rs"]
     mod keyboard;
+    mod latex;
     mod left_behind;
     mod panels;
     mod parts;
