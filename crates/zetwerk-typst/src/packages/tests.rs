@@ -4,6 +4,21 @@ use std::sync::atomic::AtomicBool;
 use super::stand_in::{Registry, archive, manifest as toml_of, package};
 use super::*;
 
+/// A disk that is full after this many bytes.
+struct Full(usize);
+impl Write for Full {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.0 < bytes.len() {
+            return Err(io::Error::new(io::ErrorKind::StorageFull, "no space left"));
+        }
+        self.0 -= bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// `length` bytes that do not compress: a xorshift's.
 pub(crate) fn noise(length: usize) -> Vec<u8> {
     let mut state: u64 = 0x2545_f491_4f6c_dd1d;
@@ -54,7 +69,10 @@ fn everything(directory: &Path) -> Vec<String> {
 
 /// An archive written header by header, as nothing that makes archives
 /// would write it: names that lead out, links.
-fn raw_archive(entries: &[(&[u8], tar::EntryType, &[u8], &[u8])]) -> Vec<u8> {
+/// Of an entry: its name, its kind, what is in it, what it links to.
+type Raw<'a> = (&'a [u8], tar::EntryType, &'a [u8], &'a [u8]);
+
+fn raw_archive(entries: &[Raw<'_>]) -> Vec<u8> {
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut builder = tar::Builder::new(encoder);
     for (name, kind, data, link) in entries {
@@ -382,19 +400,6 @@ fn a_cut_off_archive_or_a_full_disk_leaves_nothing() {
         assert_eq!(everything(&cache), ["preview", "preview/touying"]);
     }
     // A disk that is full after some kilobytes.
-    struct Full(usize);
-    impl Write for Full {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self.0 < bytes.len() {
-                return Err(io::Error::new(io::ErrorKind::StorageFull, "no space left"));
-            }
-            self.0 -= bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
     let mut full = |path: &Path| -> io::Result<Box<dyn Write>> {
         // The file is made, as on a disk that fills up while it is
         // written.
@@ -508,11 +513,11 @@ fn a_fetch_is_abandoned_while_it_comes() {
     let (path, bytes) = package("slow", "1.0.0", &"y".repeat(50_000));
     // Compressed, the 50 kB are small: more than that, of what does
     // not compress.
-    let noise = noise(300_000);
+    let random = noise(300_000);
     let noisy = archive(&[
         ("typst.toml", toml_of("slow", "1.0.0", "").as_bytes()),
         ("lib.typ", b"x"),
-        ("noise.bin", &noise),
+        ("noise.bin", &random),
     ]);
     assert!(noisy.len() > 100_000 && !bytes.is_empty());
     let registry = Registry::serve(vec![(path, noisy)], Some(Duration::from_millis(5))).unwrap();

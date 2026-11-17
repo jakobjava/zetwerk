@@ -746,8 +746,14 @@ mod tests {
 
     /// A text that takes long to compile: a loop of `rounds` rounds.
     fn slow(rounds: usize) -> ProjectWorld {
+        // No two alike: what Typst has worked out once for a text it
+        // keeps, for every thread of the process, and a test that came
+        // after another would find its slow document done at once (as
+        // happened on a machine with few cores, where tests take turns).
+        static MADE: AtomicUsize = AtomicUsize::new(0);
+        let salt = MADE.fetch_add(1, Ordering::Relaxed);
         project(&format!(
-            "#let total = 0\n#for i in range({rounds}) {{ total += calc.rem(i, 7) }}\n#total"
+            "#let total = {salt}\n#for i in range({rounds}) {{ total += calc.rem(i, 7) }}\n#total"
         ))
         .snapshot()
     }

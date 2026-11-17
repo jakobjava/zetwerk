@@ -28,6 +28,86 @@ enum Does {
 /// All there is to do: what it is, the keys for it, and what choosing it
 /// does.
 const ALL: &[(&str, &str, Does)] = &[
+    (
+        "lessons: zetwerk taught on the page, step by step",
+        ":tutor  :tutor 4",
+        Does::Run("tutor"),
+    ),
+    (
+        "in a lesson: the keys of the step at hand",
+        "Ctrl-T  :hint",
+        Does::Run("hint"),
+    ),
+    (
+        "help on a key, a command or a word, with an example",
+        ":help <word>",
+        Does::Ask("help "),
+    ),
+    (
+        "move: a character, a line (on a page: a line of the page)",
+        "h  j  k  l",
+        Does::Tells,
+    ),
+    ("move: a word on, back, to its end", "w  b  e", Does::Tells),
+    (
+        "move: to the start, the end of the line shown",
+        "0  $",
+        Does::Tells,
+    ),
+    ("move: a paragraph back, on", "{  }", Does::Tells),
+    ("move: to the beginning, the end", "gg  G", Does::Tells),
+    (
+        "move: to a character of the line, up to it; again",
+        "f  t  ;  ,",
+        Does::Tells,
+    ),
+    (
+        "scroll half a window down, up; a whole one",
+        "Ctrl-D  Ctrl-U  Ctrl-F",
+        Does::Tells,
+    ),
+    ("delete the character under the cursor", "x  X", Does::Tells),
+    (
+        "delete what a motion covers; the paragraph; to its end",
+        "dw  dd  D",
+        Does::Tells,
+    ),
+    (
+        "change: delete, then type in its place",
+        "cw  ciw  cc  C",
+        Does::Tells,
+    ),
+    (
+        "copy (yank), put behind, put before",
+        "yy  p  P",
+        Does::Tells,
+    ),
+    (
+        "select: by characters, by paragraphs; then what to do",
+        "v  V",
+        Does::Tells,
+    ),
+    (
+        "a word, a paragraph, an equation, …: behind d, c, y, gb",
+        "iw  ap  i$",
+        Does::Tells,
+    ),
+    ("the last change again, here", ".", Does::Tells),
+    (
+        "write at the start, the end of the line; a paragraph above",
+        "I  A  O",
+        Does::Tells,
+    ),
+    (
+        "stop typing; leave a list or a selection",
+        "Esc",
+        Does::Tells,
+    ),
+    (
+        "a list of what a motion covers; code; a comment",
+        "gl  gt  gc",
+        Does::Tells,
+    ),
     ("write: begin typing at the cursor", "i  a  o", Does::Tells),
     (
         "put in an equation, figure, table, … (while typing)",
@@ -83,6 +163,11 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Ask("%s/"),
     ),
     ("hide the matches of the search", ":noh", Does::Run("noh")),
+    (
+        "LaTeX under the cursor made Typst; the equation copied as LaTeX",
+        ":latex  :latex copy",
+        Does::Run("latex"),
+    ),
     (
         "show the matches of searches, or not",
         ":hlsearch",
@@ -174,6 +259,41 @@ const ALL: &[(&str, &str, Does)] = &[
         "history: every step of the text, to look at and go back to",
         "gh",
         Does::Run("history"),
+    ),
+    (
+        "who wrote what: the page by origin",
+        "gH",
+        Does::Run("authors view"),
+    ),
+    (
+        "the step that put the text here, in the history",
+        ":authors step",
+        Does::Run("authors step"),
+    ),
+    (
+        "who wrote what: the shares of the document",
+        ":authors",
+        Does::Run("authors"),
+    ),
+    (
+        "the page by how old its text is",
+        ":authors age",
+        Does::Run("authors age"),
+    ),
+    (
+        "agents' text you have not taken in",
+        ":authors unread",
+        Does::Run("authors unread"),
+    ),
+    (
+        "write the authorship statement beside the document",
+        ":authors statement",
+        Does::Run("authors statement"),
+    ),
+    (
+        "write, read the attribution as a file beside the document",
+        ":authors export  :authors import",
+        Does::Run("authors export"),
     ),
     ("save", ":w", Does::Run("w")),
     ("save everything and leave", ":x", Does::Run("x")),
@@ -328,6 +448,56 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("pages as slides", ":slides", Does::Run("slides")),
     ("all pages at a glance", ":grid", Does::Run("grid")),
+    (
+        "give the talk, from the slide at the cursor, full screen",
+        ":present  gP  F5",
+        Does::Run("present"),
+    ),
+    (
+        "while presenting: on, back, a slide by number, first, last",
+        "Space  BS  12 Enter  gg  G",
+        Does::Tells,
+    ),
+    (
+        "while presenting: back from a jump; blank black, white",
+        "`  Ctrl-O  b  w",
+        Does::Tells,
+    ),
+    (
+        "while presenting: all slides, the clock, the presenter's view, leave",
+        "o  t  p  q",
+        Does::Tells,
+    ),
+    (
+        "rehearse the talk: how long each slide is up",
+        ":present rehearse",
+        Does::Run("present rehearse"),
+    ),
+    (
+        "the talk is to take this long: time left, ahead or behind",
+        ":present 20min",
+        Does::Ask("present "),
+    ),
+    (
+        "how long each slide took when the talk was rehearsed",
+        ":present times",
+        Does::Run("present times"),
+    ),
+    (
+        "a new slide behind this one",
+        ":slide new",
+        Does::Run("slide new"),
+    ),
+    (
+        "move this slide before the one before, behind the next",
+        ":slide up  :slide down",
+        Does::Tells,
+    ),
+    (
+        "in the overview: move the slide picked out; a new one behind it",
+        "H  L  n",
+        Does::Tells,
+    ),
     ("zoom in, out, to the width", "+  -  =", Does::Tells),
     (
         "pointer: put the cursor there; held and moved, select",
@@ -356,6 +526,21 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("interface larger", ":ui +", Does::Run("ui +")),
     ("interface smaller", ":ui -", Does::Run("ui -")),
+    (
+        "settings: all options — what the page shows, typing, keys, agents, …",
+        ":set",
+        Does::Run("set"),
+    ),
+    (
+        "aids on the page: quiet, writing, everything (the next)",
+        "za  :set aids=writing",
+        Does::Run("set aids=next"),
+    ),
+    (
+        "an option: on, off, switched, asked, as usual, made so",
+        ":set nu  :set nonu  :set nu!  :set nu?",
+        Does::Ask("set "),
+    ),
     (
         "document: how it looks — font, paper, page numbers, …",
         "gD",
@@ -390,6 +575,16 @@ const ALL: &[(&str, &str, Does)] = &[
         "sources: undo the last change to the bibliography file",
         ":bib undo",
         Does::Run("bib undo"),
+    ),
+    (
+        "pages: list — put in a PDF, an image, a blank page; move, take out",
+        "gS",
+        Does::Run("pages"),
+    ),
+    (
+        "put pages in: of a PDF (2, 1-3, all), an image, a blank page",
+        ":page add [file] [pages]",
+        Does::Ask("page add "),
     ),
     (
         "figures and tables: list — caption, label, width, rows, …",
@@ -457,6 +652,41 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("table delete column"),
     ),
     (
+        "table: a row below, above",
+        "]r  [r  :table row add below",
+        Does::Run("table row add below"),
+    ),
+    (
+        "table: a column right, left",
+        "]c  [c  :table column add right",
+        Does::Run("table column add right"),
+    ),
+    (
+        "table: this row down, up",
+        "]R  [R  :table row move down",
+        Does::Run("table row move down"),
+    ),
+    (
+        "table: this column right, left",
+        "]C  [C  :table column move right",
+        Does::Run("table column move right"),
+    ),
+    (
+        "table: take out this row, this column",
+        "]x  ]X  :table row delete",
+        Does::Run("table row delete"),
+    ),
+    (
+        "table: the first row its header, or a row again",
+        "]h  [h  :table header",
+        Does::Run("table header"),
+    ),
+    (
+        "table: copy it as cells, for a spreadsheet",
+        "]y  :table copy",
+        Does::Run("table copy"),
+    ),
+    (
         "agents: change the text or propose changes",
         ":agents",
         Does::Run("agents"),
@@ -490,6 +720,96 @@ const ALL: &[(&str, &str, Does)] = &[
         "proposal: the page as it would be, or as it is",
         "zp",
         Does::Run("proposal flip"),
+    ),
+    (
+        "suggestion: rewrite, answer, other wordings, put aside",
+        "gA  gq  gp  gz",
+        Does::Tells,
+    ),
+    (
+        "review: all suggestions of agents, to walk through and decide",
+        "gR  :review",
+        Does::Run("review"),
+    ),
+    (
+        "review: accept or reject many at once (a category, sure, here, by)",
+        ":review accept spelling",
+        Does::Ask("review accept "),
+    ),
+    (
+        "review: take back the last decision",
+        ":review undo",
+        Does::Run("review undo"),
+    ),
+    (
+        "ask agents to review what is selected, or this section",
+        "gQ",
+        Does::Run("request"),
+    ),
+    (
+        "instruction to agents, for good (what you said, or the selection)",
+        "g!  :always",
+        Does::Run("always"),
+    ),
+    (
+        "the brief: the instructions agents are given",
+        ":brief",
+        Does::Run("brief"),
+    ),
+    (
+        "review: write all of it out beside the document",
+        ":review record",
+        Does::Run("review record"),
+    ),
+    (
+        "changes since the file was saved (or since …): next, previous",
+        "]v  [v",
+        Does::Run("changes next"),
+    ),
+    (
+        "change here: as it was, set over it (Enter takes it back, y yanks it)",
+        "zc",
+        Does::Run("changes flip"),
+    ),
+    (
+        "changes since the version compared with: all of them, to go to",
+        ":changes list",
+        Does::Run("changes list"),
+    ),
+    (
+        "changes: compare with saved, opened, a step, a commit",
+        ":changes since",
+        Does::Run("changes since"),
+    ),
+    (
+        "changes: the old version of the paragraph here back",
+        ":revert",
+        Does::Run("revert"),
+    ),
+    (
+        "changes: the whole document marked as a proof",
+        ":changes proof",
+        Does::Run("changes proof"),
+    ),
+    (
+        "changes: the proof written as a PDF",
+        ":changes pdf",
+        Does::Ask("changes pdf "),
+    ),
+    (
+        "bars beside the lines that changed: on or off",
+        ":changes off",
+        Does::Run("changes off"),
+    ),
+    (
+        "git: the commits of this file, to compare with",
+        ":git log",
+        Does::Run("git log"),
+    ),
+    (
+        "git: commit the document's files (asks first)",
+        ":git commit",
+        Does::Ask("git commit "),
     ),
     (
         "lines say how far they are from the cursor (for 5j): on or off",
@@ -533,6 +853,16 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("what typing costs", ":perf", Does::Run("perf")),
     (
+        "something is wrong: a report of what just happened, kept here",
+        ":report [a few words]  g!  Ctrl-G",
+        Does::Ask("report "),
+    ),
+    (
+        "the reports written, to delete them",
+        ":reports",
+        Does::Run("reports"),
+    ),
+    (
         "typeset what changes by itself, at once: on or off",
         ":parts",
         Does::Run("parts"),
@@ -543,9 +873,39 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("nextkeys"),
     ),
     (
-        "the rest of a word, faint behind the cursor (Tab takes it): on or off",
+        "the rest of a word, faint behind the cursor (Ctrl-Y takes it): on, off",
         ":ghost",
         Does::Run("ghost"),
+    ),
+    (
+        "typewriter: the line typed stays at its height: on or off",
+        "zT  :typewriter",
+        Does::Run("typewriter"),
+    ),
+    (
+        "focus: all but this paragraph faint (:focus sentence): on or off",
+        "zf  :focus",
+        Does::Run("focus"),
+    ),
+    (
+        "zen: nothing but the text, no status line: on or off",
+        "ze  :zen",
+        Does::Run("zen"),
+    ),
+    (
+        "night: the pages light on dark (not in exports): on or off",
+        "zn  :night",
+        Does::Run("night"),
+    ),
+    (
+        "sepia: the pages on warm paper: on or off",
+        ":sepia",
+        Does::Run("sepia"),
+    ),
+    (
+        "colours of the pages: day, night, sepia, or auto (desktop, hour)",
+        ":colours",
+        Does::Ask("colours "),
     ),
 ];
 
@@ -555,6 +915,21 @@ pub(super) fn entries() -> impl Iterator<Item = (&'static str, Option<&'static s
     ALL.iter().map(|(_, keys, does)| match does {
         Does::Run(command) | Does::Ask(command) => (*keys, Some(*command)),
         Does::Tells => (*keys, None),
+    })
+}
+
+/// Every entry of the list of all there is to do, in order: what it is,
+/// its keys, and the command it runs (with `false`) or begins for the
+/// user to finish (with `true`), if it does.
+pub(super) fn all()
+-> impl Iterator<Item = (&'static str, &'static str, Option<(&'static str, bool)>)> {
+    ALL.iter().map(|(what, keys, does)| {
+        let command = match does {
+            Does::Run(command) => Some((*command, false)),
+            Does::Ask(command) => Some((*command, true)),
+            Does::Tells => None,
+        };
+        (*what, *keys, command)
     })
 }
 
@@ -815,6 +1190,7 @@ impl Viewer {
             // out as an image (see `export`).
             ("figure", "") => self.figures_command("here"),
             ("structure", command) => self.structure_command(command),
+            ("pages" | "page", rest) if self.pages_command(name, rest) => {}
             ("section", what) => self.section_command(what),
             ("table", what) => self.table_command(what),
             ("tags" | "errors" | "invisible" | "invisibles", _) => {
@@ -828,6 +1204,9 @@ impl Viewer {
     /// `:table row`, `:table column`, `:table delete row`, `:table
     /// delete column`: of the table the cursor is in.
     fn table_command(&mut self, what: &str) {
+        if self.shape_command(what) {
+            return;
+        }
         let Some(editor) = &mut self.editor else {
             return;
         };

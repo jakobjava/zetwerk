@@ -235,14 +235,14 @@ pub fn imports(root: &SyntaxNode) -> Vec<Import> {
 /// What the import `node` takes, if it is of a package.
 fn import_of(node: &LinkedNode) -> Option<Import> {
     let import = node.cast::<ast::ModuleImport>()?;
-    let ast::Expr::Str(named) = import.source() else {
+    let ast::Expr::Str(string) = import.source() else {
         return None;
     };
-    let named = named.get();
-    if !named.starts_with('@') {
+    let spec_text = string.get();
+    if !spec_text.starts_with('@') {
         return None;
     }
-    let spec = PackageSpec::from_str(&named).ok()?;
+    let spec = PackageSpec::from_str(&spec_text).ok()?;
     let literal = node
         .children()
         .find(|child| child.kind() == SyntaxKind::Str)?;
@@ -766,6 +766,7 @@ impl fmt::Display for FetchError {
     }
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "for `map_err`")]
 fn disk(err: io::Error) -> FetchError {
     FetchError::Disk(err.to_string())
 }
@@ -1343,5 +1344,6 @@ pub fn copy_template(package: &Path, into: &Path) -> Result<Copied, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a failed step should fail the test")]
 #[path = "packages/tests.rs"]
 mod tests;

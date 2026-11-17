@@ -59,10 +59,10 @@ fn a_dollar_sign_typed_and_left_keeps_the_document() {
 }
 
 #[test]
-#[ignore = "shows a fault: a hash and a word that is nothing of the menu stay code"]
 fn a_hash_typed_and_left_keeps_the_document() {
     // `#` asks what to put in; a word that names nothing there, and
-    // Escape, leaves `#x` in the text: code, that names nothing.
+    // Escape, left `#x` in the text: code, that names nothing. What is
+    // typed behind the sign is text until something is chosen.
     let (mut viewer, directory) = typed("Some words.\n", "words", "i#xyz <Esc>");
     let text = viewer.text().unwrap_or_default().to_owned();
     let problems = problems(&mut viewer);
@@ -71,11 +71,10 @@ fn a_hash_typed_and_left_keeps_the_document() {
 }
 
 #[test]
-#[ignore = "shows a fault: a reference begun from the menu and left takes the next word for its label"]
 fn a_reference_begun_and_left_keeps_the_document() {
-    // A reference asked for from the menu and not finished: `@` stays,
-    // and the word behind it becomes the name of a label there is none
-    // of.
+    // A reference asked for from the menu and not finished: `@` stayed,
+    // and the word behind it became the name of a label there is none
+    // of. The sign is text until something is chosen.
     let text = "= Intro <intro>\n\nSome words here.\n";
     let (mut viewer, directory) = typed(text, "words", "i#ref<CR><Esc>");
     let text = viewer.text().unwrap_or_default().to_owned();

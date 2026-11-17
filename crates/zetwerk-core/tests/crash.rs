@@ -8,7 +8,9 @@
 //! - every edit the worker reported as made is there,
 //! - the text is one the worker really produced, never a mixture,
 //! - the file holds a complete earlier save, never part of one,
-//! - recovery never reports a conflict or an unreadable journal.
+//! - recovery never reports a conflict or an unreadable journal,
+//! - every line is credited to whoever the worker had write it: an
+//!   agent wrote every fourth line, the author the others.
 //!
 //! The worker then carries on from what was recovered, so damage that
 //! recovery introduced would show up in a later round.
@@ -27,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use zetwerk_core::{Document, Opened, Replace};
+use zetwerk_core::{Agent, By, Document, Opened, Origin, Replace};
 
 const WORKER: &str = "ZETWERK_CRASH_WORKER";
 const ROUNDS: usize = 60;
@@ -69,6 +71,18 @@ fn last_line(text: &str, transient: bool) -> u64 {
     expected
 }
 
+/// Who the worker has write line `line`.
+fn origin_of(line: u64) -> Origin {
+    if line % 4 == 1 {
+        Origin::Agent(Agent {
+            name: "worker".to_owned(),
+            ..Agent::default()
+        })
+    } else {
+        Origin::Author
+    }
+}
+
 /// Appends numbered lines forever, with saves, undos and abandoned branches
 /// in between, reporting each line once it is made.
 fn worker(directory: &Path) -> ! {
@@ -97,8 +111,13 @@ fn worker(directory: &Path) -> ! {
         // and a kill at that moment would look like a reported line lost.
         let undo = line % 7 == 3;
         let join = line.is_multiple_of(3) && !undo;
+        let by = origin_of(line);
         document
-            .edit(&[Replace::insert(end, format!("{line}\n"))], join)
+            .edit_by(
+                &[Replace::insert(end, format!("{line}\n"))],
+                join,
+                &By::Origin(&by),
+            )
             .unwrap();
         if undo {
             assert!(document.undo().unwrap().is_some());
@@ -137,6 +156,26 @@ fn verify(directory: &Path, reported: u64, round: usize) -> u64 {
         "round {round}: recovery gave {opened:?}"
     );
     let recovered = last_line(document.text(), true);
+    // Each line is its writer's, every byte of it.
+    let origins = document.origins();
+    let text = document.text();
+    assert_eq!(origins.map().len(), text.len(), "round {round}");
+    let mut start = 0;
+    for (number, line) in text.split_inclusive('\n').enumerate() {
+        let expected = match line {
+            TRANSIENT => Origin::Author,
+            _ => origin_of(number as u64 + 1),
+        };
+        for (_, mark) in origins.map().within(start..start + line.len()) {
+            assert_eq!(
+                origins.credit(mark.by).origin,
+                expected,
+                "round {round}: line {}",
+                number + 1
+            );
+        }
+        start += line.len();
+    }
     assert!(
         recovered >= reported,
         "round {round}: line {reported} was reported but only {recovered} came back"

@@ -9,29 +9,47 @@ mod again;
 pub mod agent;
 mod aids;
 mod assist;
+pub mod authors;
 mod buffers;
 mod cells;
+mod changes;
+pub mod comfort;
+mod deck;
 pub mod export;
+mod far;
 mod figures;
 mod find;
 mod focus;
+mod handout;
+mod help;
 mod hints;
 mod history;
 mod inplace;
 mod jump;
 mod keymap;
 mod language;
+mod latex;
 mod local;
 mod manager;
 mod margin;
 pub mod notes;
+pub(crate) mod options;
 pub mod packages;
+mod pages;
 mod palette;
+mod paste;
+mod place;
 mod pointer;
+mod present;
+mod present_scene;
 pub mod refer;
 mod refused;
 mod registers;
+pub mod report;
+pub mod review;
 mod saving;
+mod set;
+mod shape;
 mod slides;
 mod sources;
 mod sources_add;
@@ -42,6 +60,7 @@ mod sources_undo;
 pub mod start;
 mod structure;
 mod styles;
+pub mod tutor;
 mod vim;
 mod waiting;
 mod written;
@@ -62,14 +81,16 @@ use typst::syntax::{FileId, LinkedNode, Side, Source, SyntaxKind};
 use typst::utils::hash128;
 use typst_layout::{Page, PagedDocument};
 use zetwerk_core::{DiskError, DiskStatus, Opened};
-use zetwerk_predict::{Replacement, predict};
+use zetwerk_predict::{Lines, Replacement, predict};
 use zetwerk_render::{PixelRegion, Tile, TileKey, page_size_px, tile_origins, tiles};
 use zetwerk_typst::{CompileOutput, Environment, PageLines, PageMap, Project, ProjectWorld};
 use zetwerk_vim::{Effect, Seek, Shown as ShownLine};
 
 use self::agent::{AgentEdits, Mark, Proposal};
+pub use self::changes::{ChangeOptions, Since};
 pub use self::keymap::Keymap;
 pub use self::language::{Check, Issue, Report};
+pub use self::present::{Talk, parse_duration as present_duration};
 pub use self::slides::Paging;
 use crate::chrome::{self, Chrome, Image, ROW_HEIGHT, RowText, STATUS_HEIGHT, Status};
 use crate::editor::{self, Editor, Rows, Unseen};
@@ -225,6 +246,39 @@ struct Predicted {
     /// ends: with the cursor there, the cursor is shown behind the cell.
     typed: Rect,
     end: usize,
+    /// What became of the lines of the paragraph, and whether they are
+    /// justified: what the random typist counts.
+    #[cfg_attr(not(test), allow(dead_code, reason = "only counted in tests"))]
+    lines: zetwerk_predict::Lines,
+    #[cfg_attr(not(test), allow(dead_code, reason = "only counted in tests"))]
+    justified: bool,
+}
+
+/// Whether `prediction` breaks the lines as Typst does, in a document
+/// whose paragraphs are `justified` or not: the error says why it may
+/// not. The random typist (25 seeds of 150 keys on each document) found
+/// a third of the lines worked out in justified text elsewhere than
+/// Typst puts them, by up to 101 pt: Typst breaks justified text
+/// weighing all of the paragraph, and a letter more on one line may
+/// move a word on another (the last line of a paragraph, which is not
+/// stretched, too). A part breaks them as Typst does. Ragged text Typst
+/// breaks first fit, as the predictor does (all 81 lines broken anew in
+/// the paper were right; in the document of chapters 50 of 158 were
+/// not, which is still to be looked into).
+fn as_typst_breaks(
+    prediction: &zetwerk_predict::Prediction,
+    justified: bool,
+) -> Result<(), String> {
+    // A line more or less moves all that is below it: what goes off a
+    // full page or comes back onto it is known to a part, which knows
+    // where the text of the page ends, and not here.
+    if matches!(prediction.lines, Lines::More | Lines::Fewer) {
+        return Err("the paragraph has a line more or less".to_owned());
+    }
+    if justified || prediction.justified {
+        return Err("a line of justified text".to_owned());
+    }
+    Ok(())
 }
 
 /// How the text differs from the text the pages were compiled from.
@@ -495,6 +549,8 @@ pub struct Scene {
     pub quads: Vec<Quad>,
     /// Page tiles that are visible but not rasterized, most important first.
     pub wanted: Vec<Tile>,
+    /// What of it is paper, and how that is coloured (see `comfort`).
+    pub paper: crate::gpu::Paper,
 }
 
 /// The tiles last drawn completely for a page, kept as a stand-in while new
@@ -507,7 +563,7 @@ struct Shown {
 /// The lines of the typeset pages, for a cursor that moves up and down on
 /// them.
 struct PageRows<'a> {
-    document: &'a PagedDocument,
+    document: &'a local::Pages,
     world: &'a ProjectWorld,
     file: FileId,
     lines: &'a RefCell<HashMap<usize, PageLines>>,
@@ -554,18 +610,29 @@ impl PageRows<'_> {
         if covering.is_some() {
             return covering;
         }
+        if let Some(page) = pages::page_showing(self.document.pages(), self.world, self.file, then)
+        {
+            return Some(page);
+        }
         let source = self.world.source(self.file).ok()?;
         let then = self.world.shown_at(self.file, then);
-        zetwerk_typst::locate(self.document, &source, then, near).map(|position| position.page)
+        zetwerk_typst::locate(self.document.pages(), &source, then, near)
+            .map(|position| position.page)
     }
 
     /// Runs `ask` on the lines of page `index`.
     fn on<T>(&self, index: usize, ask: impl FnOnce(&PageLines) -> T) -> Option<T> {
         let page = self.document.pages().get(index)?;
         let mut lines = self.lines.borrow_mut();
-        let lines = lines
-            .entry(index)
-            .or_insert_with(|| PageMap::build(self.world, &page.frame).lines());
+        let lines = lines.entry(index).or_insert_with(|| {
+            pages::lines_of(
+                self.world,
+                self.document.pages(),
+                index,
+                &page.frame,
+                self.file,
+            )
+        });
         Some(ask(lines))
     }
 }
@@ -786,9 +853,10 @@ pub struct Viewer {
     file: String,
     revision: u64,
     compiled_revision: Option<u64>,
-    /// The last document that compiled. Stays on screen while a newer
-    /// revision has errors.
-    document: Option<Arc<PagedDocument>>,
+    /// The pages of the last document that compiled, with a part typeset
+    /// since put in (see `local`). Stay on screen while a newer revision
+    /// has errors.
+    document: Option<local::Pages>,
     /// The last document that was typeset whole. What is asked about
     /// the document as a whole (its labels, what a name stands for) is
     /// asked of it: `document` may be it with a part typeset anew, a
@@ -902,10 +970,14 @@ pub struct Viewer {
     sources_kept: sources_look::Kept,
     /// The register `"+`, and the system clipboard it stands for.
     clipboard: registers::Clipboard,
+    /// What pasting keeps between keys (see [`paste`]).
+    paste: paste::Paste,
     /// What is known about the spelling and grammar of the text.
     language: language::Language,
     /// The notes on the text, and what reviewing keeps (see [`notes`]).
     notes: notes::Notes,
+    /// Suggestions of agents and what is made of them (see [`review`]).
+    review: review::Review,
     /// What is beside the pages: tags for what they show as nothing, and
     /// the compiler's complaints (see [`margin`]).
     margin: margin::Margin,
@@ -926,11 +998,29 @@ pub struct Viewer {
     start: start::Start,
     /// The matches of a search and what keys took (see [`find`]).
     find: find::Find,
+    /// What changed since a version the user names (see [`changes`]).
+    changes: changes::Changes,
     /// What the window waits for (see [`waiting`]).
     waiting: waiting::Waiting,
     /// What is kept of packages (see [`packages`]).
     packages: packages::Packages,
+    /// What the pages put in whole keep between keys (see [`pages`]).
+    pages: pages::Pages,
+    /// The talk being given, and what is known of the deck (see [`present`]).
+    present: present::Present,
+    /// What happened lately, for a report (see [`report`]).
+    report: report::Recorder,
+    /// The user's settings (see [`set`]).
+    settings: set::Settings,
+    /// Typewriter, focus, zen, night (see [`comfort`]), and where the
+    /// document was left (see [`place`]).
+    comfort: comfort::Comfort,
+    place: place::Place,
+    /// The lesson the window shows, if it does (see [`tutor`]).
+    tutor: tutor::Tutor,
     pub stats: Stats,
+    /// Who wrote what (see `authors`).
+    authors: authors::Authors,
 }
 
 impl Viewer {
@@ -1030,8 +1120,10 @@ impl Viewer {
             refer: refer::Refer::default(),
             sources_kept: sources_look::Kept::default(),
             clipboard: registers::Clipboard::default(),
+            paste: paste::Paste::default(),
             language: language::Language::default(),
             notes: notes::Notes::default(),
+            review: review::Review::default(),
             margin: margin::Margin::default(),
             refused: refused::Refused::default(),
             caret_at: None,
@@ -1041,9 +1133,18 @@ impl Viewer {
             pointer: pointer::Pointer::default(),
             start: start::Start::default(),
             find: find::Find::default(),
+            changes: changes::Changes::default(),
             waiting: waiting::Waiting::default(),
             packages: packages::Packages::default(),
+            pages: pages::Pages::default(),
+            present: present::Present::default(),
+            report: report::Recorder::default(),
+            settings: set::Settings::default(),
+            comfort: comfort::Comfort::default(),
+            place: place::Place::default(),
+            tutor: tutor::Tutor::default(),
             stats: Stats::default(),
+            authors: authors::Authors::default(),
         };
         viewer.resize(window, scale);
         Some(viewer)
@@ -1066,6 +1167,7 @@ impl Viewer {
         let restored = editor.restored();
         let remarks = editor.remarks().to_vec();
         self.editor = Some(editor);
+        self.changes_opened();
         self.panes = Panes::Split;
         self.announce(opened, restored);
         self.announce_remarks(&remarks);
@@ -1079,6 +1181,7 @@ impl Viewer {
         self.agent_edits = options.agent_edits;
         self.state_dir = Some(options.state_dir.clone());
         self.keymap = options.keys.clone();
+        self.authors.configure(&options.authors);
         // The page is where a document is worked on; the source is there
         // for whoever wants to see it (`gs`).
         self.panes = options.layout.unwrap_or(Panes::Page);
@@ -1086,8 +1189,13 @@ impl Viewer {
             self.paging = Paging::Slides;
         }
         self.inserts.clone_from(&options.inserts);
+        self.set_talk(options.talk.clone());
+        self.report_configured(&options.report, options.font_set);
         self.set_language(&options.language);
         self.set_packages(&options.packages);
+        self.set_review(options.review);
+        self.changes_configured(&options.changes);
+        self.comfort_configured(options.comfort);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
             self.ui = ui.clamp(UI_SMALLEST, UI_LARGEST);
             self.scale = self.display * self.ui;
@@ -1099,6 +1207,7 @@ impl Viewer {
                  gD for how it looks, g? for all there is to do",
             );
         }
+        self.configure_settings(&options.settings, options.complaint.is_some());
         if let Some(complaint) = &options.complaint {
             self.alert(complaint.clone());
         }
@@ -1159,6 +1268,7 @@ impl Viewer {
             self.alert(format!("cannot write the journal: {err}"));
         }
         self.keep_notes();
+        self.keep_review();
     }
 
     /// The current revision and a snapshot of it to compile.
@@ -1168,6 +1278,9 @@ impl Viewer {
             self.project.set_source(editor.source().clone());
         }
         if let Some(world) = self.history_world() {
+            return (self.revision, world);
+        }
+        if let Some(world) = self.proof_world() {
             return (self.revision, world);
         }
         let mut put = self.put_to_show();
@@ -1275,7 +1388,7 @@ impl Viewer {
     /// The document on screen, with the revision it was compiled from.
     #[must_use]
     pub fn document(&self) -> Option<&Arc<PagedDocument>> {
-        self.document.as_ref()
+        self.document.as_ref().map(local::Pages::document)
     }
 
     /// The files whose changes on disk concern this window.
@@ -1362,11 +1475,13 @@ impl Viewer {
     /// The window changed size or moved to a display with another scale.
     pub fn resize(&mut self, window: (u32, u32), scale: f64) {
         self.window = (window.0.max(1), window.1.max(1));
+        let before = self.display;
         self.display = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
             1.0
         };
+        self.keep_size_on_screen(before);
         self.scale = self.display * self.ui;
         self.arrange();
     }
@@ -1386,10 +1501,10 @@ impl Viewer {
     /// `:ui`: says how large the interface is; with a number, makes it
     /// that many times its usual size (or that many percent of it); with
     /// `+` or `-`, a step larger or smaller. Returns whether `command`
-    /// was that.
+    /// was that, or one of how the pages are looked at (see `comfort`).
     fn ui_command(&mut self, command: &str) -> bool {
         let Some(wanted) = command.strip_prefix("ui") else {
-            return false;
+            return self.comfort_command(command);
         };
         if !(wanted.is_empty() || wanted.starts_with([' ', '+', '-'])) {
             return false;
@@ -1413,16 +1528,16 @@ impl Viewer {
         };
         self.set_ui_scale(ui);
         self.notice(format!(
-            "interface at {:.0} %  (:ui + and :ui - change it; to keep it, \
-             ui_scale = {:.2} under [view] in config.toml)",
-            self.ui * 100.0,
-            self.ui
+            "interface at {:.0} %  (:ui + and :ui - change it; it is kept as \
+             ui_scale under [view])",
+            self.ui * 100.0
         ));
         true
     }
 
     /// A file changed on disk. Returns whether a compile is needed.
     pub fn file_changed(&mut self, path: &Path) -> bool {
+        self.report_disk(path);
         if self.is_edited(path) {
             return self.edited_file_changed();
         }
@@ -1495,6 +1610,9 @@ impl Viewer {
         if self.shown_panes() == Panes::Source || self.follows_step() {
             return;
         }
+        if self.typewriter_follows() {
+            return;
+        }
         let (Some(change), Some(editor), Some(document), Some(world)) = (
             self.places(),
             &self.editor,
@@ -1539,9 +1657,10 @@ impl Viewer {
                 y: cell.min.y.to_pt(),
             })
         });
+        let there = there.or_else(|| pages::shown_on(document.pages(), world, file, cursor));
         let shown = world.shown_at(file, cursor);
         let Some(position) =
-            there.or_else(|| zetwerk_typst::locate(document, &source, shown, near))
+            there.or_else(|| zetwerk_typst::locate(document.pages(), &source, shown, near))
         else {
             return;
         };
@@ -1563,6 +1682,7 @@ impl Viewer {
 
     /// A compile finished.
     pub fn compiled(&mut self, output: CompileOutput) {
+        self.report_compiled(&output);
         if self
             .compiled_revision
             .is_some_and(|newest| output.revision < newest)
@@ -1608,12 +1728,12 @@ impl Viewer {
             if self.document.is_none() {
                 // The first pages there are: until now the window showed
                 // the source in their place.
-                self.document = Some(document);
+                self.document = Some(local::Pages::new(document, Arc::clone(&output.world)));
                 self.arrange();
                 // Now that it is known which files the document is made of.
                 self.announce_unsaved_elsewhere();
             } else {
-                self.document = Some(document);
+                self.document = Some(local::Pages::new(document, Arc::clone(&output.world)));
             }
             self.compiled_world = Some(Arc::clone(&output.world));
             self.document_revision = Some(output.revision);
@@ -1657,11 +1777,16 @@ impl Viewer {
         }
         self.margin_compiled(&output.world);
         self.refused_compiled(&output.world);
+        self.place_compiled();
+        self.tutor_compiled();
     }
 
     /// The user turned the wheel or dragged on the touchpad, by this many
     /// device pixels.
     pub fn scroll(&mut self, dx: f64, dy: f64) {
+        if self.present_scroll(dy) {
+            return;
+        }
         match self.paging {
             Paging::Scroll => self.view.scroll_by(dx, dy, &self.layout),
             Paging::Slides => self.push_slides(dy),
@@ -1718,6 +1843,9 @@ impl Viewer {
     }
 
     fn status_height(&self) -> u32 {
+        if self.status_hidden() {
+            return 0;
+        }
         (STATUS_HEIGHT * self.scale).round() as u32
     }
 
@@ -1751,9 +1879,22 @@ impl Viewer {
     /// on again to where Ctrl-O came back from. On the command line it
     /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
+        self.report_reached(press);
+        // A page put in whole is not pasted into: its own keys say so.
+        if self.page_here().is_none() && self.paste_key(press) {
+            return;
+        }
         self.message = None;
+        self.place.touched = true;
         let press = self.shift_enter(press);
-        if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
+        if self.stop_key(press)
+            || self.set_key(press)
+            || self.confirm_key(press)
+            || self.cell_block_key(press)
+        {
+            return;
+        }
+        if self.present_key(press) {
             return;
         }
         if self.grid.is_some() {
@@ -1762,7 +1903,17 @@ impl Viewer {
         if self.packages_key(press) {
             return;
         }
-        if self.start_key(press) || self.refused_key(press) || self.margin_key(press) {
+        if self.tutor_key(press) || self.help_key(press) {
+            return;
+        }
+        if self.start_key(press)
+            || self.refused_key(press)
+            || self.margin_key(press)
+            || self.pages_key(press)
+        {
+            return;
+        }
+        if self.changes_key(press) {
             return;
         }
         if self.bib_undo_key(press) {
@@ -1858,6 +2009,8 @@ impl Viewer {
                 columns: self.source_size.0,
             },
         };
+        editor.set_rules(self.settings.rules());
+        let latex = latex::pending(editor);
         let typed = editor.key(press, &shown);
         let typing = editor.mode() == editor::Mode::Insert;
         // A paragraph is one line of the source and may fill pages: the
@@ -1867,6 +2020,7 @@ impl Viewer {
             self.alert(format!("not changed: {failure}"));
         }
         self.agent_mark = None;
+        self.latex_told(latex);
         if typed.changed {
             self.revision += 1;
             self.touched();
@@ -1971,7 +2125,7 @@ impl Viewer {
                 // Back at the text the pages show. Pages a part was put
                 // into are not all of it typeset: that is still to come.
                 let whole = matches!((document, &self.whole),
-                    (document, Some(whole)) if Arc::ptr_eq(document, whole));
+                    (document, Some(whole)) if document.is_whole() && Arc::ptr_eq(document.whole(), whole));
                 self.document_revision = Some(self.revision);
                 if whole {
                     self.compiled_revision = Some(self.revision);
@@ -2028,7 +2182,7 @@ impl Viewer {
             // Near the cursor: a part typeset by itself is looked for
             // no further either.
             _ => zetwerk_typst::locate_near(
-                document,
+                document.pages(),
                 &base,
                 offset.saturating_sub(1),
                 self.cursor_page.get(),
@@ -2053,6 +2207,9 @@ impl Viewer {
             text,
         };
         let prediction = predict(&page.frame, map, edit).map_err(|why| format!("{why:?}"))?;
+        let justified = crate::typst_text::rule_value(editor.source(), "par", "justify")
+            .is_some_and(|value| value.trim() != "false");
+        as_typst_breaks(&prediction, justified)?;
         self.planned.retain(|(planned, _, _), _| *planned != index);
         self.predicted = Some(Predicted {
             index,
@@ -2062,6 +2219,8 @@ impl Viewer {
             },
             typed: prediction.typed,
             end,
+            lines: prediction.lines,
+            justified: prediction.justified,
         });
         Ok(())
     }
@@ -2082,6 +2241,9 @@ impl Viewer {
     fn places_of_text(&self) -> Option<Change> {
         self.document.as_ref()?;
         if self.looks_back() {
+            return None;
+        }
+        if self.proof_shown() {
             return None;
         }
         if self.document_revision == Some(self.revision) {
@@ -2107,22 +2269,33 @@ impl Viewer {
         self.predicted.is_some()
     }
 
+    #[allow(clippy::too_many_lines, reason = "a line for every command")]
     fn execute(&mut self, command: &str) {
+        self.settings_before(command);
         if self.start_command(command) {
             return;
         }
-        if self.packages_command(command) {
+        if self.packages_command(command)
+            || self.tutor_command(command)
+            || self.help_command(command)
+        {
             return;
         }
         let unwritten = self.unwritten();
         let modified = !unwritten.is_empty();
         if self.file_command(command)
+            || self.set_command(command)
             || self.ui_command(command)
             || self.settings_command(command)
             || self.language_command(command)
             || self.notes_command(command)
             || self.refused_command(command)
             || self.vim_command(command)
+            || self.present_command(command)
+            || self.slide_command(command)
+            || self.report_command(command)
+            || self.paste_command(command)
+            || self.changes_command(command)
         {
             return;
         }
@@ -2164,8 +2337,9 @@ impl Viewer {
             "page next" => self.step_page(true),
             "page previous" => self.step_page(false),
             "describe" => self.describe(),
-            history if self.history_command(history) => {}
+            history if self.history_command(history) || self.authors_command(history) => {}
             find if self.find_command(find) => {}
+            latex if self.latex_command(latex) => {}
             "definition" => self.goto_definition(),
             "outline" => self.pick(false),
             "labels" => self.pick(true),
@@ -2302,6 +2476,9 @@ impl Viewer {
     /// What the window should show right now. `has` tells which images the
     /// compositor already holds.
     pub fn scene(&mut self, has: &dyn Fn(TextureId) -> bool) -> Scene {
+        if let Some(scene) = self.present_scene(has) {
+            return scene;
+        }
         let mut scene = Scene::default();
         let (width, height) = (f64::from(self.window.0), f64::from(self.window.1));
         solid(&mut scene, has, BACKDROP, (0.0, 0.0, width, height));
@@ -2309,12 +2486,14 @@ impl Viewer {
         self.caret_at = None;
         self.equation_set = false;
         self.language_frame();
+        self.changes_frame();
         if self.grid.is_some() {
             self.grid_scene(&mut scene, has);
             self.status_line(&mut scene, has);
             return scene;
         }
         self.pages(&mut scene, has);
+        self.forget_far_pages();
         self.lens(&mut scene, has);
         // Drawn after the pages: a page zoomed wider than its pane must
         // not reach over the source.
@@ -2324,10 +2503,13 @@ impl Viewer {
             self.performance(&mut scene, has);
         }
         self.proposal_panel(&mut scene, has);
+        self.authors_panels(&mut scene, has);
         self.review_panels(&mut scene, has);
         self.hints(&mut scene, has);
         self.assist_panels(&mut scene, has);
+        self.settings_panel(&mut scene, has);
         self.margin_panel(&mut scene, has);
+        self.changes_panels(&mut scene, has);
         self.refused_panel(&mut scene, has);
         scene
     }
@@ -2358,6 +2540,7 @@ impl Viewer {
             };
             let origin = (f64::from(left) + visible.x as f64, visible.y as f64);
             let size = (f64::from(page_box.width), f64::from(page_box.height));
+            let paper = scene.quads.len();
             solid(scene, has, PAPER, (origin.0, origin.1, size.0, size.1));
 
             let wanted = tiles_in(&mut self.planned, visible.index, visible.region, || {
@@ -2395,16 +2578,22 @@ impl Viewer {
                 let tiles = wanted.iter().map(|tile| (tile.key, tile.region)).collect();
                 self.shown.insert(visible.index, Shown { zoom, tiles });
             }
+            self.focus_veils(scene, has, visible.index, origin, page);
             self.line_numbers(scene, has, visible.index, origin);
+            self.authors_page(scene, has, visible.index, origin);
+            self.change_bars(scene, has, visible.index, origin);
             self.step_marks(scene, has, visible.index, origin);
+            self.tutor_marks(scene, has, visible.index, origin);
             self.language_page(scene, has, visible.index, origin);
             self.find_marks(scene, has, visible.index, origin);
             self.margin_page(scene, has, visible.index, origin);
             self.page_cursor(scene, has, visible.index, origin);
+            self.pages_marks(scene, has, visible.index, origin);
             self.review_page(scene, has, visible.index, origin);
             self.focus_marks(scene, has, visible.index, origin);
             // Last: the labels lie over all else.
             self.jump_labels(scene, has, visible.index, origin);
+            self.paper_page(scene, paper, page, visible.index, origin);
         }
     }
 
@@ -2732,6 +2921,7 @@ impl Viewer {
     /// while the text is the text it complained about.
     fn source_marks(&self) -> Vec<(Range<usize>, Mark)> {
         let mut marked = self.agent_marks();
+        marked.extend(self.review_source_marks());
         marked.extend(self.step_stretches());
         if self.compiled_revision == Some(self.revision) {
             let file = self.file_id();
@@ -2864,6 +3054,7 @@ impl Viewer {
 
     fn status_line(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {
         let said_of_compiling = self.said_of_compiling();
+        let changes = self.changes_status();
         let state = self.state();
         let editing = state.editing.as_ref();
         let replacing = editing.is_some_and(|editing| editing.replacing);
@@ -2886,6 +3077,7 @@ impl Viewer {
             .as_ref()
             .is_some_and(|editing| editing.modified);
         let name = self.file_label(modified);
+        let name = self.authors_status().unwrap_or(name);
         let problem = self
             .problems
             .first()
@@ -2943,6 +3135,8 @@ impl Viewer {
             state.page, state.pages
         );
         let right = format!("{}{right}", self.search_count());
+        let right = format!("{changes}{right}");
+        let right = format!("{}{right}", self.tutor_status());
         let status = Status {
             mode,
             left,
@@ -2951,6 +3145,9 @@ impl Viewer {
         };
         let markup = chrome::status_markup(&status, f64::from(self.window.0) / self.scale);
         let y = f64::from(self.window.1) - f64::from(self.status_height());
+        let Some(y) = self.zen_status(y, command.is_some() || self.message.is_some()) else {
+            return;
+        };
         self.panel(scene, has, &markup, |_| (0.0, y));
     }
 
@@ -3239,18 +3436,31 @@ mod tests {
     use super::*;
     use crate::keys;
 
+    mod authors;
+    mod changes;
+    mod comfort;
     mod cursor;
     mod equations;
     mod errors;
     mod files;
     mod frames;
+    mod hidden;
     #[path = "keys.rs"]
     mod keyboard;
+    mod latex;
     mod left_behind;
+    mod names;
     mod packages;
+    mod pages;
     mod panels;
     mod parts;
+    mod paste;
+    mod present;
+    mod report;
+    mod review;
+    mod settings;
     mod speed;
+    mod tutor;
     mod typing;
     mod typist;
     mod vim;
@@ -4576,18 +4786,24 @@ mod tests {
                     Third.\n";
         let (mut viewer, directory) = editing(text);
         // At the end of the first paragraph: enough for two more lines.
+        // The keys that add one are typeset by themselves, the others
+        // worked out on their line; none waits.
         press(&mut viewer, "/some<CR>A");
         let typed = " More and more words are typed here, and the paragraph grows by a line and by another.";
         let mut shown = 0;
         for key in keys::parse(typed).unwrap() {
             viewer.key(key);
-            shown += usize::from(viewer.is_predicted());
+            shown += usize::from(
+                viewer.is_predicted() || viewer.document_revision == Some(viewer.revision),
+            );
         }
         assert_eq!(shown, typed.len(), "{:?}", viewer.declined);
+        assert!(viewer.stats.local >= 1, "{}", viewer.stats.local);
         let predicted = viewer
             .predicted
             .as_ref()
-            .map(|predicted| predicted.page.clone());
+            .map(|predicted| predicted.page.clone())
+            .or_else(|| Some(viewer.document.as_ref()?.pages()[0].clone()));
         let predicted = zetwerk_render::render_page(&predicted.unwrap(), 2.0);
         compile(&mut viewer);
         let document = viewer.document().unwrap();
@@ -4879,6 +5095,9 @@ mod tests {
     #[test]
     fn the_source_is_drawn_row_by_row() {
         let (mut viewer, directory) = editing("one\ntwo\n\nfour\n");
+        // Without the bar beside the line that changes: its colour is an
+        // image too, made once.
+        press(&mut viewer, ":changes off<CR>");
         let mut held = HashSet::new();
         let scene = viewer.scene(&|id| held.contains(&id));
         let images = scene.images.len();
@@ -5052,21 +5271,24 @@ mod tests {
             .map(|proposal| &now[proposal.range.clone()])
             .collect();
         assert_eq!(ranges, ["lazy dog", "end"]);
+        // Undone, the accepted one waits again.
         press(&mut viewer, "u");
         assert_eq!(viewer.text(), Some(text));
+        assert_eq!(viewer.proposals().len(), 3);
 
         // Typing in the text of one makes it stale: it can only go.
         press(&mut viewer, "/dog<CR>x");
-        assert!(viewer.proposals()[0].stale && !viewer.proposals()[1].stale);
+        let stale: Vec<bool> = viewer.proposals().iter().map(|p| p.stale).collect();
+        assert_eq!(stale, [false, true, false]);
         press(&mut viewer, "0]p");
         assert!(panel(&mut viewer));
         press(&mut viewer, "ga");
         assert!(viewer.text().unwrap().contains("lazy og"), "not made");
-        assert_eq!(viewer.proposals().len(), 2);
+        assert_eq!(viewer.proposals().len(), 3);
         // Undoing the typing makes it good again.
         press(&mut viewer, "u");
-        assert!(!viewer.proposals()[0].stale);
-        press(&mut viewer, "gg]pgr");
+        assert!(!viewer.proposals()[1].stale);
+        press(&mut viewer, "gg0]pgrgg0]pgr");
         assert_eq!(viewer.proposals().len(), 1);
         press(&mut viewer, ":accept all<CR>");
         assert_eq!(
@@ -6165,7 +6387,14 @@ mod tests {
         // The backslash makes the `$` behind it a character: to Typst
         // the equation goes on to the next one's beginning, that one's
         // text is no equation, and what stands between them is one.
-        press(&mut viewer, "gsgs/Before<CR>A Then $a + b \\");
+        press(&mut viewer, "gsgs/Before<CR>A Then $a + b ");
+        // Typed on the page, a backslash begins a LaTeX name (see
+        // `latex`); the sign itself comes as the source pane puts it.
+        if let Some(editor) = viewer.editor.as_mut() {
+            let at = editor.cursor();
+            let _ = editor.replace(&[(at..at, "\\")]);
+        }
+        viewer.text_changed(Edited::Typing);
         assert!(
             viewer
                 .text()

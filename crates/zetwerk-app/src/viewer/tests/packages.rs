@@ -89,9 +89,9 @@ fn a_document_that_lacks_a_package_says_so_and_g_fetches_it() {
         "{lines:?}"
     );
     // Nothing went anywhere for all that.
-    assert!(asked(&registry).is_empty());
+    assert_eq!(asked(&registry), Vec::<String>::new());
     assert!(!viewer.packages_progress(), "nothing is fetched unasked");
-    assert!(asked(&registry).is_empty());
+    assert_eq!(asked(&registry), Vec::<String>::new());
 
     press(&mut viewer, "g");
     assert_eq!(
@@ -108,8 +108,8 @@ fn a_document_that_lacks_a_package_says_so_and_g_fetches_it() {
     // And the document is typeset, by itself.
     compile(&mut viewer);
     assert!(viewer.document.is_some(), "{:?}", viewer.problems);
-    assert!(viewer.problems.is_empty());
-    assert!(viewer.package_lines().is_empty());
+    assert_eq!(viewer.problems, Vec::<String>::new());
+    assert_eq!(viewer.package_lines(), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(directory);
 }
 
@@ -130,7 +130,7 @@ fn with_downloads_off_nothing_is_fetched_and_the_panel_says_why() {
     );
     press(&mut viewer, ":package search slides<CR>");
     press(&mut viewer, ":package updates<CR>");
-    assert!(asked(&registry).is_empty(), "never means never");
+    assert_eq!(asked(&registry), Vec::<String>::new(), "never means never");
     assert!(find(&dirs(&packages), &parse_spec("touying:0.8.0").unwrap()).is_none());
     let _ = std::fs::remove_dir_all(directory);
 }

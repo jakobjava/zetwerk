@@ -58,6 +58,14 @@ pub struct Paragraphs {
     behind: usize,
 }
 
+impl Paragraphs {
+    /// Which children of the root of the new text they are.
+    #[must_use]
+    pub fn children(&self) -> Range<usize> {
+        self.first..self.behind
+    }
+}
+
 /// A paragraph break among the children of the root: which child it is,
 /// and its bytes.
 type Break = (usize, Range<usize>);

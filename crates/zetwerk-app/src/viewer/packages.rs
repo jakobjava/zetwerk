@@ -42,6 +42,7 @@
 //!   written over, and the document begins with the template's text.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -60,7 +61,7 @@ use crate::keys::{Key, KeyPress};
 
 /// How long the registry's list is taken as it was kept before it is
 /// asked for again.
-pub const INDEX_FRESH: Duration = Duration::from_secs(24 * 60 * 60);
+pub const INDEX_FRESH: Duration = Duration::from_hours(24);
 /// How many lines of what a package says of itself the list shows.
 const ABOUT_LINES: usize = 4;
 /// How many packages a search lists.
@@ -227,6 +228,24 @@ impl Viewer {
     /// Takes what the settings say of packages.
     pub(super) fn set_packages(&mut self, settings: &Settings) {
         self.packages.download = settings.download;
+    }
+
+    /// What `packages.download` is, as the settings say it.
+    pub(super) fn packages_download(&self) -> &'static str {
+        match self.packages.download {
+            Download::Ask => "ask",
+            Download::Always => "always",
+            Download::Never => "never",
+        }
+    }
+
+    /// Makes `packages.download` what `said` says.
+    pub(super) fn set_packages_download(&mut self, said: &str) {
+        self.packages.download = match said {
+            "always" => Download::Always,
+            "never" => Download::Never,
+            _ => Download::Ask,
+        };
     }
 
     /// Has fetches done on a thread of their own from now on; `wake` is
@@ -761,7 +780,7 @@ impl Viewer {
                         .unwrap_or_default(),
                     None => BTreeSet::new(),
                 };
-                let uses = typst_packages::used(root, &import, &exports);
+                let named = typst_packages::used(root, &import, &exports);
                 let used = found
                     .entry(import.spec.to_string())
                     .or_insert_with(|| Used {
@@ -772,7 +791,7 @@ impl Viewer {
                 if !used.files.contains(file) {
                     used.files.push(file.clone());
                 }
-                used.uses.extend(uses);
+                used.uses.extend(named);
             }
         }
         found.into_values().collect()
@@ -826,57 +845,54 @@ impl Viewer {
         let found = typst_packages::find(&dirs, &spec);
         let mut lines: Vec<String> = Vec::new();
         let mut actions: Vec<(String, Target)> = Vec::new();
-        match &found {
-            Some((dir, place)) => {
-                match typst_packages::about(dir) {
-                    Ok(about) => {
-                        lines.push(format!(
-                            "{}: {}",
-                            said(&spec),
-                            about
-                                .description
-                                .as_deref()
-                                .unwrap_or("it says nothing of itself")
-                        ));
-                        let mut by = Vec::new();
-                        if !about.authors.is_empty() {
-                            by.push(format!("by {}", about.authors.join(", ")));
-                        }
-                        by.extend(about.license.clone());
-                        by.push(format!("begins at {}", about.entrypoint));
-                        lines.push(by.join(" · "));
-                        lines.extend(
-                            about
-                                .readme
-                                .iter()
-                                .take(ABOUT_LINES)
-                                .map(|line| format!("“{line}”")),
-                        );
-                        if about.template.is_some() {
-                            lines.push(
-                                "a template: :new in an empty document begins with it".to_owned(),
-                            );
-                        }
-                        lines.extend(about.homepage);
+        if let Some((dir, place)) = &found {
+            match typst_packages::about(dir) {
+                Ok(about) => {
+                    lines.push(format!(
+                        "{}: {}",
+                        said(&spec),
+                        about
+                            .description
+                            .as_deref()
+                            .unwrap_or("it says nothing of itself")
+                    ));
+                    let mut by = Vec::new();
+                    if !about.authors.is_empty() {
+                        by.push(format!("by {}", about.authors.join(", ")));
                     }
-                    Err(why) => lines.push(format!("{}: {why}", said(&spec))),
+                    by.extend(about.license.clone());
+                    by.push(format!("begins at {}", about.entrypoint));
+                    lines.push(by.join(" · "));
+                    lines.extend(
+                        about
+                            .readme
+                            .iter()
+                            .take(ABOUT_LINES)
+                            .map(|line| format!("“{line}”")),
+                    );
+                    if about.template.is_some() {
+                        lines.push(
+                            "a template: :new in an empty document begins with it".to_owned(),
+                        );
+                    }
+                    lines.extend(about.homepage);
                 }
-                lines.push(format!("{} · in {}", place.said(), home(dir)));
-                if *place == Place::Fetched {
-                    actions.push((
-                        "remove it from this machine…\tasked first".to_owned(),
-                        Target::Command(format!("package remove {spec}")),
-                    ));
-                }
+                Err(why) => lines.push(format!("{}: {why}", said(&spec))),
             }
-            None => {
-                lines.push(format!("{}: not on this machine", said(&spec)));
-                if spec.namespace == NAMESPACE {
-                    actions.push((
-                        format!("fetch it\tasks packages.typst.org for {}", said(&spec)),
-                        Target::Command(format!("package get {spec}")),
-                    ));
-                }
+            lines.push(format!("{} · in {}", place.said(), home(dir)));
+            if *place == Place::Fetched {
+                actions.push((
+                    "remove it from this machine…\tasked first".to_owned(),
+                    Target::Command(format!("package remove {spec}")),
+                ));
+            }
+        } else {
+            lines.push(format!("{}: not on this machine", said(&spec)));
+            if spec.namespace == NAMESPACE {
+                actions.push((
+                    format!("fetch it\tasks packages.typst.org for {}", said(&spec)),
+                    Target::Command(format!("package get {spec}")),
+                ));
             }
         }
         match self.used().into_iter().find(|used| used.spec == spec) {
@@ -1301,14 +1317,15 @@ impl Viewer {
         let mut told = format!("begun from the template of {}", said(&spec));
         if !copied.made.is_empty() {
             let made: Vec<String> = copied.made.iter().map(name).collect();
-            told.push_str(&format!("; beside it: {}", listed(&made)));
+            let _ = write!(told, "; beside it: {}", listed(&made));
         }
         if !copied.kept.is_empty() {
             let kept: Vec<String> = copied.kept.iter().map(name).collect();
-            told.push_str(&format!(
+            let _ = write!(
+                told,
                 "; {} were there and are left as they are",
                 listed(&kept)
-            ));
+            );
         }
         told.push_str(" (u takes the text back)");
         self.notice(told);

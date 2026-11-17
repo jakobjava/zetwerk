@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use typst::syntax::{FileId, Source};
 use zetwerk_core::{
-    Buffer, DiskError, DiskStatus, Document, History, OpenError, Opened, Replace, StateId,
+    Buffer, By, DiskError, DiskStatus, Document, History, OpenError, Opened, Replace, StateId,
 };
 use zetwerk_vim::{Edit, Effect, Engine, Host, Place, Reading, Seek, Shown as ShownLine};
 
@@ -20,6 +20,9 @@ use crate::keys::{Key, KeyPress};
 
 pub use zetwerk_vim::Mode;
 
+mod credits;
+mod kept;
+mod latex;
 mod mark;
 pub use mark::Mark;
 
@@ -56,6 +59,31 @@ pub struct Editor {
     stepped: Option<(u64, Vec<Range<usize>>)>,
     /// What the text is read as, for searching it on the page.
     read: crate::reading::Cache,
+    /// Who the edits are by.
+    credits: credits::Credits,
+    /// What typing does of itself, as the user wants it.
+    rules: Rules,
+}
+
+/// What typing on a page does of itself, as the user wants it (see
+/// `viewer::set`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rules {
+    /// Whether `$` in running text begins an equation; else it is a
+    /// dollar sign.
+    pub dollar: bool,
+    /// Whether equations are tidied after keys: marks that raise nothing
+    /// go, letters typed together become a product.
+    pub tidy: bool,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            dollar: true,
+            tidy: true,
+        }
+    }
 }
 
 /// Something that shows the text in rows other than the source pane's:
@@ -121,6 +149,8 @@ impl Editor {
             top: 0,
             stepped: None,
             read: crate::reading::Cache::default(),
+            credits: credits::Credits::default(),
+            rules: Rules::default(),
         };
         Ok((editor, opened))
     }
@@ -137,6 +167,7 @@ impl Editor {
             .then(|| self.equation_inside())
             .flatten();
         let cursor = self.engine.cursor();
+        let latex = self.latex_pending(matches!(shown, Shown::Pages(_)));
         // Only pages take the place of lines for `j` and `k`: in the
         // source, a line of the text is what they have always gone by.
         self.engine.set_rows_first(matches!(shown, Shown::Pages(_)));
@@ -157,9 +188,12 @@ impl Editor {
             shown_revision: before,
             read: &self.read,
             on_page: matches!(shown, Shown::Pages(_)),
+            credits: &mut self.credits,
+            rules: self.rules,
         };
         let length = host.document.text().len();
         let effects = self.engine.key(press, &mut host);
+        self.credits.after_key(self.engine.took(), &self.document);
         self.stepped = self.stepped_since(history);
         if self.failure.is_some() {
             // The engine believes in an edit that was not made. The text is
@@ -167,10 +201,11 @@ impl Editor {
             self.engine
                 .set_cursor(self.engine.cursor(), self.document.text());
         } else if matches!(shown, Shown::Pages(_)) && self.stepped.is_none() {
+            self.latex_left(latex);
             // Not after an undo or a redo, which bring back what was
             // there: nothing is tidied away from that or made of it, or
             // redo would lead nowhere.
-            if self.document.text().len() < length {
+            if self.document.text().len() < length && self.rules.tidy {
                 self.tidy_equation();
             }
             if !typing && self.document.revision() != before {
@@ -195,14 +230,15 @@ impl Editor {
             // The equation typing took the cursor out of: what was typed
             // last in it is over.
             let out = inside.filter(|start| typing && self.equation_inside() != Some(*start));
-            if let Some(start) = out {
+            if let Some(start) = out.filter(|_| self.rules.tidy) {
                 self.spell_out_names(Some(start));
             }
             // So is a word the cursor moved off while typing.
             let moved = typing && inside.is_some() && self.engine.cursor() != cursor;
-            if self.document.revision() != before
+            if (self.document.revision() != before
                 || typing != (self.engine.mode() == Mode::Insert)
-                || moved
+                || moved)
+                && self.rules.tidy
             {
                 self.spell_out_names(None);
             }
@@ -257,7 +293,11 @@ impl Editor {
             }
             replaces.push(Replace::new(name, spelled.as_str()));
         }
-        if let Err(err) = self.document.edit(&replaces, true) {
+        if let Err(err) = self.document.edit_by(
+            &replaces,
+            true,
+            &By::Origin(&credits::by_zetwerk("spelled out a product in an equation")),
+        ) {
             self.failure = Some(err.to_string());
             return;
         }
@@ -301,7 +341,11 @@ impl Editor {
                 }
                 replaces.push(Replace::new(script, ""));
             }
-            if let Err(err) = self.document.edit(&replaces, true) {
+            if let Err(err) = self.document.edit_by(
+                &replaces,
+                true,
+                &By::Origin(&credits::by_zetwerk("tidied an equation")),
+            ) {
                 self.failure = Some(err.to_string());
                 return;
             }
@@ -343,7 +387,13 @@ impl Editor {
         if replaces.is_empty() {
             return;
         }
-        if let Err(err) = self.document.edit(&replaces, true) {
+        if let Err(err) = self.document.edit_by(
+            &replaces,
+            true,
+            &By::Origin(&credits::by_zetwerk(
+                "set apart what was put in an equation",
+            )),
+        ) {
             self.failure = Some(err.to_string());
             return;
         }
@@ -385,7 +435,11 @@ impl Editor {
         if replaces.is_empty() {
             return;
         }
-        if let Err(err) = self.document.edit(&replaces, true) {
+        if let Err(err) = self.document.edit_by(
+            &replaces,
+            true,
+            &By::Origin(&credits::by_zetwerk("cleared empty text in an equation")),
+        ) {
             self.failure = Some(err.to_string());
             return;
         }
@@ -477,7 +531,11 @@ impl Editor {
         if range.is_empty() || (typing && !in_line) {
             return;
         }
-        if let Err(err) = self.document.edit(&[Replace::new(range, "")], true) {
+        if let Err(err) = self.document.edit_by(
+            &[Replace::new(range, "")],
+            true,
+            &By::Origin(&credits::by_zetwerk("cleared an empty equation")),
+        ) {
             self.failure = Some(err.to_string());
             return;
         }
@@ -488,7 +546,7 @@ impl Editor {
     /// replaces a range of bytes by a text, the ranges referring to the
     /// text as the edits before them left it. All of them are one undo
     /// step. Nothing is changed if one of them cannot be made.
-    pub fn replace(&mut self, edits: &[(Range<usize>, &str)]) -> Result<(), String> {
+    fn replace_now(&mut self, edits: &[(Range<usize>, &str)]) -> Result<(), String> {
         // Tried on a copy of the ranges first: the engine has no way to
         // say no.
         let mut length = self.text().len();
@@ -518,6 +576,8 @@ impl Editor {
             shown_revision: before,
             read: &self.read,
             on_page: false,
+            credits: &mut self.credits,
+            rules: self.rules,
         };
         self.engine.replace(&mut host, edits);
         match self.failure.take() {
@@ -535,6 +595,11 @@ impl Editor {
     /// cursor `within` bytes into it. See [`Engine::completed`].
     pub fn completed(&mut self, replaced: usize, text: String, within: usize) -> KeyPress {
         self.engine.completed(replaced, text, within)
+    }
+
+    /// Makes typing do of itself what `rules` say.
+    pub fn set_rules(&mut self, rules: Rules) {
+        self.rules = rules;
     }
 
     /// Puts the cursor at byte `offset` as a jump: `` ` ` `` leads back.
@@ -559,12 +624,19 @@ impl Editor {
     /// repeats.
     pub fn share(&mut self, other: &Self) {
         self.engine.share(&other.engine);
+        self.credits.share(&other.credits);
     }
 
     /// The Vim that edits the text, to ask what it did.
     #[must_use]
     pub fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    /// Takes back what the Vim of a text remembered (see
+    /// [`Engine::recall`]), as a replay begins.
+    pub fn recall(&mut self, memory: &str) {
+        self.engine.recall(memory);
     }
 
     /// What the text is read as on a page (see [`crate::reading`]).
@@ -583,6 +655,7 @@ impl Editor {
     /// Makes register `name` hold `text`: whole lines if it ends with a
     /// line break. See [`Engine::set_register`].
     pub fn set_register(&mut self, name: char, text: &str) {
+        self.credits.came_from_outside(text);
         self.engine.set_register(name, text);
     }
 
@@ -723,6 +796,8 @@ impl Editor {
             shown_revision,
             read: &self.read,
             on_page: false,
+            credits: &mut self.credits,
+            rules: self.rules,
         };
         ask(&mut self.engine, &host)
     }
@@ -814,6 +889,13 @@ impl Editor {
     #[must_use]
     pub fn is_modified(&self) -> bool {
         self.document.is_modified()
+    }
+
+    /// The state of the history the file holds; see
+    /// [`Document::saved_state`].
+    #[must_use]
+    pub fn saved_state(&self) -> Option<StateId> {
+        self.document.saved_state()
     }
 
     /// When the unsaved changes brought back from the journal on opening
@@ -1013,6 +1095,8 @@ impl Editor {
             shown_revision,
             read: &self.read,
             on_page: false,
+            credits: &mut self.credits,
+            rules: self.rules,
         };
         for key in keys.chain([press]) {
             self.engine.key(key, &mut host);
@@ -1066,6 +1150,10 @@ struct DocumentHost<'a> {
     read: &'a crate::reading::Cache,
     /// Whether the edits are made by keys on a page, not by an agent.
     on_page: bool,
+    /// Who the edits are by.
+    credits: &'a mut credits::Credits,
+    /// What typing does of itself.
+    rules: Rules,
 }
 
 /// How often what a deletion left in an equation is cleared away: what
@@ -1105,9 +1193,13 @@ impl Host for DocumentHost<'_> {
                 .map(|part| Replace::new(part, ""))
                 .collect();
         }
-        if let Err(err) = self.document.edit(&replaces, join) {
+        if let Err(err) = self.credits.edit(self.document, &replaces, join) {
             *self.failure = Some(err.to_string());
         }
+    }
+
+    fn putting(&mut self, text: &str) {
+        self.credits.putting(text);
     }
 
     fn undo(&mut self) -> Option<Range<usize>> {
@@ -1168,11 +1260,24 @@ impl Host for DocumentHost<'_> {
     }
 
     fn expand(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
-        crate::typst_text::snippet(&self.document.buffer().0, at)
+        let source = &self.document.buffer().0;
+        // A LaTeX name is no snippet's: Tab ends it (see `next_field`).
+        if crate::latex::typing::pending_at(source, at).is_some() {
+            return None;
+        }
+        crate::typst_text::snippet(source, at)
     }
 
     fn typed(&self, at: usize, c: char) -> Option<(Range<usize>, String, usize)> {
-        crate::typst_text::typed(&self.document.buffer().0, at, c)
+        let typed = crate::typst_text::typed(&self.document.buffer().0, at, c);
+        // A dollar sign where it would begin an equation, if the user
+        // wants none begun so: one that shows as itself.
+        let begins =
+            |(range, with, _): &(Range<usize>, String, usize)| *range == (at..at) && with == "$$";
+        if c == '$' && !self.rules.dollar && typed.as_ref().is_some_and(begins) {
+            return Some((at..at, "\\$".to_owned(), 2));
+        }
+        typed
     }
 
     fn set_off(
@@ -1184,7 +1289,9 @@ impl Host for DocumentHost<'_> {
     }
 
     fn unmake(&self, at: usize) -> Option<(Range<usize>, String)> {
-        crate::typst_text::unmake(&self.document.buffer().0, at)
+        let source = &self.document.buffer().0;
+        crate::latex::typing::backspace(source, at)
+            .or_else(|| crate::typst_text::unmake(source, at))
     }
 
     fn put_over(&self, stop: Range<usize>, c: char) -> Option<(Range<usize>, String, usize)> {
@@ -1236,9 +1343,18 @@ impl Host for DocumentHost<'_> {
         crate::typst_text::pieces(&self.document.buffer().0, range, with)
     }
 
+    fn front(&self, stop: Range<usize>) -> usize {
+        if !matches!(self.rows, RowsOf::Pages(_)) {
+            return stop.start;
+        }
+        crate::typst_text::front(&self.document.buffer().0, &stop)
+    }
+
     fn next_field(&self, at: usize) -> Option<(Range<usize>, String, usize)> {
-        matches!(self.rows, RowsOf::Pages(_))
-            .then(|| crate::typst_text::tab_key(&self.document.buffer().0, at))?
+        let source = &self.document.buffer().0;
+        matches!(self.rows, RowsOf::Pages(_)).then(|| {
+            crate::latex::typing::tab(source, at).or_else(|| crate::typst_text::tab_key(source, at))
+        })?
     }
 
     fn prev_field(&self, at: usize) -> Option<usize> {
@@ -1290,6 +1406,13 @@ impl Host for DocumentHost<'_> {
             return None;
         }
         pages.line(at)
+    }
+
+    fn line_edge(&self, at: usize, end: bool) -> usize {
+        if !matches!(self.rows, RowsOf::Pages(_)) {
+            return at;
+        }
+        crate::typst_text::line_edge(&self.document.buffer().0, at, end)
     }
 
     fn open(&self, at: usize, below: bool) -> Option<(usize, String, usize)> {

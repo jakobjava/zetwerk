@@ -241,6 +241,17 @@ impl Session {
             .chain([before.len()])
             .collect();
         let first = at.index(boundaries.len());
+        self.edit_from(first, len, new, join);
+    }
+
+    /// Replaces `len` characters from the `first` on with `new`.
+    fn edit_from(&mut self, first: usize, len: usize, new: &str, join: bool) {
+        let before = self.text();
+        let boundaries: Vec<usize> = before
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([before.len()])
+            .collect();
         let last = (first + len).min(boundaries.len() - 1);
         let range = boundaries[first]..boundaries[last];
         let mut expected = before.clone();
@@ -458,6 +469,31 @@ impl Drop for Session {
         self.document = None;
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// Found by the check on GitHub (2026-11-16): a journal damaged at its
+/// first byte is salvaged with the file's text as the root; a joined edit
+/// then changes the one state salvaged, and the file is written by another
+/// program with the text that state had before.
+#[test]
+fn a_salvaged_state_that_was_typed_into_is_not_what_the_file_holds() {
+    let mut session = Session::new(None);
+    let step = |session: &mut Session, op: Op| session.apply(op);
+    step(&mut session, Op::ExternalWrite("é".to_owned()));
+    session.edit_from(0, 0, "", false);
+    session.check();
+    step(&mut session, Op::Reload);
+    step(&mut session, Op::Crash);
+    step(&mut session, Op::Undo);
+    step(&mut session, Op::Save { overwrite: false });
+    session.edit_from(0, 0, "", false);
+    session.check();
+    session.damaged_crash(|bytes| bytes[0] ^= 1);
+    session.check();
+    session.edit_from(0, 0, " ", true);
+    session.check();
+    step(&mut session, Op::ExternalWrite("é".to_owned()));
+    session.finish();
 }
 
 proptest! {

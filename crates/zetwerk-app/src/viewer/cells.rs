@@ -34,6 +34,13 @@ pub(super) struct Cells {
     fill: Option<(usize, usize, Vec<usize>)>,
 }
 
+impl Cells {
+    /// Whether a block of cells is selected.
+    pub(super) fn has_block(&self) -> bool {
+        self.block.is_some()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Block {
     table: usize,

@@ -24,7 +24,8 @@
 //!
 //! In running text, where no list is made, a word of three letters or
 //! more shows the rest of the nearest word in the text around the cursor
-//! that begins so, as Vim's Ctrl-N would find it; Tab takes that too.
+//! that begins so, as Vim's Ctrl-N would find it; Ctrl-Y takes that, and
+//! Tab where the user wants it to (`:set tabwords`; see `set`).
 //! Nothing is shown where the name or word is whole already, or where the
 //! text goes on behind the cursor. `:ghost` turns these rests off. They
 //! are overlays only: nothing is in the text until Tab takes it.
@@ -80,7 +81,7 @@ const OBJECTS: &[(&str, &str)] = &[
 
 /// How long the keys have to pause before what can follow them is
 /// listed.
-const PAUSE: Duration = Duration::from_millis(600);
+pub(super) const PAUSE: Duration = Duration::from_millis(600);
 /// How far before and behind the cursor a word is looked for, in bytes.
 const WORD_REACH: usize = 16 * 1024;
 /// How many characters of a word have to be typed before its rest is
@@ -91,8 +92,8 @@ const WORD_REST: usize = 2;
 
 /// Whether each of the aids is shown, and where they are.
 pub(super) struct Hints {
-    next_keys: bool,
-    ghost: bool,
+    pub(super) next_keys: bool,
+    pub(super) ghost: bool,
     /// The list of what can follow the keys typed.
     list: List,
     /// The rest of what is being typed.
@@ -167,7 +168,7 @@ fn string(text: &str) -> String {
 }
 
 /// `keys` in Vim's notation, as a mapping is written.
-fn notation(keys: &[KeyPress]) -> String {
+pub(super) fn notation(keys: &[KeyPress]) -> String {
     let mut written = String::new();
     for press in keys {
         let name = match press.key {
@@ -314,7 +315,7 @@ fn following_markup(typed: &str, rows: &[(String, String)], columns: usize) -> S
          {cells})",
         count = columns * 2,
         gutters = gutters.join(", "),
-        title = string(&format!("{typed} …")),
+        title = string(&super::help::following_title(typed)),
     )
 }
 
@@ -390,9 +391,9 @@ impl Viewer {
         if mode != editor::Mode::Insert {
             return None;
         }
-        if press.key == Key::Tab
-            && !press.ctrl
+        if (press.key == Key::Tab || press.ctrl)
             && let Some(rest) = self.word_rest()
+            && self.takes_word(press)
         {
             let editor = self.editor.as_mut()?;
             let within = rest.text.len();
@@ -474,9 +475,9 @@ impl Viewer {
     }
 
     /// Whether the rest of a word shows behind the cursor, for Tab to
-    /// take.
+    /// take: not where Tab is not to take it (see `set`).
     pub(super) fn shows_word_rest(&self) -> bool {
-        self.word_rest().is_some()
+        self.settings.tab_words && self.word_rest().is_some()
     }
 
     /// The rest of the word being typed in running text, as found after
@@ -496,7 +497,7 @@ impl Viewer {
     /// no list of completions is up, three letters or more are typed, and
     /// the text does not go on behind the cursor.
     fn find_word_rest(&self) -> Option<(u64, usize, Rest)> {
-        if !self.hints.ghost || self.completion.is_some() {
+        if !self.hints.ghost || !self.settings.ghost_words || self.completion.is_some() {
             return None;
         }
         let editor = self.editor.as_ref()?;
@@ -530,11 +531,12 @@ impl Viewer {
     /// After every key: looks for the rest of a word, and sets or ends
     /// the pause after which what can follow the keys is listed.
     pub(super) fn hints_keyed(&mut self) {
+        self.settings_keyed();
         self.hints.rest.word = self.find_word_rest();
         if !self.waits_for_key() {
             self.hints.list = List::Away;
         } else if self.hints.list != List::Up {
-            self.hints.list = List::Due(Instant::now() + PAUSE);
+            self.hints.list = List::Due(Instant::now() + self.settings.pause);
         }
     }
 
@@ -559,6 +561,18 @@ impl Viewer {
         let up = self.waits_for_key();
         self.hints.list = if up { List::Up } else { List::Away };
         up
+    }
+
+    /// The keys typed, where the list of what can follow them is up:
+    /// what `?` gives help on then (see `help`).
+    pub(super) fn following_listed(&self) -> Option<String> {
+        if self.hints.list != List::Up || !self.typed.is_empty() {
+            return None;
+        }
+        self.editor
+            .as_ref()?
+            .following()
+            .map(|following| following.typed)
     }
 
     /// Whether the keys typed wait for another, and what can follow them
@@ -587,6 +601,9 @@ impl Viewer {
             .filter(|_| editor.prompt() == Some(':'))?;
         if typed.trim().is_empty() {
             return None;
+        }
+        if let Some(rest) = Self::set_rest(typed) {
+            return Some(rest);
         }
         let mut shared: Option<&str> = None;
         for (keys, command) in super::palette::entries() {

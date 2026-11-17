@@ -2,6 +2,8 @@
 
 mod bridge;
 mod config;
+mod config_write;
+mod replay;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -41,8 +43,21 @@ Settings are read from ~/.config/zetwerk/config.toml:
   slides = false          one page at a time, whole
   ui_scale = 1.0          how large the status line, the lists and the
                           source are; :ui 1.5, :ui + and :ui - while open
+  restore = true          open a document where it was left: cursor,
+                          view, marks, registers (--fresh: not this time)
+  colours = \"day\"         or \"night\", \"sepia\", \"auto\" (the desktop's
+                          choice or the hour): the pages on screen only;
+                          :night, :sepia, zn while open
+  typewriter = false      the line typed stays in the middle; :typewriter, zT
+  focus = \"off\"           or \"paragraph\", \"sentence\": the rest faint;
+                          :focus, zf; :zen (ze) hides all else too
   [power]
   mode = \"auto\"           or \"saver\", \"performance\"
+  [present]
+  clock = false           the time shows in a corner of the slides from the
+                          start of a talk (t shows or hides it)
+  duration = \"20min\"      how long a talk is to take, unless :present 30min
+                          says otherwise
   [language]
   spelling = true         mark words no Hunspell dictionary knows, in the
                           document's language (English, British first,
@@ -67,6 +82,17 @@ Settings are read from ~/.config/zetwerk/config.toml:
   [keys]
   timeoutlen = 1000       how long, in ms, the first keys of a mapping
                           wait for the rest
+  [aids]
+  preset = \"quiet\"        what the page shows besides itself: quiet (what
+                          is wrong, what is asked for), \"writing\" (and
+                          spelling, word endings, tags), \"everything\"
+  numbers = \"normal\"      and each aid by itself; :set in the window
+                          lists every option, and what you change there
+                          is written here (only what is not usual)
+  [typing]
+  tab_words = false       Tab takes the faint rest of a word (Ctrl-Y does)
+  dollar = true           $ begins an equation in running text
+  tidy = true             equations are tidied as they are typed
 
 A file that another file includes is opened as part of that document:
 the whole document is shown, the file is what is edited.
@@ -83,6 +109,8 @@ Options:
                           does not find it itself
       --power <mode>      auto (default), saver or performance
       --embedded-fonts    Use only the fonts shipped with Typst
+      --fresh             Open the document at its start, not where it
+                          was left (that is still kept for next time)
   -h, --help              Show this help
 
 Options for `render`:
@@ -98,6 +126,9 @@ Options for developing zetwerk itself:
       --screenshot <path> Then save the window as a PNG and quit
       --paced             Press the keys one by one, each once the one
                           before has been typeset, as somebody typing
+      --replay <report>   Play a report (g!, Ctrl-G, :report) again in a
+                          copy of its document, with its pauses, and say
+                          whether the text came out as it did
   zetwerk call <tool> [json-arguments] [-o <path>]
                           Call a tool of the open window, as an agent
                           would; images are written to <path>";
@@ -125,6 +156,10 @@ enum Command {
 }
 
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flags of the command line, each its own"
+)]
 struct Args {
     command: Command,
     /// Positional arguments after the command.
@@ -139,7 +174,11 @@ struct Args {
     screenshot: Option<PathBuf>,
     /// Whether the keys of the script wait for each other's effect.
     paced: bool,
+    /// Whether the document is opened at its start this time.
+    fresh: bool,
     main: Option<PathBuf>,
+    /// A report to play again.
+    replay: Option<PathBuf>,
 }
 
 /// Makes sure there is a file at `path` to open: one that does not
@@ -167,7 +206,7 @@ fn begin_if_new(path: &Path) -> Result<(), String> {
 /// the settings say.
 fn options(
     args: &Args,
-    config: &config::Config,
+    (config, settings): (&config::Config, &zetwerk_app::settings::Stored),
     path: PathBuf,
     font_set: FontSet,
     complaint: Option<String>,
@@ -191,7 +230,15 @@ fn options(
         inserts: config.inserts(),
         language: config.language.settings(),
         templates: config::templates(),
-        packages: config.packages.settings(),
+        // `packages.download` comes with the other options of the table.
+        packages: zetwerk_app::viewer::packages::Settings::default(),
+        review: config.review.settings(),
+        talk: config.present.talk(),
+        report: replay::report_settings(config),
+        authors: config.authors.settings(),
+        settings: settings.clone(),
+        changes: config.changes.options(),
+        comfort: config.view.comfort(args.fresh),
     })
 }
 
@@ -215,6 +262,9 @@ fn run() -> Result<(), String> {
         println!("{USAGE}");
         return Ok(());
     };
+    if let Some(report) = &args.replay {
+        return replay::run(&args, report);
+    }
     match args.command {
         Command::Mcp => return mcp(&args),
         Command::Call => return call(&args),
@@ -238,8 +288,10 @@ fn run() -> Result<(), String> {
     let paced = args.paced;
     let script = (!args.keys.is_empty() || args.screenshot.is_some())
         .then(|| (args.keys.clone(), args.screenshot.clone()));
-    let (config, complaint) = config::load();
-    let options = options(&args, &config, input, font_set, complaint)?;
+    let (config, settings, complaint) = config::load();
+    let mut options = options(&args, (&config, &settings), input, font_set, complaint)?;
+    // Only a window tells what changed since the last start.
+    options.settings.window = true;
     // Kept until the window closes; dropping it stops the server.
     let mut server = None;
     app::run(options, |handle| {
@@ -319,7 +371,9 @@ fn parse(mut parser: lexopt::Parser) -> Result<Option<Args>, String> {
             }
             Long("screenshot") => args.screenshot = Some(parser.value().map_err(fail)?.into()),
             Long("paced") => args.paced = true,
+            Long("fresh") => args.fresh = true,
             Long("main") => args.main = Some(parser.value().map_err(fail)?.into()),
+            Long("replay") => args.replay = Some(parser.value().map_err(fail)?.into()),
             Value(value) if args.command == Command::Open && args.values.is_empty() => {
                 match value.to_str() {
                     Some("render") => args.command = Command::Render,
@@ -414,7 +468,7 @@ fn mcp(args: &Args) -> Result<(), String> {
     }
     // Standard output is the agent's line from here on: complaints go to
     // standard error.
-    let (config, complaint) = config::load();
+    let (config, settings, complaint) = config::load();
     if let Some(complaint) = &complaint {
         eprintln!("{complaint}");
     }
@@ -423,7 +477,7 @@ fn mcp(args: &Args) -> Result<(), String> {
     } else {
         FontSet::EmbeddedAndSystem
     };
-    let options = options(args, &config, path, font_set, None)?;
+    let options = options(args, (&config, &settings), path, font_set, None)?;
     match headless::spawn(&options) {
         Ok((handle, thread)) => {
             // There is no window to save in: the agent may, unless the

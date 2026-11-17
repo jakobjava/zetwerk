@@ -141,6 +141,7 @@ fn compile(viewer: &mut Viewer) {
     if viewer.is_compiled() {
         return;
     }
+    viewer.report_began();
     let (revision, world) = viewer.snapshot();
     let started = Instant::now();
     let compiled = zetwerk_typst::compile(&world);

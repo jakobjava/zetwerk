@@ -63,6 +63,9 @@ pub enum Decline {
     Overflow,
     /// The paragraph would need one more line than it has.
     Grows,
+    /// The line would show nothing: a paragraph emptied is no paragraph,
+    /// and what follows moves up into its place.
+    Emptied,
     /// A line would have to be broken where the predictor cannot break
     /// it: it ends in a hyphen or in something that is not plain text, is
     /// one long word, or the next line begins in another font.
@@ -86,6 +89,24 @@ pub struct Prediction {
     /// The cell of the typed text in page coordinates. The caret belongs at
     /// its right edge.
     pub typed: Rect,
+    /// What became of the lines of the paragraph.
+    pub lines: Lines,
+    /// Whether the line edited is justified: Typst breaks such lines
+    /// weighing all of the paragraph, not one line after the other.
+    pub justified: bool,
+}
+
+/// What a prediction did to the lines of the paragraph edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lines {
+    /// The line edited kept its breaks.
+    Kept,
+    /// Words went from line to line, as many lines as before.
+    Rebroken,
+    /// The paragraph got a line more, and what follows moved down.
+    More,
+    /// It lost one, and what follows moved up.
+    Fewer,
 }
 
 /// Predicts the page after `insertion`.
@@ -141,6 +162,10 @@ pub fn predict(frame: &Frame, map: &PageMap, edit: Replacement) -> Result<Predic
 
     let mut line = Line::collect(parent, item_index)?;
     line.replace(item_index, at..until, edit.text)?;
+    let justified = line.is_justified();
+    if line.shows_nothing() {
+        return Err(Decline::Emptied);
+    }
 
     // The run's transform places the item's origin on the page; the item's
     // position in its parent tells where the parent's origin is.
@@ -151,7 +176,14 @@ pub fn predict(frame: &Frame, map: &PageMap, edit: Replacement) -> Result<Predic
     match line.settle() {
         Ok(()) => {}
         // The line is too full: its last words go to the next line.
-        Err(Decline::Overflow) => return reflow(frame, parent_path, parent, to_page, line),
+        Err(Decline::Overflow) => {
+            return reflow(frame, parent_path, parent, to_page, line).map(|prediction| {
+                Prediction {
+                    justified,
+                    ..prediction
+                }
+            });
+        }
         Err(other) => return Err(other),
     }
     // A line that lost text may have room for words of the next line.
@@ -159,12 +191,20 @@ pub fn predict(frame: &Frame, map: &PageMap, edit: Replacement) -> Result<Predic
     if edit.removed > edit.text.len()
         && let Ok(prediction) = pull_up(frame, parent_path, parent, to_page, line.clone())
     {
-        return Ok(prediction);
+        return Ok(Prediction {
+            justified,
+            ..prediction
+        });
     }
     let cell = line.typed_cell().ok_or(Decline::Inconsistent)?;
     let typed = Rect::new(cell.min + to_page, cell.max + to_page);
     let frame = replace(frame, parent_path, line.apply(parent));
-    Ok(Prediction { frame, typed })
+    Ok(Prediction {
+        frame,
+        typed,
+        lines: Lines::Kept,
+        justified,
+    })
 }
 
 /// The other way round from [`reflow`]: a line that has room takes words
@@ -205,6 +245,7 @@ fn pull_up(
     let mut out = container.clone();
     let mut typed = None;
     let mut column: Option<(Abs, Abs)> = None;
+    let mut lines = Lines::Kept;
     for _ in 0..MAX_LINES {
         let origin = origin_of(place).ok_or(Decline::Inconsistent)?;
         let (left, right) = line.span();
@@ -230,6 +271,7 @@ fn pull_up(
         });
         let mut following = None;
         if let Some((next_place, next, words)) = taken {
+            lines = Lines::Rebroken;
             line.append(words)?;
             line.settle()?;
             following = Some((next_place, next));
@@ -258,6 +300,7 @@ fn pull_up(
                 gone.baseline - below.baseline,
                 container.height(),
             );
+            lines = Lines::Fewer;
             break;
         }
         next.settle()?;
@@ -266,7 +309,12 @@ fn pull_up(
     }
     let typed = typed.ok_or(Decline::Inconsistent)?;
     let frame = replace(page, container_path, out);
-    Ok(Prediction { frame, typed })
+    Ok(Prediction {
+        frame,
+        typed,
+        lines,
+        justified: false,
+    })
 }
 
 /// Moves what follows the line that was at `gone` in its column up by
@@ -381,6 +429,7 @@ fn reflow(
     let mut column: Option<(Abs, Abs)> = None;
     let mut carry = Some(line.shed()?);
     line.settle()?;
+    let mut lines = Lines::Rebroken;
     for _ in 0..MAX_LINES {
         let origin = origin_of(place).ok_or(Decline::Inconsistent)?;
         if let Some(cell) = line.typed_cell() {
@@ -432,6 +481,7 @@ fn reflow(
                 ));
             }
             last.put_new(&mut out);
+            lines = Lines::More;
             break;
         }
         let (next_place, mut next) = next_line(container, &below)?;
@@ -452,7 +502,12 @@ fn reflow(
     }
     let typed = typed.ok_or(Decline::Inconsistent)?;
     let frame = replace(page, container_path, out);
-    Ok(Prediction { frame, typed })
+    Ok(Prediction {
+        frame,
+        typed,
+        lines,
+        justified: false,
+    })
 }
 
 /// What to look below of for the next line of a paragraph, in the

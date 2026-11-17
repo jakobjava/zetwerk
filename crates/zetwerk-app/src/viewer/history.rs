@@ -194,7 +194,7 @@ fn describe(changes: &[Change]) -> String {
 /// one the text is in, nothing for those undo leads back to, `undone`
 /// for those redo leads to, and for all others that they are on another
 /// branch.
-fn rows(history: &History) -> Vec<(String, Target)> {
+pub(super) fn rows(history: &History) -> Vec<(String, Target)> {
     let line = history.line();
     // Where on the line each state is, if it is on it.
     let mut places: Vec<Option<usize>> = vec![None; history.len()];
@@ -254,19 +254,22 @@ impl Viewer {
     /// one of them.
     pub(super) fn history_command(&mut self, command: &str) -> bool {
         match command {
-            "history" => self.open_history(),
+            "history" => self.open_history(None),
             "history leave" => self.leave_history(),
             _ => match command.strip_prefix("history go ").map(str::parse) {
                 Some(Ok(state)) => self.go_in_history(state),
-                _ => return false,
+                _ => match command.strip_prefix("history at ").map(str::parse) {
+                    Some(Ok(state)) => self.open_history(Some(state)),
+                    _ => return false,
+                },
             },
         }
         true
     }
 
     /// `gh`: puts up the history of the text being edited, with the
-    /// state it is in chosen.
-    fn open_history(&mut self) {
+    /// state it is in chosen, or state `at`.
+    fn open_history(&mut self, at: Option<StateId>) {
         let typing = |editor: &Editor| editor.mode() != editor::Mode::Normal;
         if self.editor.as_ref().is_some_and(typing) {
             // The list is for going through the history with `u` and
@@ -281,7 +284,7 @@ impl Viewer {
             return self.notice("nothing was changed yet: the text has no history");
         }
         let items = rows(history);
-        let current = usize::try_from(history.current()).unwrap_or(0);
+        let current = usize::try_from(at.unwrap_or(history.current())).unwrap_or(0);
         let chosen = history.len().saturating_sub(current + 1);
         self.open_picker_for("history", items, chosen, "history leave".to_owned(), None);
         self.history = Some(Panel {
@@ -289,6 +292,9 @@ impl Viewer {
             top: self.view.top,
             slide: self.slide,
         });
+        if at.is_some() {
+            self.history_looked();
+        }
     }
 
     /// Escape: the list goes, and all is as it was when it came: the
@@ -500,7 +506,7 @@ impl Viewer {
         };
         let at = world.shown_at(file, first.start);
         let near = self.cursor_page.get();
-        let Some(position) = zetwerk_typst::locate(document, &source, at, near) else {
+        let Some(position) = zetwerk_typst::locate(document.pages(), &source, at, near) else {
             return false;
         };
         let band = if self.history.is_some() {

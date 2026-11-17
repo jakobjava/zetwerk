@@ -95,6 +95,15 @@ pub enum Refusal {
     /// some of it goes to the next page, which is for all of it typeset
     /// at once to show.
     BreaksOtherwise,
+    /// The page shows text below where the text of what was typeset ends:
+    /// that is not where it ends on the page (a rule put all of the text
+    /// into a block, and the mark of the foot stood at the foot of that).
+    FootElsewhere,
+    /// Typst began the part on a later page than the first of what was
+    /// typeset (a heading that breaks the page before it): it is set
+    /// there as on a page it may not be on in the whole, a left one
+    /// where that is a right one.
+    LaterPage,
     /// Cut away from the rest, the part is read otherwise than among it
     /// (a `*` not closed, a list marker on the line of a rule), or Typst
     /// read it anew and numbered its nodes otherwise: what is typeset of
@@ -667,6 +676,22 @@ fn is_rule_across(item: &FrameItem) -> bool {
             && matches!(shape.geometry, Geometry::Line(to) if to.y.to_pt().abs() < 0.01))
 }
 
+/// Whether text of `page` (not what `stays` around the text, nor the
+/// footnotes) reaches further down than `lowest`, in points: then that is
+/// not where its text ends.
+fn reaches_below(page: &Frame, lowest: f64, stays: &dyn Fn(usize) -> bool) -> bool {
+    for (index, (position, item)) in page.items().enumerate() {
+        if is_rule_across(item) {
+            break;
+        }
+        if !stays(index) && !matches!(item, FrameItem::Tag(_)) && extent(*position, item).1 > lowest
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// How near the top of something has to be to the bottom of the part
 /// to count as below it, in points: lines of a page overlap a little.
 const BELOW: f64 = 1.0;
@@ -686,7 +711,8 @@ static SPLICES: AtomicU64 = AtomicU64::new(1);
 /// # Errors
 ///
 /// If the page shows nothing of the region, or it is not in one piece
-/// there or in `typeset`; or if it would reach below `foot` itself.
+/// there or on the first page of `typeset`; or if it would reach below
+/// `foot` itself.
 pub fn splice(
     page: &Frame,
     typeset: &[Page],
@@ -699,10 +725,13 @@ pub fn splice(
         .ok_or(Refusal::NotOnThisPage)?;
     // What was typeset, on the one page it is on.
     let mut made = None;
-    for typeset in typeset {
+    for (index, typeset) in typeset.iter().enumerate() {
         if let Some(run) = region.run(region.now, &typeset.frame)? {
             if made.is_some() {
                 return Err(Refusal::NotInOnePiece);
+            }
+            if index > 0 {
+                return Err(Refusal::LaterPage);
             }
             made = Some((&typeset.frame, run));
         }
@@ -761,6 +790,9 @@ pub fn splice(
     let gone = page.items().skip(old.items.start).take(old.items.len());
     let gone_closed = closed_among(gone.map(|(_, item)| item));
     let lowest = foot.to_pt() + BELOW;
+    if reaches_below(page, lowest, stays) {
+        return Err(Refusal::FootElsewhere);
+    }
     // The part itself does not go below it: the line typed in may be the
     // one that goes to the next page.
     if new.bottom + down.to_pt() > lowest {

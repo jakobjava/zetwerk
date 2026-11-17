@@ -457,3 +457,385 @@ fn a_paragraph_with_references_is_typeset_by_itself_as_in_the_whole() {
     assert_eq!(differs_from_whole(&mut viewer), None);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn lines_a_part_left_out_come_back_when_it_shrinks_again() {
+    // A paragraph begun at the foot of a full page pushes its last line
+    // off, which is left out until the whole puts it on the next page.
+    // Taken back before the pause, the line was still left out: each part
+    // was put into the page as the one before had left it. The typist
+    // found it: seed 3005 in the paper.
+    let text = format!(
+        "#set page(width: 300pt, height: 200pt, margin: (top: 20pt, bottom: 60pt))\n\n{}",
+        paragraphs(6)
+    );
+    let (mut viewer, directory) = editing(&text);
+    press(&mut viewer, "gsgs");
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(text.find("in it.").unwrap_or(0) + 6);
+    }
+    press(&mut viewer, "A<CR>x");
+    let parts = viewer.stats.local;
+    assert!(parts > 0, "{:?}", viewer.declined);
+    press(&mut viewer, "<BS>");
+    assert_eq!(
+        viewer.document_revision,
+        Some(viewer.revision),
+        "{:?}",
+        viewer.declined
+    );
+    assert_eq!(differs_from_whole(&mut viewer), None);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// The tags beside the text of the page on screen, as drawn: where each
+/// stands, to a pixel.
+fn tags_drawn(viewer: &mut Viewer) -> Vec<[i32; 2]> {
+    let scene = viewer.scene(&|_| false);
+    let height = f64::from(viewer.view.height) as f32;
+    let tints =
+        [PAGE_CURSOR, PAGE_BAR, PAGE_SELECTION].map(|rgba| TextureId(hash128(&("tint", rgba))));
+    let mut tags: Vec<[i32; 2]> = scene
+        .quads
+        .iter()
+        .filter(|quad| quad.y < height && quad.x > 400.0 && !tints.contains(&quad.texture))
+        .map(|quad| [quad.x.round() as i32, quad.y.round() as i32])
+        .collect();
+    tags.sort_unstable();
+    tags
+}
+
+#[test]
+fn the_tags_in_the_margin_follow_the_lines_a_part_moves() {
+    // A paragraph begun above a labelled heading: the heading and the
+    // words with a comment move a line down at once, and their tags stood
+    // where they were until the pause.
+    let text = "#set page(width: 300pt, height: 400pt)\n\
+                Before it.\n\n= Head <lab>\n\nSome words. // said\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, "gsgs");
+    let settled = tags_drawn(&mut viewer);
+    assert_eq!(settled.len(), 2, "{settled:?}");
+    press(&mut viewer, "/\\=Before it<CR>A<CR>a");
+    assert!(viewer.stats.local > 0, "{:?}", viewer.declined);
+    assert_eq!(
+        viewer.document_revision,
+        Some(viewer.revision),
+        "{:?}",
+        viewer.declined
+    );
+    let typed = tags_drawn(&mut viewer);
+    // And as the line is worked out, or typeset by itself, letter by
+    // letter.
+    press(&mut viewer, "b");
+    let more = tags_drawn(&mut viewer);
+    compile(&mut viewer);
+    let typeset = tags_drawn(&mut viewer);
+    assert_ne!(typeset, settled);
+    assert_eq!(typed, typeset);
+    assert_eq!(more, typeset);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// The bytes each glyph of a page shows, page by page.
+type Shown = HashMap<usize, Vec<Option<Range<usize>>>>;
+
+/// The maps of all pages of `viewer`, with the text they were made of.
+fn maps_now(viewer: &mut Viewer) -> (String, Shown) {
+    let world = viewer
+        .compiled_world
+        .clone()
+        .unwrap_or_else(|| panic!("pages"));
+    let pages = viewer.document.clone().unwrap_or_else(|| panic!("pages"));
+    let file = viewer.file_id();
+    let text = world
+        .written(file)
+        .map(|source| source.text().to_owned())
+        .unwrap_or_default();
+    let ranges = |map: &PageMap| -> Vec<Option<Range<usize>>> {
+        map.glyphs()
+            .iter()
+            .map(|glyph| match &glyph.origin {
+                zetwerk_typst::Origin::Text { range, .. }
+                | zetwerk_typst::Origin::Space { range, .. }
+                | zetwerk_typst::Origin::Math { range, .. }
+                | zetwerk_typst::Origin::Object { range, .. } => Some(range.clone()),
+                zetwerk_typst::Origin::Atomic(_) => None,
+            })
+            .collect()
+    };
+    let mut all = HashMap::new();
+    for (index, page) in pages.pages().iter().enumerate() {
+        let map = viewer
+            .maps
+            .entry(index)
+            .or_insert_with(|| PageMap::build(&world, &page.frame));
+        all.insert(index, ranges(map));
+    }
+    (text, all)
+}
+
+#[test]
+fn the_maps_of_pages_a_part_is_not_put_into_are_kept_and_moved() {
+    // The maps of all pages were made anew after every part: three pages
+    // a frame on 312 pages, 3.5 to 4.7 ms. Those of the other pages stay,
+    // the text they show moved by what was typed; one that shows some of
+    // the part (a heading in the table of contents) is made anew.
+    let text = format!(
+        "#set page(width: 300pt, height: 200pt)\n#outline()\n\n= First\n\n{}= Second part\n\n{}",
+        paragraphs(8),
+        paragraphs(4)
+    );
+    for (at, keys, shown_elsewhere) in [("x_1", "a^2", false), ("Second", "i$x", true)] {
+        let (mut viewer, directory) = editing(&text);
+        press(&mut viewer, "gsgs");
+        if let Some(editor) = viewer.editor.as_mut() {
+            editor.set_cursor(text.find(at).unwrap_or(0) + at.len());
+        }
+        viewer.follow_cursor();
+        let (before, then) = maps_now(&mut viewer);
+        let parts = viewer.stats.local;
+        press(&mut viewer, keys);
+        assert!(viewer.stats.local > parts, "{at}: {:?}", viewer.declined);
+        let spliced = viewer.document.as_ref().and_then(local::Pages::spliced_at);
+        // The page with the cursor is mapped anew when it is followed.
+        let kept: Vec<usize> = (viewer.maps.keys().copied())
+            .filter(|index| Some(*index) != spliced)
+            .collect();
+        if shown_elsewhere {
+            assert!(!kept.contains(&0), "{at}: the contents kept their map");
+        } else {
+            assert_eq!(kept.len() + 1, then.len(), "{at}: only {kept:?} kept");
+        }
+        let (after, now) = maps_now(&mut viewer);
+        for index in kept {
+            for (old, new) in then[&index].iter().zip(&now[&index]) {
+                let (Some(old), Some(new)) = (old, new) else {
+                    assert_eq!(old.is_some(), new.is_some(), "{at}: page {index}");
+                    continue;
+                };
+                assert_eq!(
+                    before.get(old.clone()),
+                    after.get(new.clone()),
+                    "{at}: page {index}, {old:?} now {new:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+/// What is wrong with the page after `keys`, typed at what `at` finds in
+/// `text` (with `files` beside it), if it says it shows the text.
+fn after_keys_beside(files: &[(&str, &str)], text: &str, at: &str, keys: &str) -> Option<String> {
+    let directory = directory(text);
+    for (name, content) in files {
+        std::fs::write(directory.join(name), content).unwrap_or_else(|err| panic!("{err}"));
+    }
+    let (mut viewer, _) = open(&directory);
+    press(&mut viewer, "gsgs");
+    let found = text
+        .find(at)
+        .unwrap_or_else(|| panic!("{at:?} is not in the text"));
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(found);
+    }
+    viewer.follow_cursor();
+    let mut wrong = None;
+    for key in keys::parse(keys).unwrap_or_default() {
+        viewer.key(key);
+        if viewer.document_revision == Some(viewer.revision) && wrong.is_none() {
+            wrong = differs_from_whole(&mut viewer)
+                .map(|wrong| format!("{key:?}: {wrong}; parts {}", viewer.stats.local));
+        }
+    }
+    let _ = std::fs::remove_dir_all(directory);
+    wrong
+}
+
+#[test]
+fn parts_of_documents_of_other_shapes_show_what_the_whole_shows() {
+    // The starters, slides made with a package, columns made by a rule,
+    // a footnote on every page, a page wider than high with margins in
+    // percent, and all of the text wrapped in a block by a rule (where
+    // the mark of the foot of the text stood at the foot of the block):
+    // a part shows what the whole shows, or the page waits for it.
+    let starter = |name: &str| match name {
+        "article" => include_str!("../../../templates/article.typ"),
+        "report" => include_str!("../../../templates/report.typ"),
+        "letter" => include_str!("../../../templates/letter.typ"),
+        "notes" => include_str!("../../../templates/notes.typ"),
+        _ => include_str!("../../../templates/slides.typ"),
+    };
+    let bib = include_str!("../../../templates/refs.bib");
+    let noted = (0..8).fold(String::new(), |mut text, index| {
+        use std::fmt::Write as _;
+        let _ = write!(
+            text,
+            "Paragraph {index} of the text, with words#footnote[Note {index}.] enough in it \
+             to be broken into lines, and $x_{index}$ in it.\n\n"
+        );
+        text
+    });
+    let documents: Vec<(String, &str)> = vec![
+        (starter("article").to_owned(), "‹Why the question"),
+        (starter("report").to_owned(), "‹What the work is about"),
+        (starter("letter").to_owned(), "‹Name of the addressee"),
+        (starter("notes").to_owned(), "‹More notes."),
+        (starter("slides").to_owned(), "‹What this slide says."),
+        (
+            include_str!("../../../../zetwerk-corpus/docs/slides.typ").to_owned(),
+            "Repeat until",
+        ),
+        (
+            format!(
+                "#set page(width: 300pt, height: 300pt)\n#show: columns.with(2)\n\n{}",
+                paragraphs(9)
+            ),
+            "Paragraph 3",
+        ),
+        (
+            format!("#set page(width: 300pt, height: 200pt)\n\n{noted}"),
+            "Paragraph 5",
+        ),
+        (
+            format!(
+                "#set page(paper: \"a6\", flipped: true, margin: (x: 8%, y: 12%))\n\n{}",
+                paragraphs(6)
+            ),
+            "Paragraph 3",
+        ),
+        (
+            format!(
+                "#set page(width: 300pt, height: 200pt)\n#show: body => block(inset: 8pt, body)\n\n{}",
+                paragraphs(8)
+            ),
+            "Paragraph 4",
+        ),
+        (
+            format!(
+                "#set page(width: 300pt, height: 200pt)\n#show: body => block(inset: 8pt, body)\n\n{}",
+                paragraphs(2)
+            ),
+            "Paragraph 1",
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (text, at) in &documents {
+        for keys in ["i$y", "A<CR>x", "Ax <BS><BS>"] {
+            if let Some(why) = after_keys_beside(&[("refs.bib", bib)], text, at, keys) {
+                wrong.push(format!("{at:?} {keys:?}: {why}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// Where the cursor is drawn on the pages, to a pixel, and where the view
+/// begins.
+fn cursor_drawn(viewer: &mut Viewer) -> (Vec<[i32; 4]>, f64) {
+    let scene = viewer.scene(&|_| false);
+    let cursors = [PAGE_CURSOR, PAGE_BAR].map(|rgba| TextureId(hash128(&("tint", rgba))));
+    let drawn = scene
+        .quads
+        .iter()
+        .filter(|quad| cursors.contains(&quad.texture))
+        .map(|quad| [quad.x, quad.y, quad.width, quad.height].map(|v| v.round() as i32))
+        .collect();
+    (drawn, viewer.view.top)
+}
+
+#[test]
+fn the_whole_comes_without_a_jump_where_the_page_breaks_otherwise() {
+    // A paragraph begun at the foot of a full page of the paper: what it
+    // pushes below the text is left out, and the whole puts more on the
+    // next page (a heading keeps to what follows it). When the whole
+    // comes, the cursor and the view stay where they are.
+    let (mut viewer, directory) = editing(PAPER);
+    press(&mut viewer, "gsgs");
+    if let Some(editor) = viewer.editor.as_mut() {
+        let at = "of the original points.";
+        editor.set_cursor(PAPER.find(at).unwrap_or(0) + at.len());
+    }
+    viewer.follow_cursor();
+    press(&mut viewer, "o");
+    assert!(viewer.stats.local > 0, "{:?}", viewer.declined);
+    press(&mut viewer, "Words");
+    let (typed, top) = cursor_drawn(&mut viewer);
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    compile(&mut viewer);
+    let (typeset, now) = cursor_drawn(&mut viewer);
+    assert!(
+        (top - now).abs() < 0.5,
+        "the view moved from {top} to {now}"
+    );
+    assert_eq!(typeset.len(), 1, "{typeset:?}");
+    assert!(
+        (typed[0][0] - typeset[0][0]).abs() <= 2 && (typed[0][1] - typeset[0][1]).abs() <= 2,
+        "typed {typed:?}, typeset {typeset:?}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn what_is_drawn_over_the_page_follows_the_lines_a_part_moves() {
+    // Below a paragraph begun by itself: the note on words, the marks of
+    // a search, the numbers of the lines, the tags beside them. A frame
+    // after the part draws them where the frame after the whole does.
+    let text = "#set page(width: 300pt, height: 400pt)\n\
+                Before it.\n\n= Head <lab>\n\nSome words of the text. // said\n\n\
+                More words here.\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, "gsgs/\\=Some<CR>:note look here<CR>");
+    press(&mut viewer, "/words<CR>/\\=Before it<CR>A<CR>a");
+    assert!(viewer.stats.local > 0, "{:?}", viewer.declined);
+    assert_eq!(
+        viewer.document_revision,
+        Some(viewer.revision),
+        "{:?}",
+        viewer.declined
+    );
+    let drawn = |viewer: &mut Viewer| {
+        let scene = viewer.scene(&|_| false);
+        let height = f64::from(viewer.view.height) as f32;
+        let mut quads: Vec<(u128, [i32; 4])> = scene
+            .quads
+            .iter()
+            .filter(|quad| quad.y < height)
+            .map(|quad| {
+                let place = [quad.x, quad.y, quad.width, quad.height];
+                (quad.texture.0, place.map(|v| v.round() as i32))
+            })
+            .collect();
+        quads.sort_unstable();
+        quads
+    };
+    let typed = drawn(&mut viewer);
+    compile(&mut viewer);
+    let typeset = drawn(&mut viewer);
+    let gone: Vec<_> = typed.iter().filter(|q| !typeset.contains(q)).collect();
+    let came: Vec<_> = typeset.iter().filter(|q| !typed.contains(q)).collect();
+    assert!(
+        gone.is_empty() && came.is_empty(),
+        "only after the part: {gone:?}; only after the whole: {came:?}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn references_of_every_kind_show_in_a_part_what_they_show_in_the_whole() {
+    // Stand-ins were tried for one equation, one heading and one figure:
+    // here headings of two levels, two equations, a table, a figure of
+    // something else (which has none, and is typeset whole), several in
+    // one paragraph, and one in an item of a list.
+    let text = "#set page(width: 300pt, height: 500pt)\n#set heading(numbering: \"1.1\")\n\
+                #set math.equation(numbering: \"(1)\")\n\n= Start <s1>\n\n== Sub <s2>\n\nWords.\n\n\
+                $ a = b $ <e1>\n\n$ c = d $ <e2>\n\n\
+                #figure(table(columns: 1, [x]), caption: [T]) <t1>\n\n\
+                #figure(rect(width: 10pt), caption: [R]) <r1>\n\n= Next <s3>\n\n\
+                See @s1, @s2, @e1, @e2 and @t1, with $x$ in it.\n\nThen @r1 and $y$ here.\n\n\
+                - An item with @e2 and $z$.\n\nLast words.\n";
+    for at in ["$x", "$y", "$z"] {
+        assert_eq!(after_keys(text, at, true, "a^2"), None, "{at}");
+    }
+}
