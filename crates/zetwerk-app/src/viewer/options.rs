@@ -26,8 +26,9 @@
 //! - The compiler's complaints beside their line stay in all: they are
 //!   what is wrong. Tags for what shows as nothing (labels, comments)
 //!   are what the page does not show; a writer wants them, a reader not.
-//! - Spelling is for writing; grammar, with its doubtful findings, for
-//!   "everything".
+//! - Spelling is checked in all (`]s`, `z=`, `:issues`, agents ask for
+//!   it), but underlined while writing; grammar, with its doubtful
+//!   findings, only with "everything".
 //! - The rest of a name in an equation or a command stands in for the
 //!   list of completions that would come up otherwise, so it is the
 //!   quieter of the two and stays; the rest of a word in running text
@@ -317,12 +318,31 @@ pub(crate) const TABLE: &[Opt] = &[
     .next_start()
     .on(MAYBE[1]),
     opt(
+        "aids.spelling",
+        PAGE,
+        Kind::Switch,
+        Usual::By(["off", "on", "on"]),
+        "words no dictionary knows are underlined on the page (]s and \
+         :issues find them all the same)",
+        |v| Value::Switch(v.settings.spelling_marks),
+        |v, value| v.settings.spelling_marks = value.is_on(),
+    ),
+    opt(
+        "aids.grammar",
+        PAGE,
+        Kind::Switch,
+        Usual::By(["off", "off", "on"]),
+        "what the grammar checker finds is underlined on the page",
+        |v| Value::Switch(v.settings.grammar_marks),
+        |v, value| v.settings.grammar_marks = value.is_on(),
+    ),
+    opt(
         "language.spelling",
         Group::Language,
         Kind::Switch,
-        Usual::By(["off", "on", "on"]),
-        "words no dictionary knows are underlined; ]s goes to them, z= \
-         says what may be meant",
+        ON,
+        "spelling is checked: ]s goes to what is found, z= says what may \
+         be meant (aids.spelling: whether it is underlined)",
         |v| Value::Switch(v.language.settings.spelling),
         |v, value| {
             v.language.settings.spelling = value.is_on();
@@ -334,8 +354,8 @@ pub(crate) const TABLE: &[Opt] = &[
         "language.grammar",
         Group::Language,
         Kind::Switch,
-        Usual::By(["off", "off", "on"]),
-        "what a grammar checker finds is underlined too",
+        ON,
+        "grammar is checked too (aids.grammar: whether it is underlined)",
         |v| Value::Switch(v.language.settings.grammar),
         |v, value| {
             v.language.settings.grammar = value.is_on();

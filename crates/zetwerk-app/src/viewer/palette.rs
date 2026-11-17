@@ -368,7 +368,7 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     (
         "an option: on, off, switched, asked, as usual, made so",
-        ":set numbers  :set nonumbers  :set numbers!  :set numbers?  :set numbers&  :set pause=300",
+        ":set nu  :set nonu  :set nu!  :set nu?",
         Does::Ask("set "),
     ),
     (
@@ -558,7 +558,7 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("nextkeys"),
     ),
     (
-        "the rest of a word, faint behind the cursor (Ctrl-Y takes it): on or off",
+        "the rest of a word, faint behind the cursor (Ctrl-Y takes it): on, off",
         ":ghost",
         Does::Run("ghost"),
     ),

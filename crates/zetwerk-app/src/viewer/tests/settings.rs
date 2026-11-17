@@ -158,8 +158,9 @@ fn every_command_that_turns_something_on_or_off_is_an_option() {
         };
         let name = command.split(' ').next().unwrap_or_default();
         let what = label.split('\t').next().unwrap_or_default();
-        let toggles =
-            what.ends_with("on or off") || what.ends_with("or not") || what.ends_with("or do not");
+        let toggles = (what.ends_with("on or off") || what.ends_with("on, off"))
+            || what.ends_with("or not")
+            || what.ends_with("or do not");
         if toggles && !DOCUMENT_RULES.contains(&name) {
             assert!(
                 table()
@@ -510,7 +511,7 @@ fn a_set_of_aids_takes_back_what_was_said_of_single_aids() {
         last_written(&edits, "aids.preset"),
         Some(Some(Written::Text("writing".into())))
     );
-    assert_eq!(value(&viewer, "language.spelling"), Value::Switch(true));
+    assert_eq!(value(&viewer, "aids.spelling"), Value::Switch(true));
     press(&mut viewer, ":set aids=quiet<CR>");
     assert_eq!(value(&viewer, "aids.tags"), Value::Switch(false));
     assert_eq!(last_written(&edits, "aids.preset"), Some(None));

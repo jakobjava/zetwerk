@@ -78,6 +78,10 @@ pub(super) struct Settings {
     pub(super) reach: usize,
     /// Whether empty places say what they are for.
     pub(super) place_words: bool,
+    /// Whether what spelling and grammar checking found is marked on
+    /// the page.
+    pub(super) spelling_marks: bool,
+    pub(super) grammar_marks: bool,
     /// How long keys pause before what can follow them is listed.
     pub(super) pause: Duration,
     /// Whether the rest of a word in running text is shown.
@@ -121,6 +125,8 @@ impl Default for Settings {
             numbers_typing: true,
             reach: 99,
             place_words: true,
+            spelling_marks: true,
+            grammar_marks: true,
             pause: super::hints::PAUSE,
             ghost_words: true,
             tab_words: true,
@@ -474,12 +480,16 @@ impl Viewer {
             .unwrap_or(Preset::Quiet);
         self.settings.preset = preset;
         for opt in table().iter().filter(|opt| opt.name != "aids.preset") {
-            let wanted = self
-                .settings
-                .explicit
-                .get(opt.name)
-                .cloned()
-                .unwrap_or_else(|| opt.usual_for(preset));
+            // What the file says of an option the window's options carry
+            // too (`app::Options`) is in the viewer already; where it says
+            // nothing, what they carry holds. The options only the table
+            // reads are what they usually are.
+            let own = opt.name.starts_with("aids.") || opt.name.starts_with("typing.");
+            let Some(wanted) = (self.settings.explicit.get(opt.name).cloned())
+                .or_else(|| own.then(|| opt.usual_for(preset)))
+            else {
+                continue;
+            };
             if (opt.get)(self) != wanted {
                 (opt.set)(self, &wanted);
             }

@@ -621,8 +621,16 @@ impl Viewer {
             .as_ref()
             .filter(|predicted| predicted.index == index);
         let typed = typed.map(|predicted| predicted.typed);
+        // Only the marks the user wants on the page (see `set`).
+        let marked = (self.settings.spelling_marks, self.settings.grammar_marks);
         for (rect, kind) in lines.iter() {
             if typed.is_some_and(|typed| rect.min.y < typed.max.y && rect.max.y > typed.min.y) {
+                continue;
+            }
+            if !matches!(
+                (kind, marked),
+                (Kind::Spelling, (true, _)) | (Kind::Grammar, (_, true))
+            ) {
                 continue;
             }
             let height = (rect.max.y - rect.min.y).to_pt() * zoom;
