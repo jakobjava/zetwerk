@@ -77,6 +77,13 @@ struct Known {
     /// Whether any heading has a number, and any equation.
     sections_numbered: bool,
     equations_numbered: bool,
+    /// Whether the numbers and the things labelled are told: counting
+    /// them takes long on a long document, and what labels there are
+    /// (looked at after every compile) does not need it.
+    counted: bool,
+    /// The whole document the numbers were counted for: pages a part
+    /// typed was put into have those of the whole they were put into.
+    whole: Weak<PagedDocument>,
 }
 
 /// The sources of the document's bibliography file, as they were when
@@ -396,8 +403,9 @@ fn referable(element: &Content) -> Option<(Kind, String)> {
 /// Looks up what `document` says of the things that can be referred to.
 /// One walk over what it can find again (its headings, figures,
 /// equations and the like, not its pages): the numbers are counted as
-/// Typst counts them.
-fn know(document: &Arc<PagedDocument>) -> Known {
+/// Typst counts them; only with `count` (else only the labels and the
+/// keys of the sources are told).
+fn know(document: &Arc<PagedDocument>, count: bool) -> Known {
     let mut known = Known {
         document: Arc::downgrade(document),
         numbers: HashMap::new(),
@@ -406,6 +414,8 @@ fn know(document: &Arc<PagedDocument>) -> Known {
         keys: zetwerk_typst::bibliography_keys(document),
         sections_numbered: false,
         equations_numbered: false,
+        counted: count,
+        whole: Arc::downgrade(document),
     };
     let mut counters: HashMap<String, Option<CounterState>> = HashMap::new();
     let begun = || Some(CounterState::init(false));
@@ -415,6 +425,9 @@ fn know(document: &Arc<PagedDocument>) -> Known {
             .map(|label| label.resolve().as_str().to_owned());
         if let Some(label) = &label {
             known.labels.push((label.clone(), element.span().id()));
+        }
+        if !count {
+            continue;
         }
         let update = element.with::<dyn Count>().and_then(Count::update);
         if element.elem() == CounterUpdateElem::ELEM {
@@ -471,8 +484,50 @@ fn being_typed(source: &Source, cursor: usize) -> Option<usize> {
     let before = source.text().get(..cursor)?;
     let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | ':' | '.');
     let at = before.trim_end_matches(name).len().checked_sub(1)?;
-    let begins = before.get(at..)?.starts_with('@') && !before.get(..at)?.ends_with('\\');
+    let begins = before.get(at..)?.starts_with('@')
+        && (!before.get(..at)?.ends_with('\\') || asked(source, at));
     (begins && typst_text::ground(source, at) == Ground::Markup).then_some(at)
+}
+
+/// Whether the `@` at byte `at` of `source` is written `\@` to be shown
+/// as it is while a reference is asked for: as `@` is typed on a page
+/// (see [`typst_text::typed`]), not behind a letter (an address).
+fn asked(source: &Source, at: usize) -> bool {
+    let text = source.text();
+    let Some(sign) = at.checked_sub(1) else {
+        return false;
+    };
+    let escape = typst::syntax::LinkedNode::new(source.root())
+        .leaf_at(sign, typst::syntax::Side::After)
+        .is_some_and(|leaf| {
+            leaf.kind() == typst::syntax::SyntaxKind::Escape && leaf.range() == (sign..at + 1)
+        });
+    escape && !text[..sign].ends_with(char::is_alphanumeric)
+}
+
+/// Where the reference whose `@` is at byte `at` of `source` begins: at
+/// its backslash, where it is asked for.
+fn reference_start(source: &Source, at: usize) -> usize {
+    if source.text()[..at].ends_with('\\') {
+        at - 1
+    } else {
+        at
+    }
+}
+
+/// `reference`, put in where the cursor is at byte `cursor` of `text`:
+/// with a backslash behind it where `text` goes on there with what would
+/// be more of its name.
+fn sealed(text: &str, cursor: usize, reference: String) -> String {
+    let goes_on = text[cursor..]
+        .chars()
+        .next()
+        .is_some_and(|c| typst::syntax::is_id_continue(c) || matches!(c, '.' | ':'));
+    if goes_on && reference.starts_with('@') {
+        format!("{reference}\\")
+    } else {
+        reference
+    }
 }
 
 /// The offers for the things `marks` found in the file being edited,
@@ -566,17 +621,38 @@ fn offers_of(
 
 impl Viewer {
     /// Brings what is known of the compiled document up to date with
-    /// the document there is.
-    fn refresh_known(&mut self) {
-        let Some(document) = &self.document else {
+    /// the document there is; with `count`, its numbers too.
+    fn refresh_known(&mut self, count: bool) {
+        let Some(document) = self.document.as_ref().map(super::local::Pages::whole) else {
             self.refer.known = None;
             return;
         };
-        let same = |known: &Known| known.document.as_ptr() == Arc::as_ptr(document);
-        if !self.refer.known.as_ref().is_some_and(same) {
-            self.refer.known = Some(know(document));
-            self.refer.sources = None;
+        let same = |known: &Known| {
+            known.document.as_ptr() == Arc::as_ptr(document) && (known.counted || !count)
+        };
+        if self.refer.known.as_ref().is_some_and(same) {
+            return;
         }
+        // While a part is typed into the pages, what is counted is
+        // that of the whole they were made of: counting it again with
+        // every key that puts a part in takes long on a long document.
+        let whole = self.whole.as_ref().map_or(std::ptr::null(), Arc::as_ptr);
+        let counted = self.refer.known.take().filter(|known| {
+            count && known.counted && known.whole.as_ptr() == whole && !whole.is_null()
+        });
+        let mut known = know(document, count && counted.is_none());
+        if let Some(counted) = counted {
+            known.numbers = counted.numbers;
+            known.labelled = counted.labelled;
+            known.sections_numbered = counted.sections_numbered;
+            known.equations_numbered = counted.equations_numbered;
+            known.counted = true;
+            known.whole = counted.whole;
+        } else if let Some(whole) = &self.whole {
+            known.whole = Arc::downgrade(whole);
+        }
+        self.refer.known = Some(known);
+        self.refer.sources = None;
     }
 
     /// The sources of the document's bibliography file; none if it has
@@ -604,7 +680,7 @@ impl Viewer {
     /// All there is to refer to, as the text and the compiled document
     /// are now.
     fn offers(&mut self) -> Vec<Offer> {
-        self.refresh_known();
+        self.refresh_known(true);
         let sources = self.bibliography();
         let Some(editor) = &self.editor else {
             return Vec::new();
@@ -636,11 +712,20 @@ impl Viewer {
                 labels.insert(offer.label.as_str());
             }
         }
-        // What else Typst knows a label of.
-        self.project.set_source(source.clone());
+        // What else Typst knows a label of: asked as if the `@` were not
+        // written to show as itself.
+        let (asked_of, cursor) = if asked(&source, at) {
+            let mut code = source.clone();
+            code.edit(at - 1..at, "");
+            (code, cursor - 1)
+        } else {
+            (source.clone(), cursor)
+        };
+        self.project.set_source(asked_of.clone());
         let world = self.project.snapshot();
-        let document = self.document.as_deref();
-        let own = zetwerk_typst::complete(&world, document, &source, cursor, false);
+        self.project.set_source(source.clone());
+        let document = self.document.as_ref().map(|pages| &**pages.whole());
+        let own = zetwerk_typst::complete(&world, document, &asked_of, cursor, false);
         let mut seen = HashSet::new();
         let others = own
             .map(|(_, candidates)| candidates)
@@ -654,7 +739,10 @@ impl Viewer {
             file,
             at,
             rest,
-            document: self.document.as_ref().map(Arc::downgrade),
+            document: self
+                .document
+                .as_ref()
+                .map(|pages| Arc::downgrade(pages.whole())),
             offers,
             candidates,
             keys,
@@ -670,14 +758,18 @@ impl Viewer {
             let (source, cursor) = (editor.source(), editor.cursor());
             let at = being_typed(source, cursor)?;
             let typed = source.text().get(at + 1..cursor)?.to_owned();
-            Some((at, typed, source.text().len(), editor.file()))
+            let start = reference_start(source, at);
+            Some((at, typed, source.text().len(), editor.file(), start))
         });
-        let Some((at, typed, length, file)) = found else {
+        let Some((at, typed, length, file, start)) = found else {
             self.refer.listed = None;
             return false;
         };
         let rest = length - typed.len();
-        let document = self.document.as_ref().map(Arc::as_ptr);
+        let document = self
+            .document
+            .as_ref()
+            .map(|pages| Arc::as_ptr(pages.whole()));
         let good = self.refer.listed.as_ref().is_some_and(|listed| {
             let pages = listed.document.as_ref().map(Weak::as_ptr);
             (listed.file, listed.at, listed.rest, pages) == (file, at, rest, document)
@@ -695,7 +787,7 @@ impl Viewer {
                 // else, that of the `@` too.
                 let from = match offer.way() {
                     Way::Plain => at + 1,
-                    Way::Named | Way::Make => at,
+                    Way::Named | Way::Make => start,
                 };
                 let entry = Entry {
                     candidate: candidate.clone(),
@@ -780,18 +872,25 @@ impl Viewer {
         let Some(typed) = editor.text().get(at + 1..cursor).map(str::to_owned) else {
             return false;
         };
+        // Asked for on a page, the `@` is written to show as itself
+        // until something is chosen: it goes with what was typed.
+        let start = reference_start(editor.source(), at);
+        let signs = at + 1 - start;
         match chosen {
             // All of it is typed already: the key is for the text.
-            Chosen::Label(label) if typed == label => return false,
+            Chosen::Label(label) if typed == label && signs == 1 => return false,
             Chosen::Label(label) => {
-                let within = label.len();
-                let press = editor.completed(typed.chars().count(), label, within);
+                let reference = sealed(editor.text(), cursor, format!("@{label}"));
+                let within = label.len() + 1;
+                let replaced = typed.chars().count() + signs;
+                let press = editor.completed(replaced, reference, within);
                 self.completion = None;
                 self.editor_key(press);
             }
             Chosen::Named(reference) => {
                 let within = reference.len();
-                let press = editor.completed(typed.chars().count() + 1, reference, within);
+                let reference = sealed(editor.text(), cursor, reference);
+                let press = editor.completed(typed.chars().count() + signs, reference, within);
                 self.completion = None;
                 self.editor_key(press);
                 self.notice(
@@ -805,6 +904,59 @@ impl Viewer {
             }
         }
         true
+    }
+
+    /// A key that ends a reference asked for on a page and typed out
+    /// without choosing from the list: a blank or a mark, Escape, Enter
+    /// or Tab where nothing is listed. Where something is labelled with
+    /// the name typed, it is referred to; else what was typed stays as it
+    /// shows, an `@` and a word.
+    pub(super) fn refer_end(&mut self, press: KeyPress) {
+        let ends = match press.key {
+            Key::Escape => true,
+            Key::Enter | Key::Tab => self.completion.is_none(),
+            Key::Char(c) => {
+                !(press.ctrl || typst::syntax::is_id_continue(c) || matches!(c, '.' | ':'))
+            }
+            _ => false,
+        };
+        let Some(editor) = self
+            .editor
+            .as_mut()
+            .filter(|editor| ends && editor.mode() == editor::Mode::Insert)
+        else {
+            return;
+        };
+        let (source, cursor) = (editor.source(), editor.cursor());
+        let Some(at) = being_typed(source, cursor).filter(|at| asked(source, *at)) else {
+            return;
+        };
+        let text = source.text();
+        let typed = &text[at + 1..cursor];
+        let name = typed.trim_end_matches(['.', ':']);
+        let Some(listed) = self.refer.listed.as_ref().filter(|listed| listed.at == at) else {
+            return;
+        };
+        let offer = listed
+            .offers
+            .iter()
+            .find(|offer| offer.labelled && offer.label == name);
+        let reference = match offer.map(Offer::way) {
+            Some(Way::Plain) => format!("@{typed}"),
+            Some(Way::Named) => {
+                offer.map(Offer::reference).unwrap_or_default() + &typed[name.len()..]
+            }
+            None if listed.others.iter().any(|other| other.label == name) => format!("@{typed}"),
+            Some(Way::Make) | None => return,
+        };
+        if name.is_empty() {
+            return;
+        }
+        let within = reference.len();
+        let reference = sealed(text, cursor, reference);
+        let replaced = typed.chars().count() + 2;
+        let press = editor.completed(replaced, reference, within);
+        self.editor_key(press);
     }
 
     /// Makes `offer`, a thing of the file being edited, something a
@@ -832,8 +984,18 @@ impl Viewer {
         let label = (!offer.labelled).then_some(offer.label.as_str());
         let number = offer.kind == Kind::Equation && !offer.numbered;
         let reference = offer.reference();
-        let mut edits = vec![(at..cursor, reference)];
+        let length = reference.len();
+        let start = reference_start(editor.source(), at);
+        let mut edits = vec![(start..cursor, sealed(text, cursor, reference))];
         edits.extend(ref_text::prepared(text, target, label, number));
+        // Where the reference will begin: behind what is put in before
+        // it.
+        let shift: isize = edits
+            .iter()
+            .filter(|(range, _)| range.end <= start && range.start < start)
+            .map(|(range, with)| with.len().cast_signed() - range.len().cast_signed())
+            .sum();
+        let sealed = edits[0].1.len() > length;
         // From the last to the first, so that the ranges stay good.
         edits.sort_by_key(|(range, _)| Reverse(range.start));
         let edits: Vec<(std::ops::Range<usize>, &str)> = edits
@@ -843,6 +1005,10 @@ impl Viewer {
         if let Err(why) = editor.replace(&edits) {
             self.alert(format!("not referred to: {why}"));
             return;
+        }
+        // Before the backslash that keeps the text behind out of its name.
+        if sealed {
+            editor.set_cursor(start.saturating_add_signed(shift) + length);
         }
         self.text_changed(Edited::Command);
         let thing = match offer.called.as_str() {
@@ -870,7 +1036,7 @@ impl Viewer {
     /// them; without, only what is known anyway is given, and nothing
     /// of what is referred to.
     fn besides(&mut self, marks: &Marks, files: bool) -> (Vec<String>, HashSet<String>) {
-        self.refresh_known();
+        self.refresh_known(false);
         let sources = self.bibliography();
         let mut labels: Vec<String> = sources.into_iter().map(|entry| entry.key).collect();
         let Some(editor) = &self.editor else {
@@ -1414,6 +1580,34 @@ mod tests {
     }
 
     #[test]
+    fn numbers_are_counted_only_for_what_asks_for_them() {
+        let text = "#set heading(numbering: \"1.\")\n= One <one>\n= Two\nSee @one.\n";
+        let (mut viewer, directory) = editing(text, &[]);
+        // The check after a compile asks only for the labels.
+        viewer.refer_problems();
+        let known = viewer.refer.known.as_ref().unwrap();
+        assert!(!known.counted && known.labels.iter().any(|(label, _)| label == "one"));
+        let numbers = |viewer: &mut Viewer| -> Vec<Option<String>> {
+            let things = viewer.referables().unwrap().into_iter();
+            things.map(|thing| thing.number).collect()
+        };
+        let counted = numbers(&mut viewer);
+        assert_eq!(counted, [Some("1.".to_owned()), Some("2.".to_owned())]);
+        assert!(viewer.refer.known.as_ref().unwrap().counted);
+        // Pages a part was put into have the numbers of the whole they
+        // were made of, not counted again.
+        let pages = viewer.document.as_ref().map(|pages| {
+            let world = viewer.compiled_world.clone().unwrap();
+            super::super::local::Pages::new(Arc::new((**pages.whole()).clone()), world)
+        });
+        viewer.document = pages;
+        assert_eq!(numbers(&mut viewer), counted);
+        let known = viewer.refer.known.as_ref().unwrap();
+        assert!(known.counted && known.document.as_ptr() != known.whole.as_ptr());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn numbers_are_counted_as_typst_counts_them() {
         let text = "#set heading(numbering: \"1.a\")\n\
                     = One\n== Sub\n= Two\n\
@@ -1585,13 +1779,19 @@ mod tests {
             let editor = viewer.editor.as_ref().unwrap();
             let (source, cursor) = (editor.source().clone(), editor.cursor());
             let world = viewer.project.snapshot();
-            let document = viewer.document.as_deref();
+            let document = viewer.document.as_ref().map(|pages| &**pages.whole());
             let _ = zetwerk_typst::complete(&world, document, &source, cursor, false);
         });
         best(
-            "the document asked for its numbers (once a compile)",
+            "the document asked for its numbers (once a compile, with @)",
             &mut |viewer| {
-                let _ = know(viewer.document.as_ref().unwrap());
+                let _ = know(viewer.document.as_ref().unwrap().whole(), true);
+            },
+        );
+        best(
+            "the document asked for its labels (once a compile)",
+            &mut |viewer| {
+                let _ = know(viewer.document.as_ref().unwrap().whole(), false);
             },
         );
         best(
@@ -1601,6 +1801,12 @@ mod tests {
             },
         );
         best("the check after a compile", &mut |viewer| {
+            // Of pages it has not seen.
+            let pages = viewer.document.as_ref().map(|pages| {
+                let world = viewer.compiled_world.clone().unwrap();
+                super::super::local::Pages::new(Arc::new((**pages.whole()).clone()), world)
+            });
+            viewer.document = pages;
             viewer.refer_problems();
         });
         best("K on a reference", &mut |viewer| {

@@ -49,7 +49,7 @@ impl Viewer {
         let mut numbered = vec![(page, line, 0)];
         for down in [true, false] {
             let mut place = Place { page, line, across };
-            for away in 1..=REACH {
+            for away in 1..=REACH.min(self.settings.reach) {
                 if !rows.step(&mut place, down) {
                     break;
                 }
@@ -68,7 +68,7 @@ impl Viewer {
         index: usize,
         origin: (f64, f64),
     ) {
-        if !self.numbers || self.editor.is_none() {
+        if !self.numbers || self.editor.is_none() || self.numbers_resting() {
             return;
         }
         // Counted once for all pages of a frame: they are the same

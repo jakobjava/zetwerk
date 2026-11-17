@@ -258,6 +258,9 @@ impl Viewer {
             self.history_looked();
             return true;
         }
+        if self.review_key(press) {
+            return true;
+        }
         if let Some(taken) = self.hint_key(press) {
             return taken;
         }
@@ -269,6 +272,7 @@ impl Viewer {
             self.completion = None;
             return false;
         }
+        self.refer_end(press);
         let next = matches!(
             (press.key, press.ctrl),
             (Key::Char('n'), true) | (Key::Down, _)
@@ -332,13 +336,25 @@ impl Viewer {
         if editor.mode() != editor::Mode::Insert {
             return;
         }
-        if self.refer_complete() {
+        // `$` has begun an equation: the status line says how it is a
+        // dollar sign instead (see `typst_text::typed`).
+        let (text, cursor) = (editor.text(), editor.cursor());
+        if text.get(cursor.saturating_sub(1)..cursor + 1) == Some("$$")
+            && self.shown_panes() == super::Panes::Page
+        {
+            self.notice("an equation begun · $ again: a dollar sign");
+        }
+        if self.refer_complete() || self.latex_complete() {
             return;
         }
         let Some(editor) = &self.editor else {
             return;
         };
         let (text, cursor) = (editor.text(), editor.cursor());
+        if let Some(sign) = crate::typst_text::hash_asked(editor.source(), cursor) {
+            self.hash_complete(sign);
+            return;
+        }
         // The word being typed, and what stands before it.
         let begun = text[..cursor]
             .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '-')
@@ -407,6 +423,74 @@ impl Viewer {
             return;
         }
         self.completion = Some(Completion {
+            candidates: entries.into_iter().map(|(_, entry)| entry).collect(),
+            chosen: 0,
+        });
+    }
+
+    /// The list for what is typed behind a `#` on a page, which is
+    /// written `\#` until something is chosen (see
+    /// [`crate::typst_text::hash_asked`]), its backslash at byte `sign`:
+    /// the things of the insert menu, then what Typst knows by the name
+    /// typed, as if the sign were code. What is chosen takes the place of
+    /// the sign and of all typed behind it.
+    fn hash_complete(&mut self, sign: usize) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let (source, cursor) = (editor.source().clone(), editor.cursor());
+        let text = source.text();
+        let typed = text.get(sign + 2..cursor).unwrap_or_default();
+        let mut entries = menu_entries(false, true, typed, sign + 1, &self.inserts);
+        let mut code = source.clone();
+        code.edit(sign..sign + 1, "");
+        self.project.set_source(code.clone());
+        let world = self.project.snapshot();
+        // Put back: what else asks the project wants the text.
+        self.project.set_source(source.clone());
+        let document = self.whole.as_deref();
+        if let Some((from, mut candidates)) =
+            zetwerk_typst::complete(&world, document, &code, cursor - 1, false)
+            && let Some(name) = text.get(from + 1..cursor)
+            && let Some(before) = text.get(sign + 2..from + 1)
+        {
+            candidates.dedup_by(|a, b| a.label == b.label);
+            let then = text[cursor..].chars().next().map(String::from);
+            for mut candidate in candidates {
+                let label = candidate.label.trim_start_matches(['#', '@', '<']);
+                let begins = label
+                    .to_lowercase()
+                    .starts_with(&name.to_lowercase())
+                    .then_some(1000 + i32::from(label.starts_with(name)));
+                let Some(score) = begins.or_else(|| score(label, name)) else {
+                    continue;
+                };
+                // Right before text, it ends where it ends.
+                let mut put = format!("#{before}{}", candidate.text);
+                if then
+                    .as_deref()
+                    .is_some_and(|then| crate::typst_text::goes_on_code(&put, then))
+                {
+                    put.push(';');
+                }
+                candidate.cursor += 1 + before.len();
+                candidate.text = put;
+                let entry = Entry {
+                    candidate,
+                    from: sign,
+                    insert: None,
+                };
+                entries.push((score, entry));
+            }
+        }
+        entries.sort_by_key(|(score, entry)| {
+            let length = match entry.insert {
+                Some(_) => 0,
+                None => entry.candidate.label.len(),
+            };
+            (std::cmp::Reverse(*score), length)
+        });
+        self.completion = (!entries.is_empty()).then(|| Completion {
             candidates: entries.into_iter().map(|(_, entry)| entry).collect(),
             chosen: 0,
         });

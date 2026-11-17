@@ -20,7 +20,7 @@ you go. `$` begins an equation in the line; inside it `^` raises, `_`
 lowers, and letters typed together are a product: `xy` is $x y$.
 
 #task[Type Pythagoras' theorem behind the line below: `A`, a space, `$`,
-then `x^2 + y^2 = z^2`, then `Esc`.]
+then #raw("x^2 + y^2 = z^" + "2"), then `Esc`.]
 
 Pythagoras says:
 
@@ -29,12 +29,12 @@ empty places come, shown as boxes; type `1`, `Tab`, `2`, then `Esc`.]
 
 Half of it:
 
-#task[Take the exponent of the $z$ away: put the cursor on its 2 and press
-`x`. A box stays where it was: an empty place, waiting.]
+#task[Take the $z$ away: put the cursor on it and press `x`. Its square
+stays, and a box where the $z$ was: an empty place, waiting.]
 
-#task[`Tab` goes to an empty place. Put the cursor on the $x$ of the
-theorem, type `a` to begin typing behind it, press `Tab`, and type a `3`
-into the box. Then `Esc`.]
+#task[The cursor stands at the empty place: `i` and a `c` fill it, and
+`Esc` ends typing. (`Tab` goes from one empty place of a fraction, a root
+or a square root to the next, as in the fraction above.)]
 
 #task[`#` while typing puts things in, an equation by itself among them.
 Go to the last line, `o`, then `#equation` and `Enter`, then type
@@ -57,16 +57,15 @@ hint: A, space, $, ff, Tab, 1, Tab, 2, Esc
 done: has frac(1, 2)
 done: mode normal
 
-step: take an exponent away with x
-keys: /\=z^2<CR>lx
-hint: put the cursor on the 2 of z², then x
-done: lacks z^2
-done: has = z^
+step: take the z away with x
+keys: /\=z^2<CR>x
+hint: put the cursor on the z, then x
+done: has y^2 = ^2$
 
-step: Tab to the empty place, and fill it
-keys: /\=x^2<CR>a<Tab>3<Esc>
-hint: cursor on the x, a, Tab, 3, Esc
-done: has = z^3$
+step: fill the empty place
+keys: ic<Esc>
+hint: i, c, Esc (the cursor stands at the empty place)
+done: has = c^2$
 done: mode normal
 
 step: an equation by itself from the # list

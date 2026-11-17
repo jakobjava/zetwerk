@@ -19,7 +19,7 @@ pub enum Paging {
 
 /// The overview of all pages, and the one picked out in it.
 pub(super) struct Grid {
-    chosen: usize,
+    pub(super) chosen: usize,
 }
 
 /// How wide a page is in the overview, about, in logical pixels, and the
@@ -115,7 +115,13 @@ impl Viewer {
         let first = match (&self.document, &self.compiled_world, self.places()) {
             (Some(document), Some(world), Some(change)) => {
                 document.pages().get(index).and_then(|page| {
-                    let lines = zetwerk_typst::PageMap::build(world, &page.frame).lines();
+                    let lines = super::pages::lines_of(
+                        world,
+                        document.pages(),
+                        index,
+                        &page.frame,
+                        self.file_id(),
+                    );
                     let line = lines.enter(true)?;
                     let (file, offset) = lines.first(line)?;
                     let here = file == self.file_id();
@@ -138,6 +144,9 @@ impl Viewer {
     /// `]]` and `[[`: to the page after the one the cursor is on, or the
     /// one before.
     pub(super) fn step_page(&mut self, forward: bool) {
+        if self.step_slide(forward) {
+            return;
+        }
         let current = match self.paging {
             Paging::Slides => self.slide,
             Paging::Scroll => self.cursor_page.get(),
@@ -196,6 +205,9 @@ impl Viewer {
     /// A key while the overview is up: the arrows and `hjkl` pick a page,
     /// Enter goes to it, Escape leaves things as they were.
     pub(super) fn grid_key(&mut self, press: KeyPress) {
+        if self.grid_slide_key(press) {
+            return;
+        }
         let (Some(cells), Some(grid)) = (self.cells(), &mut self.grid) else {
             self.grid = None;
             return;

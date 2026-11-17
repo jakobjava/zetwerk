@@ -26,8 +26,8 @@ by caption, by author; `Enter` puts the reference in.
 )
 
 #task[Refer to the figure above: at the end of the line below, `A`, a
-space, then `@`, a few letters of its caption ("low tide" will do),
-`Enter`, and `Esc`. A figure without a label gets one.]
+space, then `@`, a word of its caption ("harbour" will do), `Enter`,
+and `Esc`. A figure without a label gets one.]
 
 The lighthouse stands on the right, as shown in
 
@@ -49,8 +49,8 @@ Writing a program is a kind of literature
 title: References and citations
 
 step: refer to the figure with @
-keys: /as shown in<CR>A @low tide<CR><Esc>
-hint: A, space, @, low tide, Enter, Esc
+keys: /as shown in<CR>A @harbour<CR><Esc>
+hint: A, space, @, harbour, Enter, Esc
 done: has as shown in @
 done: mode normal
 

@@ -94,13 +94,15 @@ fn every_lesson_is_done_by_the_keys_it_names() {
         let number = index + 1;
         let directory = directory("");
         let mut viewer = lesson(&directory, number);
-        assert_eq!(viewer.steps_done(), Some(0), "lesson {number} is at hand");
-        assert_eq!(
-            viewer.state().problems,
-            Vec::<String>::new(),
-            "lesson {number} ({}) is typeset as it is",
-            taught.name
-        );
+        let problems = viewer.state().problems;
+        if viewer.steps_done() != Some(0) || !problems.is_empty() {
+            failed.push(format!(
+                "{}: not at its first step, or not typeset: {problems:?}\n{}",
+                taught.name,
+                situation(&viewer)
+            ));
+            continue;
+        }
         for (step, said) in taught.steps.iter().enumerate() {
             if viewer.steps_done() != Some(step) {
                 failed.push(format!(
@@ -179,7 +181,7 @@ fn a_lesson_begun_again_is_its_text_as_it_came_and_the_hint_says_the_keys() {
     let mut viewer = lesson(&directory, 1);
     let first = lessons("en")[0].clone();
     assert!(viewer.tutor_status().contains("step 1/"));
-    press(&mut viewer, "<C-g>");
+    press(&mut viewer, "<C-t>");
     let said = viewer.message.as_ref().map(|message| message.text.clone());
     assert_eq!(
         said,

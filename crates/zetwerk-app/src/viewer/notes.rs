@@ -170,24 +170,24 @@ struct About {
 #[derive(Default)]
 pub(super) struct Notes {
     /// The notes of all open files, each file's in the order of its text.
-    all: Vec<Note>,
+    pub(super) all: Vec<Note>,
     /// The number the last note got.
     last: u64,
     /// The files whose stored notes have been read.
     loaded: Vec<FileId>,
     /// The text of the file being edited that the places of its notes
     /// are places in.
-    seen: Option<(FileId, String)>,
+    pub(super) seen: Option<(FileId, String)>,
     /// Whether notes changed in a way not yet written: their places.
     moved: bool,
     /// The place a note begun by a key is to be about, while its text is
     /// typed: the bytes, and the revision and the cursor then.
     pending: Option<(Range<usize>, u64, usize)>,
     /// The proposal the user flipped to see the page as it is.
-    before: Option<u64>,
+    pub(super) before: Option<u64>,
     /// Whether a proposal was shown as it would be in the frame being
     /// drawn.
-    previewed: bool,
+    pub(super) previewed: bool,
     /// What agents said of their proposals, by proposal.
     about: HashMap<u64, About>,
     /// The pixel sizes of tags the compositor may hold.
@@ -242,7 +242,7 @@ impl Typesetter {
 /// on were replaced by `inserted` bytes: as the start of a note (what is
 /// put in at its start stays outside) or as its end (what is put in at
 /// its end too).
-fn moved_place(
+pub(super) fn moved_place(
     place: usize,
     (offset, removed, inserted): (usize, usize, usize),
     end: bool,
@@ -286,7 +286,7 @@ fn thing_at(source: &Source, cursor: usize) -> Option<Range<usize>> {
 
 /// The line byte `at` of `text` is in, without the blanks around it;
 /// `None` if there is nothing else on it.
-fn line_at(text: &str, at: usize) -> Option<Range<usize>> {
+pub(super) fn line_at(text: &str, at: usize) -> Option<Range<usize>> {
     let start = text[..at].rfind('\n').map_or(0, |found| found + 1);
     let end = text[at..].find('\n').map_or(text.len(), |found| at + found);
     let line = &text[start..end];
@@ -332,7 +332,7 @@ fn change_markup(old: &str, new: &str) -> String {
 }
 
 /// `text` as a Typst string literal: never read as markup.
-fn literal(text: &str) -> String {
+pub(super) fn literal(text: &str) -> String {
     let mut literal = String::with_capacity(text.len() + 2);
     literal.push('"');
     for c in text.chars() {
@@ -351,7 +351,7 @@ fn literal(text: &str) -> String {
 
 /// `text` in lines of at most `columns` characters, broken between
 /// words, and no more than `most` of them.
-fn wrap(text: &str, columns: usize, most: usize) -> Vec<String> {
+pub(super) fn wrap(text: &str, columns: usize, most: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for paragraph in text.lines() {
         let mut line = String::new();
@@ -418,14 +418,14 @@ fn store_path(state_dir: &Path, path: &Path) -> PathBuf {
 
 /// A line of the store: a field's value, with what would break it into
 /// lines written as escapes.
-fn escape(text: &str) -> String {
+pub(super) fn escape(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
 }
 
-fn unescape(text: &str) -> String {
+pub(super) fn unescape(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
@@ -525,7 +525,7 @@ fn parse_store(text: &str, file: FileId) -> Result<Vec<Note>, String> {
 
 /// Writes `contents` to the store at `store`, in a directory only the
 /// user can enter.
-fn write_store(store: &Path, contents: &str) -> std::io::Result<()> {
+pub(super) fn write_store(store: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(directory) = store.parent() {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
@@ -568,7 +568,7 @@ fn reanchor(note: &mut Note, text: &str) {
 
 /// Where `quote` is in `text` within `reach` bytes of byte `around`,
 /// the nearest to it.
-fn near(text: &str, quote: &str, around: usize, reach: usize) -> Option<usize> {
+pub(super) fn near(text: &str, quote: &str, around: usize, reach: usize) -> Option<usize> {
     let mut from = around.saturating_sub(reach).min(text.len());
     let mut to = around.saturating_add(reach).min(text.len());
     while !text.is_char_boundary(from) {
@@ -860,6 +860,9 @@ impl Viewer {
 
     /// The commands of reviewing. Returns whether `command` was one.
     pub(super) fn notes_command(&mut self, command: &str) -> bool {
+        if self.review_command(command) {
+            return true;
+        }
         let (name, rest) = command
             .split_once(' ')
             .map_or((command, ""), |(name, rest)| (name, rest.trim()));
@@ -1455,6 +1458,7 @@ impl Viewer {
             return;
         }
         self.notes_ready();
+        self.review_marks(scene, has, index, origin);
         self.note_marks(scene, has, index, origin);
         self.proposal_preview(scene, has, index, origin);
     }
@@ -1800,13 +1804,14 @@ impl Viewer {
             Some(proposal.id) == self.notes.before
                 && cursor.is_some_and(|cursor| on_proposal(proposal, cursor))
         });
-        self.notes.previewed || flipped
+        self.notes.previewed || flipped || self.review_explains()
     }
 
     /// The panels of reviewing, in the bottom-left corner: what the
     /// proposal under the cursor is and why it was made, and the note
     /// under the cursor with what was said to it.
     pub(super) fn review_panels(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {
+        self.review_slip(scene, has);
         let explained = self.proposal_explained();
         self.notes.previewed = false;
         let Some(cursor) = self.editor.as_ref().map(editor::Editor::cursor) else {
@@ -1821,7 +1826,7 @@ impl Viewer {
         }
         let margin = PANEL_MARGIN * self.scale;
         let mut bottom = f64::from(self.window.1) - f64::from(self.status_height()) - margin;
-        if let (Some(at), true) = (on, explained) {
+        if let (Some(at), true, false) = (on, explained, self.review_explains()) {
             let markup = self.proposal_card(at);
             bottom = self.corner_panel(scene, has, &markup, bottom);
         }

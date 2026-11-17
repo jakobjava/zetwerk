@@ -75,10 +75,12 @@ const WARNING: &str = "#b57614";
 #[derive(Default)]
 pub(super) struct Margin {
     /// Whether the tags, and the complaints, are left out.
-    hide_tags: bool,
-    hide_errors: bool,
+    pub(super) hide_tags: bool,
+    pub(super) hide_errors: bool,
     /// The pages the marks are of.
     basis: Option<Basis>,
+    /// The page a part was put into since (see `local`), as it is shown.
+    spliced: Option<Spliced>,
     /// When the last compile failed, the text it compiled: the bytes of
     /// its complaints are bytes of that.
     failed: Option<Arc<ProjectWorld>>,
@@ -117,6 +119,16 @@ struct Basis {
     document: Arc<PagedDocument>,
     file: FileId,
     revision: Option<u64>,
+}
+
+/// A page of the basis with a part put in: which, its frame, what that
+/// was typeset of, and how its text differs from that of the basis. The
+/// marks of the page stand beside its lines as they are shown now.
+struct Spliced {
+    index: usize,
+    frame: Frame,
+    world: Arc<ProjectWorld>,
+    change: Change,
 }
 
 /// Something to put beside the line it belongs to.
@@ -262,8 +274,15 @@ fn told(thing: &Thing) -> String {
 }
 
 impl Facts {
-    /// What the page whose frame is `frame` shows of `file`.
-    fn of(world: &ProjectWorld, frame: &Frame, file: FileId, items: &[Item]) -> Self {
+    /// What the page whose frame is `frame` shows of `file`, in the bytes
+    /// of the text `change` makes the text of `world` of.
+    fn of(
+        world: &ProjectWorld,
+        frame: &Frame,
+        file: FileId,
+        items: &[Item],
+        change: Change,
+    ) -> Self {
         let map = PageMap::build(world, frame);
         let lines = map.lines();
         let boxes: Vec<(f64, f64, f64, f64)> = (0..lines.len())
@@ -287,7 +306,8 @@ impl Facts {
                 (*top..=*bottom).contains(&y) && (left - 0.5..=right + 0.5).contains(&x)
             });
             if let Some(line) = line {
-                spans.push((range.start, range.end, line));
+                let start = change.back_or_edge(range.start);
+                spans.push((start, change.back_or_edge(range.end).max(start), line));
             }
         }
         spans.sort_unstable();
@@ -304,7 +324,8 @@ impl Facts {
         let mut grounds = Vec::new();
         for item in items {
             if let (What::Complaint { error, .. }, Some(own)) = (&item.what, &item.own) {
-                let rects = map.selection(file, own);
+                let own = change.forth(own.start)..change.forth(own.end);
+                let rects = map.selection(file, &own);
                 grounds.extend(rects.into_iter().map(|rect| (rect, *error)));
             }
         }
@@ -374,8 +395,25 @@ impl Margin {
     fn facts(&mut self, index: usize) -> Option<&Facts> {
         if !self.pages.contains_key(&index) {
             let basis = self.basis.as_ref()?;
-            let page = basis.document.pages().get(index)?;
-            let facts = Facts::of(&basis.world, &page.frame, basis.file, &self.items);
+            let facts = match &self.spliced {
+                Some(spliced) if spliced.index == index => Facts::of(
+                    &spliced.world,
+                    &spliced.frame,
+                    basis.file,
+                    &self.items,
+                    spliced.change,
+                ),
+                _ => {
+                    let page = basis.document.pages().get(index)?;
+                    Facts::of(
+                        &basis.world,
+                        &page.frame,
+                        basis.file,
+                        &self.items,
+                        Change::NONE,
+                    )
+                }
+            };
             self.pages.insert(index, facts);
         }
         self.pages.get(&index)
@@ -548,12 +586,54 @@ impl Viewer {
         self.margin_rebuild();
     }
 
+    /// The pages shown changed without a compile: a part was put into one,
+    /// or they are those typeset whole again (see `local`). The marks of
+    /// pages `renew` are worked out anew, beside the lines as they are
+    /// now; those of the others stay.
+    pub(super) fn margin_pages_changed(&mut self, renew: &[Option<usize>]) {
+        let file = self.file_id();
+        let margin = &mut self.margin;
+        for index in renew.iter().flatten() {
+            margin.pages.remove(index);
+            margin.notes.remove(index);
+        }
+        margin.cursor_on = None;
+        margin.spliced = None;
+        let (Some(basis), Some(pages), Some(world)) =
+            (&margin.basis, &self.document, &self.compiled_world)
+        else {
+            return;
+        };
+        let Some(index) = pages.spliced_at() else {
+            return;
+        };
+        // Only of the pages the marks were worked out of: a whole newer
+        // than they stays as it is until it is shown.
+        let (Ok(then), Ok(now), Some(page)) = (
+            basis.world.written(file),
+            world.written(file),
+            pages.pages().get(index),
+        ) else {
+            return;
+        };
+        if !Arc::ptr_eq(pages.whole(), &basis.document) {
+            return;
+        }
+        margin.spliced = Some(Spliced {
+            index,
+            frame: page.frame.clone(),
+            world: Arc::clone(world),
+            change: change_between(then.text(), now.text()),
+        });
+    }
+
     /// Finds what is to be marked beside the pages of the basis, for the
     /// file being edited.
     fn margin_rebuild(&mut self) {
         let file = self.file_id();
         let margin = &mut self.margin;
         margin.items.clear();
+        margin.spliced = None;
         margin.pages.clear();
         margin.notes.clear();
         margin.cursor_on = None;

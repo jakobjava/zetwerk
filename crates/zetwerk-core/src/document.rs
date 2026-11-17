@@ -9,6 +9,7 @@ use crate::change::{self, Buffer, Direction, EditError, Replace};
 use crate::disk::{self, Hash, Lock};
 use crate::history::{History, ROOT, StateId};
 use crate::journal::{self, Journal, Record};
+use crate::origin::{self, Attribution, By, Origin};
 
 const BOM: &str = "\u{feff}";
 
@@ -51,6 +52,8 @@ pub struct Document<B: Buffer> {
     remarks: Vec<String>,
     /// Whether the last save wrote over the file in place.
     in_place: bool,
+    /// Where each byte of the text, and of every state's, came from.
+    origins: Attribution,
 }
 
 /// What opening a document found.
@@ -259,6 +262,7 @@ struct Replayed {
     /// Whether every record was used. If not, a record contradicted the
     /// ones before it, which a crash alone cannot cause.
     complete: bool,
+    origins: Attribution,
 }
 
 /// Rebuilds history and text from journal records. `None` if the records
@@ -269,13 +273,16 @@ fn replay(records: &[Record]) -> Option<Replayed> {
     let mut saved = None;
     let mut held = Vec::new();
     let mut used = 0;
+    let mut origins = Attribution::default();
     for record in records {
+        let before = origins.before(record, &history);
         // A record that does not fit what came before ends the replay:
         // the state reached so far is consistent, the rest cannot be
         // trusted.
         if replay_record(&mut history, &mut text, &mut saved, record).is_none() {
             break;
         }
+        origins.after(before, record, &history, text.as_deref());
         if let Record::Saved { state, hash } = record {
             note_save(&mut held, (*state, *hash));
         }
@@ -287,6 +294,7 @@ fn replay(records: &[Record]) -> Option<Replayed> {
         saved,
         saves: held,
         complete: used == records.len(),
+        origins,
     })
 }
 
@@ -354,6 +362,7 @@ fn replay_record(
             history.contains(*state).then_some(())?;
             *saved = Some((*state, *hash));
         }
+        Record::Credit { .. } | Record::Marks { .. } | Record::Map { .. } => {}
     }
     Some(())
 }
@@ -390,7 +399,11 @@ fn replay_salvaged(records: &[Record], file: Option<&FileContents>) -> Option<Re
     };
     let mut text = text;
     let mut ids = std::collections::HashMap::from([(*state, snapshot)]);
+    let diffed = file.and_then(|file| Some((snapshot, difference(&file.text, &text)?.range.start)));
+    let mut origins =
+        Attribution::salvaged(text.len(), diffed.filter(|_| snapshot != ROOT), &history);
     for record in rest {
+        let before = origins.before(record, &history);
         let current = history.current();
         let fits = match record {
             Record::Push {
@@ -435,10 +448,12 @@ fn replay_salvaged(records: &[Record], file: Option<&FileContents>) -> Option<Re
                 }
                 true
             }
+            Record::Credit { .. } | Record::Marks { .. } | Record::Map { .. } => true,
         };
         if !fits {
             break;
         }
+        origins.after(before, record, &history, Some(&text));
     }
     Some(Replayed {
         history,
@@ -446,6 +461,7 @@ fn replay_salvaged(records: &[Record], file: Option<&FileContents>) -> Option<Re
         saved: seen.last().copied(),
         saves: seen,
         complete: false,
+        origins,
     })
 }
 
@@ -497,8 +513,9 @@ fn compact(
     text: &str,
     held: &[(StateId, Hash)],
     saved: Option<(StateId, Hash)>,
+    origins: &Attribution,
 ) -> Vec<Record> {
-    let mut records = Vec::new();
+    let mut records: Vec<Record> = origins.credit_records().collect();
     let mut at = ROOT;
     for id in 1..history.len() as StateId {
         let (Some(parent), Some(changes)) = (history.parent(id), history.changes(id)) else {
@@ -507,6 +524,7 @@ fn compact(
         if at != parent {
             records.push(Record::Goto { state: parent });
         }
+        records.push(origins.marks_record(history, id));
         records.push(Record::Push {
             id,
             parent,
@@ -535,6 +553,7 @@ fn compact(
         state: history.current(),
         text: text.to_owned(),
     });
+    records.push(origins.map_record(history.current()));
     if let Some((state, hash)) = saved {
         records.push(Record::Saved { state, hash });
     }
@@ -739,6 +758,36 @@ struct Found {
     text: String,
     saved: Option<StateId>,
     saves: Vec<(StateId, Hash)>,
+    origins: Attribution,
+}
+
+impl Found {
+    /// Folds the old steps of a history grown long: see
+    /// [`Document::thin`].
+    fn thin_if_long(&mut self) {
+        if self.history.len() > THIN_BEYOND {
+            let (history, map) = thin_history(&self.history, THIN_KEEPS, &self.saves);
+            self.origins = self.origins.thinned(&self.history, &map);
+            self.saves = renumber(&self.saves, &map);
+            self.saved = self
+                .saved
+                .and_then(|state| map.get(usize::try_from(state).ok()?).copied()?);
+            self.history = history;
+        }
+    }
+
+    /// The history of a file opened for the first time, holding `file`:
+    /// none, and its text of no known origin.
+    fn first(file: Option<FileContents>, hash: Option<Hash>) -> Self {
+        let text = file.map(|file| file.text).unwrap_or_default();
+        Self {
+            history: History::new(),
+            origins: Attribution::first_seen(text.len()),
+            text,
+            saved: hash.map(|_| ROOT),
+            saves: Vec::new(),
+        }
+    }
 }
 
 /// What a journal means for the file: the outcome, the history to carry
@@ -849,6 +898,7 @@ fn reconcile(journal_path: &Path, file: Option<&FileContents>) -> io::Result<Rec
             text: replayed.text,
             saved: saved_now,
             saves: replayed.saves,
+            origins: replayed.origins,
         }),
         remark,
     })
@@ -1088,20 +1138,8 @@ impl<B: Buffer> Document<B> {
         let reconciled = reconcile(&journal_path, file.as_ref()).map_err(io(&journal_path))?;
         let opened = reconciled.opened;
         remarks.extend(reconciled.remark);
-        let mut found = reconciled.found.unwrap_or_else(|| Found {
-            history: History::new(),
-            text: file.map(|file| file.text).unwrap_or_default(),
-            saved: file_hash.map(|_| ROOT),
-            saves: Vec::new(),
-        });
-        if found.history.len() > THIN_BEYOND {
-            let (history, map) = thin_history(&found.history, THIN_KEEPS, &found.saves);
-            found.saves = renumber(&found.saves, &map);
-            found.saved = found
-                .saved
-                .and_then(|state| map.get(usize::try_from(state).ok()?).copied()?);
-            found.history = history;
-        }
+        let mut found = (reconciled.found).unwrap_or_else(|| Found::first(file, file_hash));
+        found.thin_if_long();
         remove_own_leftovers(&path, file_hash, &found);
         let saved_record = found.saved.zip(file_hash);
         if let Some(save) = saved_record {
@@ -1109,7 +1147,13 @@ impl<B: Buffer> Document<B> {
         }
         let journal = Journal::create(
             &journal_path,
-            &compact(&found.history, &found.text, &found.saves, saved_record),
+            &compact(
+                &found.history,
+                &found.text,
+                &found.saves,
+                saved_record,
+                &found.origins,
+            ),
         )
         .map_err(io(&journal_path))?;
         let restored = last_written.filter(|_| opened == Opened::Restored);
@@ -1134,6 +1178,7 @@ impl<B: Buffer> Document<B> {
             restored,
             remarks,
             in_place: false,
+            origins: found.origins,
         };
         if matches!(opened, Opened::ChangedWhileClosed | Opened::Conflict { .. }) {
             // The file's text, as one undo step on top of the history.
@@ -1207,6 +1252,13 @@ impl<B: Buffer> Document<B> {
         }
     }
 
+    /// The state of the history the file holds, as far as it is known:
+    /// the one last saved or read. `None` for a text that has no file.
+    #[must_use]
+    pub fn saved_state(&self) -> Option<StateId> {
+        self.saved
+    }
+
     /// Applies `edits` one after the other; each range refers to the text
     /// as the edits before it left it. Either all are applied or none.
     ///
@@ -1214,13 +1266,30 @@ impl<B: Buffer> Document<B> {
     /// previous step where that is possible (typing a word is many edits
     /// and one undo). Returns the state the text is in afterwards.
     pub fn edit(&mut self, edits: &[Replace], join: bool) -> Result<StateId, DocumentError> {
+        self.edit_by(edits, join, &By::Origin(&Origin::Author))
+    }
+
+    /// Like [`Document::edit`], with the text the edits put in credited
+    /// as `by` says (see [`crate::origin`]).
+    pub fn edit_by(
+        &mut self,
+        edits: &[Replace],
+        join: bool,
+        by: &By,
+    ) -> Result<StateId, DocumentError> {
         if edits.is_empty() {
             return Ok(self.history.current());
         }
         let changes = change::perform(&mut self.buffer, edits)?;
         let current = self.history.current();
-        // Never fold changes into the saved state: it would stop being it.
-        let join = join && self.history.can_extend() && self.saved != Some(current);
+        // Never fold changes into a state the file has held: it would stop
+        // being it. Not only the one saved last: a file that is found to
+        // hold the bytes of an earlier save is taken to be at that state
+        // (see `reconcile`), which must then still have that text.
+        let join = join
+            && self.history.can_extend()
+            && self.saved != Some(current)
+            && self.saves.iter().all(|(state, _)| *state != current);
         let record = if join {
             Record::Extend {
                 state: current,
@@ -1234,16 +1303,27 @@ impl<B: Buffer> Document<B> {
                 changes: changes.clone(),
             }
         };
-        if let Err(err) = self.journal.append(&record) {
+        let state = match &record {
+            Record::Push { id, .. } => *id,
+            _ => current,
+        };
+        let (prepared, mut records) =
+            (self.origins).prepare(&changes, by, &self.history, join, self.buffer.text(), state);
+        records.push(record);
+        if let Err(err) = self.journal.append_all(&records) {
             // Just applied, so taking it back cannot fail.
             let _ = change::apply(&mut self.buffer, &changes, Direction::Backward);
+            self.origins.rollback(&prepared);
             return Err(DocumentError::Journal(err));
         }
-        if join {
-            self.history.extend(changes);
-        } else {
-            self.history.push(changes);
-        }
+        self.origins.commit();
+        origin::record(
+            &mut self.history,
+            &mut self.origins,
+            changes,
+            prepared,
+            join,
+        );
         self.revision += 1;
         Ok(self.history.current())
     }
@@ -1281,6 +1361,7 @@ impl<B: Buffer> Document<B> {
             let _ = travel(&mut self.history, Some(&mut self.buffer), from);
             return Err(DocumentError::Journal(err));
         }
+        self.origins.walk(&self.history, from);
         self.revision += 1;
         Ok(())
     }
@@ -1423,6 +1504,7 @@ impl<B: Buffer> Document<B> {
                 self.buffer.text(),
                 &saves,
                 Some((state, hash)),
+                &self.origins,
             ),
         )?;
         if let Some(saved) = self.saved.filter(|saved| *saved != state) {
@@ -1476,7 +1558,13 @@ impl<B: Buffer> Document<B> {
             })?;
         }
         let saved = self.saved.zip(self.disk_hash);
-        let records = compact(&self.history, self.buffer.text(), &self.saves, saved);
+        let records = compact(
+            &self.history,
+            self.buffer.text(),
+            &self.saves,
+            saved,
+            &self.origins,
+        );
         let journal = match new_journal(&journal_path, &to, &records) {
             Ok(journal) => journal,
             Err(err) => {
@@ -1523,6 +1611,7 @@ impl<B: Buffer> Document<B> {
     /// by old id, the new id of each state that stayed.
     pub fn thin(&mut self, recent: usize) -> Result<Vec<Option<StateId>>, DocumentError> {
         let (history, map) = thin_history(&self.history, recent, &self.saves);
+        let origins = self.origins.thinned(&self.history, &map);
         let renumbered = renumber(&self.saves, &map);
         let saved = self
             .saved
@@ -1532,10 +1621,12 @@ impl<B: Buffer> Document<B> {
             self.buffer.text(),
             &renumbered,
             saved.zip(self.disk_hash),
+            &origins,
         );
         self.journal =
             Journal::create(&self.journal_path, &records).map_err(DocumentError::Journal)?;
         self.history = history;
+        self.origins = origins;
         self.saves = renumbered;
         self.saved = saved;
         Ok(map)
@@ -1558,7 +1649,9 @@ impl<B: Buffer> Document<B> {
     pub fn reload(&mut self) -> Result<(), DiskError> {
         let file = read_file(&self.path)?.ok_or(DiskError::Missing)?;
         if let Some(replace) = difference(self.buffer.text(), &file.text) {
-            self.edit(&[replace], false).map_err(DiskError::Document)?;
+            let by = By::Origin(&Origin::Outside);
+            self.edit_by(&[replace], false, &by)
+                .map_err(DiskError::Document)?;
         }
         let state = self.history.current();
         self.bom = file.bom;
@@ -1573,6 +1666,13 @@ impl<B: Buffer> Document<B> {
                 hash: file.hash,
             })
             .map_err(DiskError::Journal)
+    }
+
+    /// Where each byte of the text came from, and of the changes in its
+    /// history: see [`crate::origin`].
+    #[must_use]
+    pub fn origins(&self) -> &Attribution {
+        &self.origins
     }
 
     /// Forces the journal onto the disk. Until then, the newest changes

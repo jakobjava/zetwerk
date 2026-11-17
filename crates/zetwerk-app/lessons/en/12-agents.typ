@@ -22,10 +22,15 @@ the pages as they are, and may change the text, look up sources, move
 sections, export. Nothing of yours leaves the machine unless the agent you
 connect sends it.
 
-What it may do is yours to say. With `:agents propose` an agent only
-proposes changes: each is marked on the page, `]p` goes to the next, `zp`
-shows the page as it would be with it, `ga` accepts it, `gr` rejects it.
-With `:agents live` its changes go in at once, each one step for `u`.
+What an agent leaves on the text is a suggestion: a change, or a remark
+or a question, each with why. With `:agents propose` changes wait for you:
+each is marked on the page, `]p` goes to the next, `zp` shows the page as
+it would be, `ga` accepts, `gr` rejects, `gA` rewrites it yourself, `gq`
+answers it, `gp` asks for other wordings, `gz` puts it aside. `gR` lists
+them all; `gQ` asks agents to review what is selected; `g!` makes what you
+said an instruction that always holds (`:brief` lists them). With
+`:agents live` changes go in at once, each one step for `u`; `gH` tints
+the page by who wrote what.
 
 Notes are how you and an agent talk about the text. `gn` puts a note on
 the paragraph the cursor is in (or on what is selected), `gq` a question
@@ -48,7 +53,7 @@ title: Working with an AI agent
 step: what agents may do, with :agents
 keys: :agents<CR>
 hint: :agents then Enter
-done: message agents
+done: message (:agents 
 
 step: a note with gn
 keys: /The harbour was built<CR>gncheck the date<CR>

@@ -220,6 +220,13 @@ impl Project {
         self.main_path.as_deref()
     }
 
+    /// The fonts, the library and the packages the project is compiled
+    /// with: for another document to be compiled with them.
+    #[must_use]
+    pub fn env(&self) -> &Arc<Environment> {
+        &self.env
+    }
+
     /// The directory the project's files are in: what paths in the
     /// document are relative to.
     #[must_use]

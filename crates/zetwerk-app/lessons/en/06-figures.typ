@@ -30,8 +30,9 @@ Then `Esc`.]
 
 The depths of a few ports:
 
-#task[A figure: on the line below, `o`, then `#fig` and `Tab`, and the
-name of its image: `harbour.svg`. Then `Esc`.]
+#task[A figure: on the line below, `o`, then `#figure` and `Enter`. A list
+of the images beside the document comes up: type `harb` and `Enter` for
+the harbour. Then `Esc`.]
 
 What the harbour looks like:
 
@@ -55,8 +56,8 @@ done: has [12]
 done: mode normal
 
 step: a figure with #fig
-keys: /harbour looks<CR>o#fig<Tab>harbour.svg<Esc>
-hint: o, #fig, Tab, harbour.svg, Esc
+keys: /harbour looks<CR>o#figure<CR>harb<CR><Esc>
+hint: o, #figure, Enter, harb, Enter, Esc
 done: has image("harbour.svg")
 done: mode normal
 

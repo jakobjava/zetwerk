@@ -8,7 +8,7 @@
 //! typeset like any document, and the reader does in it what it says.
 //! Nothing of the user's documents is touched. `:tutor` goes on with the
 //! first lesson not done yet, `:tutor 4` goes to the fourth (again, from
-//! its beginning), `:tutor list` lists them all; `Ctrl-G` (or `:hint`)
+//! its beginning), `:tutor list` lists them all; `Ctrl-T` (or `:hint`)
 //! says the keys of the step at hand. Which lessons are done is kept in
 //! the state directory.
 //!
@@ -47,7 +47,7 @@
 //!   among them is a pause in typing, at which the page catches up. They
 //!   are what the tests play, so that a lesson cannot say what no longer
 //!   holds.
-//! - `hint:` what `Ctrl-G` says (the keys, where nothing is said).
+//! - `hint:` what `Ctrl-T` says (the keys, where nothing is said).
 //! - `done:` a check that holds once the step is done; a step is done
 //!   when all of its hold. Checks of the text read it without the
 //!   instructions (the calls of `task`):
@@ -99,6 +99,7 @@ const STEPS: &str = "/* tutor";
 /// The instructions in a lesson: calls of this.
 const TASK: &str = "task";
 /// Among the keys of a step: a pause in typing.
+#[cfg(test)]
 pub(super) const PAUSE: &str = " <pause> ";
 
 /// What the first window ever says.
@@ -228,7 +229,7 @@ pub(super) struct Step {
     pub(super) say: String,
     /// The keys that do it (see the module's documentation).
     pub(super) keys: String,
-    /// What `Ctrl-G` says.
+    /// What `Ctrl-T` says.
     pub(super) hint: String,
     /// What holds once it is done.
     pub(super) done: Vec<Check>,
@@ -611,7 +612,7 @@ impl Viewer {
         }
         let first = lesson.steps.first().map(|step| step.say.clone());
         self.notice(format!(
-            "lesson {number} of {of}: {} — do what the page says; Ctrl-G when stuck{}",
+            "lesson {number} of {of}: {} — do what the page says; Ctrl-T when stuck{}",
             lesson.title,
             first.map_or_else(String::new, |first| format!("  (first: {first})"))
         ));
@@ -627,7 +628,7 @@ impl Viewer {
         self.tutor_compiled();
     }
 
-    /// `Ctrl-G`, `:hint`: the keys of the step at hand.
+    /// `Ctrl-T`, `:hint`: the keys of the step at hand.
     fn tell_hint(&mut self) {
         let Some(active) = &self.tutor.active else {
             self.notice("no lesson is open: :tutor begins one");
@@ -642,10 +643,10 @@ impl Viewer {
         }
     }
 
-    /// A key for the tutor: `Ctrl-G` while a lesson is open. Returns
+    /// A key for the tutor: `Ctrl-T` while a lesson is open. Returns
     /// whether it was taken.
     pub(super) fn tutor_key(&mut self, press: KeyPress) -> bool {
-        if self.tutor.active.is_none() || !(press.ctrl && press.key == Key::Char('g')) {
+        if self.tutor.active.is_none() || !(press.ctrl && press.key == Key::Char('t')) {
             return false;
         }
         self.tell_hint();
@@ -710,7 +711,7 @@ impl Viewer {
                 .map(|range| {
                     // The first letter of what it says: behind `#task[`.
                     let at = range.start + TASK.len() + 2;
-                    zetwerk_typst::locate(document, &source, at, 0)
+                    zetwerk_typst::locate(document.pages(), &source, at, 0)
                         .map(|found| (found.page, found.x, found.y))
                 })
                 .collect();

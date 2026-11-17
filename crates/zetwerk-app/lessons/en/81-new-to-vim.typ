@@ -34,7 +34,7 @@ to the page. These ten are enough for a whole paper; `g?` lists the rest.
   [`u`], [undo, as often as you like (`Ctrl-R` redo)],
   [`:w`], [save (`:q` leave)],
   [`g?`], [all there is to do, each with its keys],
-  [`Ctrl-G`], [in a lesson: the keys of the step at hand],
+  [`Ctrl-T`], [in a lesson: the keys of the step at hand],
 )
 
 #task[Type a sentence of your own into the empty line below: go to the

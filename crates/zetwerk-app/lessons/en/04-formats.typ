@@ -16,8 +16,8 @@
 = Bold, italic, headings, lists
 
 A key with `g` in front makes text look different: `gb` bold, `gm`
-italic, `g+` a heading, `gl` a list. Behind it comes what it is to cover,
-as behind `d`: `iw` the word under the cursor, `ip` the paragraph.
+italic, `gl` a list. Behind it comes what it is to cover, as behind `d`:
+`iw` the word under the cursor, `ip` the paragraph. `g+` makes a heading.
 
 #task[Make the word "strong" below bold: put the cursor on it, then `gb`
 and `iw`.]
@@ -34,8 +34,8 @@ same for italic). Go to the end of the line below (`A`), type a space,
 
 The foghorn was
 
-#task[`g+` makes a heading of what it covers: `g+` and `ip` on the line
-below.]
+#task[`g+` makes the paragraph the cursor is in a heading, a level deeper
+each time (`g-` goes back). Press `g+` on the line below.]
 
 Life on the island
 
@@ -71,8 +71,8 @@ done: has *loud*
 done: mode normal
 
 step: a heading with g+ ip
-keys: /Life on<CR>g+ip
-hint: put the cursor on “Life on the island”, then g+ and ip
+keys: /Life on<CR>g+
+hint: put the cursor on “Life on the island”, then g+
 done: has = Life on the island
 
 step: a list with V and gl

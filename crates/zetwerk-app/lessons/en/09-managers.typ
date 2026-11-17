@@ -25,8 +25,8 @@ narrowed by typing, `Enter` takes what is chosen, `Esc` goes back.
 away. `u` would take it back.]
 
 #task[`gO`: the sections, to move. The two below are in the wrong order:
-`gO`, choose "Arrival", `Enter`, and `Enter` again on "move it up"; then
-`Esc`.]
+`gO`, choose "Arrival", `Enter`, then "move it up" (type `up`) and
+`Enter`; then `Esc`.]
 
 == Departure
 
@@ -62,8 +62,8 @@ hint: gD, page numbers, Enter, 1, Enter, Esc
 done: has numbering: "1"
 
 step: a section moved up with gO
-keys: <Esc>gOArrival<CR><CR><Esc>
-hint: gO, Arrival, Enter, Enter (move it up), Esc
+keys: <Esc>gOArrival<CR>up<CR><Esc>
+hint: gO, Arrival, Enter, up, Enter, Esc
 done: before == Arrival | == Departure
 
 step: the figures with gF

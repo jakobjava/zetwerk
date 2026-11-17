@@ -17,7 +17,7 @@
 The cursor is the dark block on the title. Everything in zetwerk is done
 with keys, and these move it. This page is a copy made for you: nothing you
 do here touches your own documents. The status line says which step you are
-at; a tick in the margin says when one is done; `Ctrl-G` gives the keys
+at; a tick in the margin says when one is done; `Ctrl-T` gives the keys
 when you are stuck.
 
 #task[`j` goes down a line, `k` goes up one: the lines as the page shows
@@ -29,9 +29,8 @@ Boats come in at dusk and leave before the sun is up, and the gulls know
 the hour better than the fishermen do.
 
 #task[The quickest way anywhere: `/`, a word, then `Enter` goes to where
-the page next reads it, and `n` on to the place after that. Type
-`/lantern` and `Enter` — it finds this very line first — then `n` to go
-on to the paragraph below.]
+the page next reads it, and `n` on to the place after that. Try it
+with `/lantern` and `Enter`.]
 
 At night the keeper lights the lantern in the tower and climbs down the
 hundred steps again, counting them as he goes.
@@ -58,8 +57,8 @@ hint: j, j, j … until the cursor is in “The old harbour …”
 done: below The old harbour
 
 step: to the word “lantern” with /
-keys: /lantern<CR>n
-hint: /lantern then Enter, then n
+keys: /lantern<CR>
+hint: /lantern then Enter (n goes on to the next one)
 done: cursor lantern in the tower
 
 step: on to “tower” with w

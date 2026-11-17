@@ -8,6 +8,7 @@
 
 mod cull;
 pub mod export;
+mod pictures;
 mod rasterizer;
 mod tiles;
 
@@ -18,6 +19,7 @@ use typst_layout::Page;
 use typst_render::RenderOptions;
 
 pub use cull::content_bounds;
+pub use pictures::pictures;
 pub use rasterizer::{Rasterized, Rasterizer};
 pub use tiles::{TILE_PX, Tile, TileKey, tile_origins, tiles};
 

@@ -232,11 +232,17 @@ impl Viewer {
 
     /// A key was pressed: it, or what the user's mappings make of it.
     pub fn key(&mut self, press: KeyPress) {
+        if self.report_key(press) {
+            return;
+        }
         let plain = self.keymap.is_empty()
             || self.is_picking()
+            || self.is_reviewing()
             || self.is_grid()
+            || self.is_presenting()
             || self.is_jumping()
-            || self.is_retyping();
+            || self.is_retyping()
+            || self.is_setting();
         if plain {
             self.plain_key(press);
         } else {
@@ -251,6 +257,7 @@ impl Viewer {
             self.note_typed();
         }
         self.hints_keyed();
+        self.report_keyed();
         self.tutor_keyed();
     }
 

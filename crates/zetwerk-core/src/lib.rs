@@ -11,6 +11,7 @@ mod disk;
 mod document;
 mod history;
 mod journal;
+mod origin;
 
 pub use change::{Buffer, Change, Direction, EditError, Replace};
 pub use disk::{Hash, create_private_dir, leftovers, write_atomically};
@@ -20,3 +21,7 @@ pub use document::{
     knock_path,
 };
 pub use history::{History, ROOT, StateId, Step};
+pub use origin::{
+    Agent, Attribution, By, ChangeMarks, Credit, CreditId, Credited, Given, Kind, Mark, Origin,
+    Run, Runs,
+};

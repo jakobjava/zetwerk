@@ -77,7 +77,7 @@ struct Choices {
 #[derive(Default)]
 pub(super) struct Language {
     /// What the user has decided; nothing is checked by default.
-    settings: Settings,
+    pub(super) settings: Settings,
     /// The thread that checks, once something was to be checked.
     service: Option<Service>,
     /// How that thread says it has an answer.
@@ -627,8 +627,16 @@ impl Viewer {
             .as_ref()
             .filter(|predicted| predicted.index == index);
         let typed = typed.map(|predicted| predicted.typed);
+        // Only the marks the user wants on the page (see `set`).
+        let marked = (self.settings.spelling_marks, self.settings.grammar_marks);
         for (rect, kind) in lines.iter() {
             if typed.is_some_and(|typed| rect.min.y < typed.max.y && rect.max.y > typed.min.y) {
+                continue;
+            }
+            if !matches!(
+                (kind, marked),
+                (Kind::Spelling, (true, _)) | (Kind::Grammar, (_, true))
+            ) {
                 continue;
             }
             let height = (rect.max.y - rect.min.y).to_pt() * zoom;
@@ -757,7 +765,7 @@ impl Viewer {
 
     /// Has the thread go by the settings as they are now, and all that
     /// was found forgotten.
-    fn reconfigure_language(&mut self) {
+    pub(super) fn reconfigure_language(&mut self) {
         self.language.forget();
         if let Some(service) = &self.language.service {
             service.configure(self.language.settings.clone());

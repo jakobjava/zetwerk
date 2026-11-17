@@ -2,9 +2,10 @@
 //!
 //! What is yanked or deleted into `"+` is put into the clipboard, for
 //! other programs to paste; `"+p` puts in what the clipboard holds, also
-//! what another program copied. The clipboard is read when `"+` is typed
-//! and written when the register has changed, never otherwise: no key
-//! but these touches it.
+//! what another program copied. The clipboard is read when a put from
+//! `"+` asks for it (see `paste`) and written when the register has
+//! changed, never otherwise: no key but these touches it. `"*` is the
+//! primary selection, likewise.
 
 use super::Viewer;
 use crate::editor::Editor;
@@ -50,22 +51,21 @@ pub(super) fn asks_clipboard(clipboard: &mut Clipboard, editor: &Editor, press: 
 }
 
 impl Viewer {
-    /// `"+` was typed: the register is made to hold what the clipboard
-    /// does, for a put that may follow.
-    pub(super) fn clipboard_to_register(&mut self) {
-        match (self.clipboard.read)() {
-            Ok(text) => {
-                if let Some(editor) = &mut self.editor {
-                    editor.set_register(CLIPBOARD, &text);
-                }
-                self.clipboard.known = Some(text);
-            }
-            Err(why) => self.alert(why),
-        }
+    /// `"+` was typed. The clipboard is not read here: only a put that
+    /// follows reads it, and not on the window's thread (see `paste`).
+    #[allow(clippy::unused_self, reason = "kept for the key that calls it")]
+    pub(super) fn clipboard_to_register(&mut self) {}
+
+    /// Notes that the clipboard holds `text`, written there by other
+    /// means than a key: not to be written again.
+    pub(super) fn clipboard_known(&mut self, text: &str) {
+        self.clipboard.known = Some(text.to_owned());
     }
 
     /// After a key: what the key put into `"+` goes into the clipboard.
     pub(super) fn register_to_clipboard(&mut self) {
+        self.register_to_primary();
+        self.paste_after_key();
         let Some(editor) = &self.editor else {
             return;
         };

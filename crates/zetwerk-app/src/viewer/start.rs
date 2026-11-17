@@ -486,7 +486,7 @@ impl Viewer {
     /// Puts the cursor on the first place to fill in at or behind byte
     /// `from` (or the first of all), typing, so that what is typed takes
     /// its place. Returns whether there is one.
-    fn go_to_blank(&mut self, from: usize) -> bool {
+    pub(super) fn go_to_blank(&mut self, from: usize) -> bool {
         let Some(editor) = &self.editor else {
             return false;
         };

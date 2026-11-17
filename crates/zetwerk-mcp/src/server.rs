@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     Change, ChangeKind, Direction, ImageExport, ImageFormat, ImageOf, NewNote, NoteAnchor,
-    NoteAnswer, Place, SharedEditor,
+    NoteAnswer, PagesWanted, Place, SharedEditor,
 };
 
 /// Longest side of a rendered page unless the caller asks otherwise. Large
@@ -29,11 +29,13 @@ const DEFAULT_MAX_PX: u32 = 1500;
 const LIMIT_MAX_PX: u32 = 4000;
 
 #[derive(Clone)]
-struct Server {
-    editor: SharedEditor,
+pub(crate) struct Server {
+    pub(crate) editor: SharedEditor,
     tool_router: ToolRouter<Self>,
     /// Whether there is no window: nobody but the agent saves then.
     headless: bool,
+    /// Who is connected (see `review`).
+    connection: Arc<crate::review::Connection>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -50,6 +52,19 @@ struct ReadSourceArgs {
     from_line: Option<usize>,
     /// Last line to read (default: the last). At most 2000 lines are
     /// given at once.
+    to_line: Option<usize>,
+    /// Also say who wrote each stretch of these lines (as
+    /// `get_authorship` does), after them (default false).
+    #[serde(default)]
+    with_origins: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AuthorshipArgs {
+    /// First line whose stretches to list, counting from 1. Without
+    /// it, only the shares are given.
+    from_line: Option<usize>,
+    /// Last line whose stretches to list (default: `from_line`).
     to_line: Option<usize>,
 }
 
@@ -120,6 +135,35 @@ struct MoveSectionArgs {
     direction: Direction,
     /// The `revision` you got the outline at. The move is refused if the
     /// text has changed since.
+    expected_revision: Option<u64>,
+    /// `apply` (default) or `propose`; see `edit_source`.
+    mode: Option<EditMode>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct InsertPagesArgs {
+    /// The file to make pages of: a PDF, or an image (png, jpg, gif,
+    /// svg, webp), as a path from the document's directory, in it or
+    /// below it (`cover.pdf`, `appendix/paper.pdf`).
+    file: String,
+    /// Which pages of a PDF: `2`, `1-3`, `1,4-6`, `3-` (default: all of
+    /// them). An image is one page.
+    pages: Option<String>,
+    /// Where they go: `cursor` (default: after the paragraph the user's
+    /// cursor is in; the text goes on on the next page), `start` (behind
+    /// the rules at the top), `end`, `after:<line>` (after the paragraph
+    /// that line is in) or `before:<line>` (before it).
+    #[serde(rename = "where")]
+    place: Option<String>,
+    /// Put each page on the document's paper, scaled to fit and in the
+    /// middle (default: false for a PDF, whose pages keep their own size
+    /// and orientation; true for an image).
+    fit: Option<bool>,
+    /// Whether the pages count in the page numbers (default true; they
+    /// never show a number themselves).
+    counted: Option<bool>,
+    /// The `revision` you read the source at. Refused if the text has
+    /// changed since.
     expected_revision: Option<u64>,
     /// `apply` (default) or `propose`; see `edit_source`.
     mode: Option<EditMode>,
@@ -255,9 +299,20 @@ impl Server {
     #[tool(annotations(title = "Editor state", read_only_hint = true))]
     async fn get_state(&self) -> Result<CallToolResult, ErrorData> {
         let editor = Arc::clone(&self.editor);
-        let state = blocking(move || editor.state()).await?;
+        let state = blocking(move || {
+            let review = editor.review_summary();
+            editor.state().map(|state| (state, review))
+        })
+        .await?;
         Ok(
-            match state.and_then(|state| serde_json::to_value(state).map_err(|e| e.to_string())) {
+            match state.and_then(|(state, review)| {
+                let mut value = serde_json::to_value(state).map_err(|e| e.to_string())?;
+                // What reviewing says, where the editor keeps a review.
+                if let (Some(fields), Some(review)) = (value.as_object_mut(), review) {
+                    fields.insert("review".to_owned(), review);
+                }
+                Ok(value)
+            }) {
                 Ok(value) => CallToolResult::structured(value),
                 Err(message) => failure(message),
             },
@@ -284,13 +339,16 @@ impl Server {
 }
 
 impl Server {
-    /// Runs an editor call that answers with a value.
-    async fn value(
+    /// Runs an editor call that answers with a value, with the caller
+    /// known to it (see [`crate::caller`]).
+    pub(crate) async fn value(
         &self,
         call: impl FnOnce(&dyn crate::Editor) -> Result<serde_json::Value, String> + Send + 'static,
     ) -> Result<CallToolResult, ErrorData> {
         let editor = Arc::clone(&self.editor);
-        Ok(match blocking(move || call(&*editor)).await? {
+        let caller = self.caller();
+        let answer = blocking(move || crate::review::with_caller(caller, || call(&*editor)));
+        Ok(match answer.await? {
             Ok(value) => CallToolResult::structured(value),
             Err(message) => failure(message),
         })
@@ -309,11 +367,40 @@ impl Server {
         Parameters(args): Parameters<ReadSourceArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let editor = Arc::clone(&self.editor);
-        let read = blocking(move || editor.read_source(args.from_line, args.to_line)).await?;
+        let read = blocking(move || {
+            let text = editor.read_source(args.from_line, args.to_line)?;
+            if !args.with_origins {
+                return Ok(text);
+            }
+            let from = args.from_line.unwrap_or(1);
+            let to = args.to_line.unwrap_or(usize::MAX);
+            let origins = editor.authorship(Some((from, to)))?;
+            Ok(format!("{text}\norigins: {}", origins["runs"]))
+        })
+        .await?;
         Ok(match read {
             Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
             Err(message) => failure(message),
         })
+    }
+
+    /// Who wrote the document, as zetwerk recorded it: the shares of its
+    /// text (characters and words) that the user typed, that agents
+    /// wrote (as written, or edited by the user since), that were pasted,
+    /// changed outside zetwerk, or are of unknown origin; per section;
+    /// and, for the lines asked for, each stretch with who wrote it and
+    /// when. Ask it before changing text the user wrote: leave the
+    /// user's own sentences alone unless asked to change them. It cannot
+    /// be changed: whatever you change is credited to you.
+    #[tool(annotations(title = "Authorship", read_only_hint = true))]
+    async fn get_authorship(
+        &self,
+        Parameters(args): Parameters<AuthorshipArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let lines = args
+            .from_line
+            .map(|from| (from, args.to_line.unwrap_or(from)));
+        self.value(move |editor| editor.authorship(lines)).await
     }
 
     /// The compile errors of the document as it is now (waits for the
@@ -324,7 +411,11 @@ impl Server {
     }
 
     /// The headings of the document (level, text, line, and page once it
-    /// is compiled) and its labels with their lines.
+    /// is compiled), its labels with their lines, and the pages put in
+    /// whole (`inserted_pages`: each with its `line`, what it `shows`,
+    /// `pdf`, `image`, `blank` or `other`, its `file` and `page`, whether
+    /// it is `fit` to the paper, null where written otherwise, and
+    /// whether it is `counted` in the page numbers).
     #[tool(annotations(title = "Outline", read_only_hint = true))]
     async fn get_outline(&self) -> Result<CallToolResult, ErrorData> {
         self.value(crate::Editor::outline).await
@@ -435,8 +526,9 @@ impl Server {
     /// tells; null where it has no number), its `caption` as written,
     /// its `label` (refer to it as `@label`), the `line` its call begins
     /// on and, of an image, the `image` file. Tables and images that
-    /// stand in no figure are listed too, with `in_figure` false. Change
-    /// them with `edit_source`.
+    /// stand in no figure are listed too, with `in_figure` false; an
+    /// image that is a page of its own (`insert_pages`) is not: see
+    /// `inserted_pages` in `get_outline`. Change them with `edit_source`.
     #[tool(annotations(title = "List figures", read_only_hint = true))]
     async fn list_figures(&self) -> Result<CallToolResult, ErrorData> {
         self.value(crate::Editor::figures).await
@@ -594,6 +686,35 @@ impl Server {
         self.value(move |editor| editor.change(change)).await
     }
 
+    /// Put pages of a PDF (a cover, a signed form, a paper as an
+    /// appendix, slides) or an image into the document whole, each as a
+    /// page of its own with no margins, header or number. Written as
+    /// one line of plain Typst a page:
+    /// `#page(width: auto, height: auto, margin: 0pt, header: none,
+    /// footer: none)[#image("cover.pdf", page: 1)]`; `get_outline` lists
+    /// them as `inserted_pages`, and they are not figures. The file has
+    /// to be in the document's directory or below it already. Answers
+    /// like `edit_source`.
+    #[tool(annotations(title = "Insert pages", read_only_hint = false))]
+    async fn insert_pages(
+        &self,
+        Parameters(args): Parameters<InsertPagesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let change = Change {
+            what: ChangeKind::InsertPages(PagesWanted {
+                file: args.file,
+                pages: args.pages,
+                place: args.place,
+                fit: args.fit,
+                counted: args.counted,
+            }),
+            expected_revision: args.expected_revision,
+            propose: args.mode == Some(EditMode::Propose),
+            reason: None,
+        };
+        self.value(move |editor| editor.change(change)).await
+    }
+
     /// Take back a change you proposed, before the user has decided on
     /// it: give its `id`, or the `ids` of several (all the `proposals` a
     /// change made).
@@ -741,6 +862,18 @@ impl Server {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Server {
+    /// Every tool call, with its caller known to the editor calls it
+    /// makes (see `caller`).
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
+        let caller = crate::caller::of(&context.peer);
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        crate::caller::scope(caller, self.tool_router.call(call)).await
+    }
+
     fn get_info(&self) -> ServerConfig {
         let instructions = if self.headless {
             HEADLESS
@@ -752,9 +885,83 @@ impl ServerHandler for Server {
              undo steps in the user's editor and are saved by the user, unless a save \
              tool is offered."
         };
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        let mut instructions = format!("{instructions}\n\n{}", crate::review::AGREEMENT);
+        if let Some(brief) = self
+            .editor
+            .brief_text()
+            .filter(|brief| !brief.trim().is_empty())
+        {
+            instructions.push_str("\n\nThe author's brief (standing instructions, follow them):\n");
+            instructions.push_str(&brief);
+        }
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_prompts()
+            .enable_resources()
+            .enable_resources_subscribe()
+            .build();
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("zetwerk", env!("CARGO_PKG_VERSION")))
             .with_instructions(instructions)
+    }
+
+    async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
+        if let Some(info) = context.peer.peer_info() {
+            self.connection.named(&info.client_info.name);
+        }
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListPromptsResult, ErrorData> {
+        Ok(crate::review::prompts())
+    }
+
+    async fn get_prompt(
+        &self,
+        request: rmcp::model::GetPromptRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::GetPromptResponse, ErrorData> {
+        crate::review::prompt(&request.name, request.arguments.as_ref()).map(Into::into)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, ErrorData> {
+        Ok(crate::review::resources())
+    }
+
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResponse, ErrorData> {
+        self.read_review_resource(&request.uri)
+            .await
+            .map(Into::into)
+    }
+
+    #[allow(deprecated, reason = "the subscriptions clients of today make")]
+    async fn subscribe(
+        &self,
+        request: rmcp::model::SubscribeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), ErrorData> {
+        self.watch_review(request.uri, &context);
+        Ok(())
+    }
+
+    #[allow(deprecated, reason = "the subscriptions clients of today make")]
+    async fn unsubscribe(
+        &self,
+        _request: rmcp::model::UnsubscribeRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), ErrorData> {
+        Ok(())
     }
 }
 
@@ -773,17 +980,18 @@ const HEADLESS_SAVE: &str = "Write the text to the document's file. This session
                              changed by another program since it was read.";
 
 /// Runs an editor call off the async thread; editor calls block.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     call: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ErrorData> {
-    tokio::task::spawn_blocking(call)
+    let caller = crate::caller::current();
+    tokio::task::spawn_blocking(move || crate::caller::on_thread(caller, call))
         .await
         .map_err(|err| ErrorData::internal_error(format!("editor call failed: {err}"), None))
 }
 
 /// A tool result reporting that the tool could not do what was asked. The
 /// calling model sees the message and can react to it.
-fn failure(message: String) -> CallToolResult {
+pub(crate) fn failure(message: String) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(message)])
 }
 
@@ -842,6 +1050,7 @@ impl Server {
         let mut tool_router =
             Self::document_tools() + Self::reading_tools() + Self::editing_tools();
         tool_router += Self::notes_tools();
+        tool_router += Self::review_tools();
         if tools.save {
             tool_router += Self::saving_tools();
             if let (true, Some(save)) = (tools.headless, tool_router.map.get_mut("save")) {
@@ -855,7 +1064,21 @@ impl Server {
             editor,
             tool_router,
             headless: tools.headless,
+            connection: crate::review::Connection::new(),
         }
+    }
+
+    /// The same server, for another connection: another session.
+    fn for_connection(&self) -> Self {
+        Self {
+            connection: crate::review::Connection::new(),
+            ..self.clone()
+        }
+    }
+
+    /// Who calls.
+    pub(crate) fn caller(&self) -> crate::Caller {
+        self.connection.caller()
     }
 }
 
@@ -914,7 +1137,7 @@ pub fn serve(socket: &Path, editor: SharedEditor, tools: Tools) -> std::io::Resu
                         _ = &mut stopped => break,
                         accepted = listener.accept() => {
                             let Ok((stream, _)) = accepted else { break };
-                            let server = server.clone();
+                            let server = server.for_connection();
                             tokio::spawn(async move {
                                 // A client that speaks nonsense or hangs up only
                                 // ends its own connection.
