@@ -13,6 +13,8 @@ use typst::syntax::{LinkedNode, Side, Source, SyntaxKind};
 use zetwerk_vim::Format;
 
 mod back;
+mod kept;
+mod reach;
 mod shown;
 mod slots;
 
@@ -32,6 +34,23 @@ fn ancestors(source: &Source, at: usize) -> Vec<LinkedNode<'_>> {
         chain.push(here);
     }
     chain
+}
+
+/// What [`ancestors`] finds below the root of `source`: the nodes of
+/// the child of the root that holds byte `at`, each a node of that child
+/// taken for a root, which begins at the byte given (see [`reach`]). The
+/// root is not gone through.
+fn ancestors_below(source: &Source, at: usize) -> (Vec<LinkedNode<'_>>, usize) {
+    let Some((leaf, start)) = reach::leaf_after(source, at) else {
+        return (Vec::new(), 0);
+    };
+    let mut chain = Vec::new();
+    let mut node = Some(leaf);
+    while let Some(here) = node {
+        node = here.parent().cloned();
+        chain.push(here);
+    }
+    (chain, start)
 }
 
 /// `range` without the blanks and line breaks at its ends.
@@ -550,48 +569,19 @@ pub enum Ground {
 /// The nodes of `source` that byte `at` is inside of (not at an end of),
 /// from the outside in, and with them what the place is.
 fn containing(source: &Source, at: usize) -> (Vec<LinkedNode<'_>>, Ground) {
+    containing_from(LinkedNode::new(source.root()), at, Ground::Markup)
+}
+
+/// What [`containing`] finds from `node` in, the place `node` is in
+/// being `ground`.
+fn containing_from(
+    mut node: LinkedNode<'_>,
+    at: usize,
+    mut ground: Ground,
+) -> (Vec<LinkedNode<'_>>, Ground) {
     let mut chain = Vec::new();
-    let mut node = LinkedNode::new(source.root());
-    let mut ground = Ground::Markup;
     loop {
-        ground = match node.kind() {
-            SyntaxKind::Markup
-            | SyntaxKind::Strong
-            | SyntaxKind::Emph
-            | SyntaxKind::Heading
-            | SyntaxKind::ListItem
-            | SyntaxKind::EnumItem
-            | SyntaxKind::TermItem
-            | SyntaxKind::ContentBlock => Ground::Markup,
-            SyntaxKind::Equation
-            | SyntaxKind::Math
-            | SyntaxKind::MathCall
-            | SyntaxKind::MathArgs
-            | SyntaxKind::MathDelimited
-            | SyntaxKind::MathAttach
-            | SyntaxKind::MathFrac
-            | SyntaxKind::MathRoot
-            | SyntaxKind::MathPrimes => Ground::Math,
-            SyntaxKind::Str => Ground::Str,
-            SyntaxKind::Raw | SyntaxKind::LineComment | SyntaxKind::BlockComment => Ground::Raw,
-            SyntaxKind::Label | SyntaxKind::Ref | SyntaxKind::RefMarker | SyntaxKind::Link => {
-                Ground::Name
-            }
-            SyntaxKind::Text
-            | SyntaxKind::Space
-            | SyntaxKind::Escape
-            | SyntaxKind::Shorthand
-            | SyntaxKind::SmartQuote
-            | SyntaxKind::MathText
-            | SyntaxKind::MathIdent
-            | SyntaxKind::MathFieldAccess
-            | SyntaxKind::MathShorthand
-            | SyntaxKind::MathAlignPoint
-            | SyntaxKind::Error => ground,
-            // A blank, a break, a mark: part of what it stands in.
-            _ if node.get().children().len() == 0 => ground,
-            _ => Ground::Code,
-        };
+        ground = ground_of(node.get(), ground);
         let inside = node
             .children()
             .find(|child| child.offset() < at && at < child.offset() + child.len());
@@ -603,10 +593,67 @@ fn containing(source: &Source, at: usize) -> (Vec<LinkedNode<'_>>, Ground) {
     }
 }
 
+/// What [`containing`] finds below the root of `source`: the nodes of
+/// the child of the root that byte `at` is inside of, from it in, each a
+/// node of that child taken for a root, which begins at the byte given
+/// (see [`reach`]); and what the place is. The root is not gone through.
+fn containing_below(source: &Source, at: usize) -> (Vec<LinkedNode<'_>>, Ground, usize) {
+    let ground = ground_of(source.root(), Ground::Markup);
+    match reach::child_inside(source, at) {
+        Some((child, start)) => {
+            let (chain, ground) = containing_from(LinkedNode::new(child), at - start, ground);
+            (chain, ground, start)
+        }
+        None => (Vec::new(), ground, 0),
+    }
+}
+
+/// What the place in `node` is, the place `node` is in being `ground`.
+fn ground_of(node: &typst::syntax::SyntaxNode, ground: Ground) -> Ground {
+    match node.kind() {
+        SyntaxKind::Markup
+        | SyntaxKind::Strong
+        | SyntaxKind::Emph
+        | SyntaxKind::Heading
+        | SyntaxKind::ListItem
+        | SyntaxKind::EnumItem
+        | SyntaxKind::TermItem
+        | SyntaxKind::ContentBlock => Ground::Markup,
+        SyntaxKind::Equation
+        | SyntaxKind::Math
+        | SyntaxKind::MathCall
+        | SyntaxKind::MathArgs
+        | SyntaxKind::MathDelimited
+        | SyntaxKind::MathAttach
+        | SyntaxKind::MathFrac
+        | SyntaxKind::MathRoot
+        | SyntaxKind::MathPrimes => Ground::Math,
+        SyntaxKind::Str => Ground::Str,
+        SyntaxKind::Raw | SyntaxKind::LineComment | SyntaxKind::BlockComment => Ground::Raw,
+        SyntaxKind::Label | SyntaxKind::Ref | SyntaxKind::RefMarker | SyntaxKind::Link => {
+            Ground::Name
+        }
+        SyntaxKind::Text
+        | SyntaxKind::Space
+        | SyntaxKind::Escape
+        | SyntaxKind::Shorthand
+        | SyntaxKind::SmartQuote
+        | SyntaxKind::MathText
+        | SyntaxKind::MathIdent
+        | SyntaxKind::MathFieldAccess
+        | SyntaxKind::MathShorthand
+        | SyntaxKind::MathAlignPoint
+        | SyntaxKind::Error => ground,
+        // A blank, a break, a mark: part of what it stands in.
+        _ if node.children().len() == 0 => ground,
+        _ => Ground::Code,
+    }
+}
+
 /// What the place at byte `at` of `source` is, for what is typed there.
 #[must_use]
 pub fn ground(source: &Source, at: usize) -> Ground {
-    containing(source, at).1
+    containing_below(source, at).1
 }
 
 /// Whether byte `at` of `text` begins a line (after its indent) that goes
@@ -1361,9 +1408,11 @@ fn header_cells(call: &LinkedNode, text: &str, named: &str) -> Option<Vec<Range<
 /// The table byte `at` of `source` is in, the innermost.
 #[must_use]
 pub fn table_at(source: &Source, at: usize) -> Option<Table> {
-    let text = source.text();
-    let (chain, _) = containing(source, at);
-    chain.iter().rev().find_map(|call| {
+    // Below the root, in the child of it the table is in: its bytes are
+    // told from where that begins, and moved by it at the end.
+    let (chain, _, start) = containing_below(source, at);
+    let text = source.text().get(start..).unwrap_or("");
+    let table = chain.iter().rev().find_map(|call| {
         if call.kind() != SyntaxKind::FuncCall {
             return None;
         }
@@ -1431,6 +1480,14 @@ pub fn table_at(source: &Source, at: usize) -> Option<Table> {
         }
         let whole_rows = table.columns >= 1 && table.header.is_multiple_of(table.columns);
         (whole_rows && !table.cells.is_empty()).then_some(table)
+    })?;
+    let moved = |range: Range<usize>| range.start + start..range.end + start;
+    Some(Table {
+        count: table.count.map(moved),
+        cells: table.cells.into_iter().map(moved).collect(),
+        whole: moved(table.whole),
+        head: table.head.map(moved),
+        ..table
     })
 }
 
@@ -1607,10 +1664,11 @@ pub fn is_empty_spot(source: &Source, at: usize) -> bool {
 #[must_use]
 pub fn equation_at(source: &Source, at: usize) -> Option<Range<usize>> {
     let last = source.text().len().saturating_sub(1);
-    ancestors(source, at.min(last))
+    let (chain, start) = ancestors_below(source, at.min(last));
+    chain
         .iter()
         .rfind(|node| node.kind() == SyntaxKind::Equation)
-        .map(LinkedNode::range)
+        .map(|equation| equation.range().start + start..equation.range().end + start)
 }
 
 /// Where typing begun at the start of a line of a page goes (with `end`:
@@ -2042,7 +2100,25 @@ pub fn bibliography_file(source: &Source) -> Option<String> {
         }
         node.children().find_map(|child| find(&child, text))
     }
-    find(&LinkedNode::new(source.root()), source.text())
+    thread_local! {
+        /// The children of the root of the text last asked about that
+        /// name a file, with the file. Asked after every compile: a walk
+        /// through all of a long text, unless kept.
+        static KEPT: std::cell::RefCell<Option<(Source, kept::Found<String>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let text = source.text();
+    let named = |node: &typst::syntax::SyntaxNode, start: usize| {
+        let within = text.get(start..start + node.len()).unwrap_or("");
+        find(&LinkedNode::new(node), within)
+            .map(|named| (start..start + node.len(), named))
+            .into_iter()
+            .collect()
+    };
+    let found = KEPT.with_borrow(|kept| kept::found_again(kept.as_ref(), source, &named));
+    let first = found.first().map(|(_, named)| named.clone());
+    KEPT.set(Some((source.clone(), found)));
+    first
 }
 
 /// What a part of `source` that begins at byte `at` needs before it to
@@ -2163,7 +2239,11 @@ pub fn stand_ins(source: &Source, kept: &Range<usize>) -> Option<String> {
     let part = text.get(kept.clone())?;
     let mut referred = Vec::new();
     if part.contains('@') {
-        labels(&LinkedNode::new(source.root()), kept, &mut referred);
+        // Only the children of the root the part is in are gone into.
+        for (child, start) in reach::children_over(source, kept) {
+            let kept = kept.start.saturating_sub(start)..kept.end - start;
+            labels(&LinkedNode::new(child), &kept, &mut referred);
+        }
     }
     referred.sort();
     referred.dedup();
@@ -2331,15 +2411,18 @@ pub fn left_empty(source: &Source, equation: &Range<usize>) -> Vec<usize> {
 /// The places of all equations of `source` but the one at bytes `but`
 /// that lack what they cannot be without (see [`left_empty`]), in the
 /// order of the text. One walk through the text, for every key: nothing
-/// in it looks anything up.
+/// in it looks anything up. Only through the paragraphs a key changed:
+/// what was found in the others is kept (see [`kept`]).
 #[must_use]
 pub fn left_empty_everywhere(source: &Source, but: Option<&Range<usize>>) -> Vec<usize> {
     use typst::syntax::SyntaxNode;
-    /// What the walk carries along.
+    /// What the walk carries along: the places of the equation it is
+    /// in, and those of the equations before, each with its bytes and
+    /// its places told from its start.
     struct Walk<'a> {
         text: &'a str,
-        but: Option<&'a Range<usize>>,
         places: Vec<usize>,
+        equations: kept::Found<Vec<usize>>,
     }
     /// The places of the equation `node` (at byte `start`) holds.
     fn gaps(
@@ -2397,8 +2480,13 @@ pub fn left_empty_everywhere(source: &Source, but: Option<&Range<usize>>) -> Vec
                 .text
                 .get(bytes.start + 1..bytes.end.saturating_sub(1))
                 .is_none_or(|body| body.trim().is_empty());
-            if walk.but != Some(&bytes) && !empty {
+            if !empty {
                 gaps(walk, node, start, (SyntaxKind::Markup, false), bytes.end);
+            }
+            if !walk.places.is_empty() {
+                let places = std::mem::take(&mut walk.places);
+                let places = places.into_iter().map(|at| at - bytes.start).collect();
+                walk.equations.push((bytes, places));
             }
             return;
         }
@@ -2410,23 +2498,39 @@ pub fn left_empty_everywhere(source: &Source, but: Option<&Range<usize>>) -> Vec
             at += child.len();
         }
     }
-    let mut walk = Walk {
-        text: source.text(),
-        but,
-        places: Vec::new(),
+    thread_local! {
+        /// The equations with places of the text last asked about.
+        static KEPT: std::cell::RefCell<Option<(Source, kept::Found<Vec<usize>>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let find = |node: &SyntaxNode, start: usize| {
+        let mut walk = Walk {
+            text: source.text(),
+            places: Vec::new(),
+            equations: Vec::new(),
+        };
+        through(&mut walk, node, start);
+        walk.equations
     };
-    through(&mut walk, source.root(), 0);
-    walk.places.sort_unstable();
-    walk.places.dedup();
-    walk.places
+    let equations = KEPT.with_borrow(|kept| kept::found_again(kept.as_ref(), source, &find));
+    let mut places: Vec<usize> = equations
+        .iter()
+        .filter(|(bytes, _)| but != Some(bytes))
+        .flat_map(|(bytes, places)| places.iter().map(|at| bytes.start + at))
+        .collect();
+    KEPT.set(Some((source.clone(), equations)));
+    places.sort_unstable();
+    places.dedup();
+    places
 }
 
 /// Whether byte `at` of `source` is in what a call of `function` holds:
 /// in a footnote, say.
 #[must_use]
 pub fn is_in_call(source: &Source, at: usize, function: &str) -> bool {
-    let text = source.text();
-    containing(source, at).0.iter().any(|node| {
+    let (chain, _, start) = containing_below(source, at);
+    let text = source.text().get(start..).unwrap_or("");
+    chain.iter().any(|node| {
         node.kind() == SyntaxKind::FuncCall
             && node
                 .children()
@@ -2691,7 +2795,8 @@ pub const MATH_INSERTS: &[Insert] = &[
 #[must_use]
 pub fn is_in_equation(source: &Source, at: usize) -> bool {
     let at = at.min(source.text().len().saturating_sub(1));
-    ancestors(source, at)
+    ancestors_below(source, at)
+        .0
         .iter()
         .any(|node| node.kind() == SyntaxKind::Equation)
 }

@@ -77,6 +77,13 @@ struct Known {
     /// Whether any heading has a number, and any equation.
     sections_numbered: bool,
     equations_numbered: bool,
+    /// Whether the numbers and the things labelled are told: counting
+    /// them takes long on a long document, and what labels there are
+    /// (looked at after every compile) does not need it.
+    counted: bool,
+    /// The whole document the numbers were counted for: pages a part
+    /// typed was put into have those of the whole they were put into.
+    whole: Weak<PagedDocument>,
 }
 
 /// The sources of the document's bibliography file, as they were when
@@ -396,8 +403,9 @@ fn referable(element: &Content) -> Option<(Kind, String)> {
 /// Looks up what `document` says of the things that can be referred to.
 /// One walk over what it can find again (its headings, figures,
 /// equations and the like, not its pages): the numbers are counted as
-/// Typst counts them.
-fn know(document: &Arc<PagedDocument>) -> Known {
+/// Typst counts them; only with `count` (else only the labels and the
+/// keys of the sources are told).
+fn know(document: &Arc<PagedDocument>, count: bool) -> Known {
     let mut known = Known {
         document: Arc::downgrade(document),
         numbers: HashMap::new(),
@@ -406,6 +414,8 @@ fn know(document: &Arc<PagedDocument>) -> Known {
         keys: zetwerk_typst::bibliography_keys(document),
         sections_numbered: false,
         equations_numbered: false,
+        counted: count,
+        whole: Arc::downgrade(document),
     };
     let mut counters: HashMap<String, Option<CounterState>> = HashMap::new();
     let begun = || Some(CounterState::init(false));
@@ -415,6 +425,9 @@ fn know(document: &Arc<PagedDocument>) -> Known {
             .map(|label| label.resolve().as_str().to_owned());
         if let Some(label) = &label {
             known.labels.push((label.clone(), element.span().id()));
+        }
+        if !count {
+            continue;
         }
         let update = element.with::<dyn Count>().and_then(Count::update);
         if element.elem() == CounterUpdateElem::ELEM {
@@ -608,17 +621,38 @@ fn offers_of(
 
 impl Viewer {
     /// Brings what is known of the compiled document up to date with
-    /// the document there is.
-    fn refresh_known(&mut self) {
+    /// the document there is; with `count`, its numbers too.
+    fn refresh_known(&mut self, count: bool) {
         let Some(document) = self.document.as_ref().map(super::local::Pages::whole) else {
             self.refer.known = None;
             return;
         };
-        let same = |known: &Known| known.document.as_ptr() == Arc::as_ptr(document);
-        if !self.refer.known.as_ref().is_some_and(same) {
-            self.refer.known = Some(know(document));
-            self.refer.sources = None;
+        let same = |known: &Known| {
+            known.document.as_ptr() == Arc::as_ptr(document) && (known.counted || !count)
+        };
+        if self.refer.known.as_ref().is_some_and(same) {
+            return;
         }
+        // While a part is typed into the pages, what is counted is
+        // that of the whole they were made of: counting it again with
+        // every key that puts a part in takes long on a long document.
+        let whole = self.whole.as_ref().map_or(std::ptr::null(), Arc::as_ptr);
+        let counted = self.refer.known.take().filter(|known| {
+            count && known.counted && known.whole.as_ptr() == whole && !whole.is_null()
+        });
+        let mut known = know(document, count && counted.is_none());
+        if let Some(counted) = counted {
+            known.numbers = counted.numbers;
+            known.labelled = counted.labelled;
+            known.sections_numbered = counted.sections_numbered;
+            known.equations_numbered = counted.equations_numbered;
+            known.counted = true;
+            known.whole = counted.whole;
+        } else if let Some(whole) = &self.whole {
+            known.whole = Arc::downgrade(whole);
+        }
+        self.refer.known = Some(known);
+        self.refer.sources = None;
     }
 
     /// The sources of the document's bibliography file; none if it has
@@ -646,7 +680,7 @@ impl Viewer {
     /// All there is to refer to, as the text and the compiled document
     /// are now.
     fn offers(&mut self) -> Vec<Offer> {
-        self.refresh_known();
+        self.refresh_known(true);
         let sources = self.bibliography();
         let Some(editor) = &self.editor else {
             return Vec::new();
@@ -1002,7 +1036,7 @@ impl Viewer {
     /// them; without, only what is known anyway is given, and nothing
     /// of what is referred to.
     fn besides(&mut self, marks: &Marks, files: bool) -> (Vec<String>, HashSet<String>) {
-        self.refresh_known();
+        self.refresh_known(false);
         let sources = self.bibliography();
         let mut labels: Vec<String> = sources.into_iter().map(|entry| entry.key).collect();
         let Some(editor) = &self.editor else {
@@ -1546,6 +1580,34 @@ mod tests {
     }
 
     #[test]
+    fn numbers_are_counted_only_for_what_asks_for_them() {
+        let text = "#set heading(numbering: \"1.\")\n= One <one>\n= Two\nSee @one.\n";
+        let (mut viewer, directory) = editing(text, &[]);
+        // The check after a compile asks only for the labels.
+        viewer.refer_problems();
+        let known = viewer.refer.known.as_ref().unwrap();
+        assert!(!known.counted && known.labels.iter().any(|(label, _)| label == "one"));
+        let numbers = |viewer: &mut Viewer| -> Vec<Option<String>> {
+            let things = viewer.referables().unwrap().into_iter();
+            things.map(|thing| thing.number).collect()
+        };
+        let counted = numbers(&mut viewer);
+        assert_eq!(counted, [Some("1.".to_owned()), Some("2.".to_owned())]);
+        assert!(viewer.refer.known.as_ref().unwrap().counted);
+        // Pages a part was put into have the numbers of the whole they
+        // were made of, not counted again.
+        let pages = viewer.document.as_ref().map(|pages| {
+            let world = viewer.compiled_world.clone().unwrap();
+            super::super::local::Pages::new(Arc::new((**pages.whole()).clone()), world)
+        });
+        viewer.document = pages;
+        assert_eq!(numbers(&mut viewer), counted);
+        let known = viewer.refer.known.as_ref().unwrap();
+        assert!(known.counted && known.document.as_ptr() != known.whole.as_ptr());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn numbers_are_counted_as_typst_counts_them() {
         let text = "#set heading(numbering: \"1.a\")\n\
                     = One\n== Sub\n= Two\n\
@@ -1721,9 +1783,15 @@ mod tests {
             let _ = zetwerk_typst::complete(&world, document, &source, cursor, false);
         });
         best(
-            "the document asked for its numbers (once a compile)",
+            "the document asked for its numbers (once a compile, with @)",
             &mut |viewer| {
-                let _ = know(viewer.document.as_ref().unwrap().whole());
+                let _ = know(viewer.document.as_ref().unwrap().whole(), true);
+            },
+        );
+        best(
+            "the document asked for its labels (once a compile)",
+            &mut |viewer| {
+                let _ = know(viewer.document.as_ref().unwrap().whole(), false);
             },
         );
         best(
@@ -1733,6 +1801,12 @@ mod tests {
             },
         );
         best("the check after a compile", &mut |viewer| {
+            // Of pages it has not seen.
+            let pages = viewer.document.as_ref().map(|pages| {
+                let world = viewer.compiled_world.clone().unwrap();
+                super::super::local::Pages::new(Arc::new((**pages.whole()).clone()), world)
+            });
+            viewer.document = pages;
             viewer.refer_problems();
         });
         best("K on a reference", &mut |viewer| {

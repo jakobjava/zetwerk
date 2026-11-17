@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use typst::syntax::{LinkedNode, Side, Source, SyntaxKind};
 
-use super::{Ground, containing, is_empty_spot, rule_value};
+use super::{Ground, is_empty_spot, rule_value};
 
 /// What typing goes into, where it is not running text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,14 +100,16 @@ fn item_at(source: &Source, at: usize) -> Option<Range<usize>> {
     // Blanks at the end of an item are not its own: what is typed
     // behind them goes on it all the same.
     let at = source.text().get(..at)?.trim_end_matches(' ').len();
-    let mut node = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+    // Below the root, in the child of it that holds `at`, which begins
+    // at `start`: the root is no item.
+    let (mut node, start) = super::reach::leaf_before(source, at)?;
     loop {
         let item = matches!(
             node.kind(),
             SyntaxKind::ListItem | SyntaxKind::EnumItem | SyntaxKind::TermItem
         );
-        if item && node.offset() < at {
-            return Some(node.range());
+        if item && node.offset() + start < at {
+            return Some(node.offset() + start..node.range().end + start);
         }
         node = node.parent()?.clone();
     }
@@ -121,8 +123,11 @@ fn item_at(source: &Source, at: usize) -> Option<Range<usize>> {
 /// name).
 #[must_use]
 pub fn enclosing(source: &Source, at: usize) -> Option<Around> {
-    let text = source.text();
-    let (chain, ground) = containing(source, at);
+    // Below the root, in the child of it that holds `at`, which begins
+    // at `start`: the root encloses nothing of this.
+    let (chain, ground, start) = super::containing_below(source, at);
+    let text = source.text().get(start..).unwrap_or("");
+    let bytes = |node: &LinkedNode| node.offset() + start..node.range().end + start;
     let in_equation = || chain.iter().any(|node| node.kind() == SyntaxKind::Equation);
     match ground {
         Ground::Markup | Ground::Math => {}
@@ -138,7 +143,7 @@ pub fn enclosing(source: &Source, at: usize) -> Option<Around> {
     });
     let inner = |node: &LinkedNode| {
         item.clone().filter(|item| {
-            let range = node.range();
+            let range = bytes(node);
             !(item.range.start <= range.start && range.end <= item.range.end)
         })
     };
@@ -147,7 +152,7 @@ pub fn enclosing(source: &Source, at: usize) -> Option<Around> {
             SyntaxKind::Equation => {
                 return inner(node).or(Some(Around {
                     kind: Enclosure::Equation,
-                    range: node.range(),
+                    range: bytes(node),
                 }));
             }
             SyntaxKind::ContentBlock => {
@@ -160,7 +165,7 @@ pub fn enclosing(source: &Source, at: usize) -> Option<Around> {
                 if holds_paragraphs(node) {
                     return None;
                 }
-                let range = node.range();
+                let range = bytes(node);
                 return Some(Around {
                     kind,
                     range: range.start + 1..range.end.saturating_sub(1).max(range.start + 1),
