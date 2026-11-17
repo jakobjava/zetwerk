@@ -116,6 +116,8 @@ const FORWARD: &[(&str, &str)] = &[
     ("r c", "table: a row below, a column right"),
     ("R C", "table: this row down, this column right"),
     ("x X", "table: this row, this column out (on to the next)"),
+    ("h", "table: the first row its header"),
+    ("y", "table: copy it as cells, for a spreadsheet"),
 ];
 const BACKWARD: &[(&str, &str)] = &[
     ("[", "to the page before"),
@@ -147,7 +149,10 @@ pub(super) fn table_key(key: char, forward: bool) -> &'static str {
         ('x', true) => "table row delete",
         ('x', false) => "table row delete above",
         ('X', true) => "table column delete",
-        _ => "table column delete left",
+        ('X', false) => "table column delete left",
+        ('h', true) => "table header on",
+        ('h', false) => "table header off",
+        _ => "table copy",
     }
 }
 

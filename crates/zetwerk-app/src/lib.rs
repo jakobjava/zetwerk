@@ -6,6 +6,7 @@ pub mod editor;
 pub mod figure_text;
 pub mod gpu;
 pub mod headless;
+pub mod image_file;
 pub mod invisible;
 pub use zetwerk_vim::keys;
 pub mod power;

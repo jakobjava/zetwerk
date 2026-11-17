@@ -107,6 +107,151 @@ pub fn cells_in(text: &str, commas: bool) -> Option<Vec<Vec<String>>> {
     ((commas || (rows.len() >= 2 && same)) && even(&rows)).then_some(rows)
 }
 
+/// What a web page's table (`text/html`, as a browser or a spreadsheet
+/// copies one) holds, row by row: the text of each cell, a line break
+/// in it kept, a cell over several columns followed by empty ones.
+/// `None` where there is no table, it is in another, it has a cell over
+/// several rows, or it is less than two cells.
+#[must_use]
+pub fn cells_in_html(html: &str) -> Option<Vec<Vec<String>>> {
+    use html5ever::tendril::StrTendril;
+    use html5ever::tokenizer::{
+        BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
+    };
+    use std::cell::RefCell;
+
+    /// What is gathered as the tokens come.
+    #[derive(Default)]
+    struct Gathered {
+        /// How deep in tables, and whether the first is over.
+        depth: usize,
+        done: bool,
+        rows: Vec<Vec<String>>,
+        cell: Option<String>,
+        /// Where in its row the cell being read is.
+        at: usize,
+        /// In a `style` or `script`, whose text is no cell's.
+        hidden: bool,
+        refused: bool,
+    }
+
+    struct Sink(RefCell<Gathered>);
+
+    impl TokenSink for Sink {
+        type Handle = ();
+
+        fn process_token(&self, token: Token, _: u64) -> TokenSinkResult<()> {
+            let mut gathered = self.0.borrow_mut();
+            let gathered = &mut *gathered;
+            match token {
+                Token::TagToken(tag) => {
+                    let start = tag.kind == TagKind::StartTag;
+                    let span = |name: &str| {
+                        tag.attrs
+                            .iter()
+                            .find(|attr| &*attr.name.local == name)
+                            .and_then(|attr| attr.value.trim().parse::<usize>().ok())
+                            .unwrap_or(1)
+                    };
+                    match (&*tag.name, start) {
+                        ("style" | "script", start) => gathered.hidden = start,
+                        _ if gathered.done => {}
+                        ("table", true) => {
+                            gathered.depth += 1;
+                            gathered.refused |= gathered.depth > 1;
+                        }
+                        ("table", false) => {
+                            gathered.depth = gathered.depth.saturating_sub(1);
+                            gathered.done = gathered.depth == 0;
+                        }
+                        _ if gathered.depth != 1 => {}
+                        ("tr", true) => gathered.rows.push(Vec::new()),
+                        ("td" | "th", true) => {
+                            if gathered.rows.is_empty() {
+                                gathered.rows.push(Vec::new());
+                            }
+                            gathered.refused |= span("rowspan") > 1;
+                            let columns = span("colspan").clamp(1, MOST);
+                            if let Some(row) = gathered.rows.last_mut() {
+                                gathered.at = row.len();
+                                row.extend(std::iter::repeat_n(String::new(), columns));
+                            }
+                            gathered.cell = Some(String::new());
+                        }
+                        ("td" | "th", false) => {
+                            let at = gathered.at;
+                            if let (Some(cell), Some(row)) =
+                                (gathered.cell.take(), gathered.rows.last_mut())
+                                && let Some(place) = row.get_mut(at)
+                            {
+                                *place = cell.trim().to_owned();
+                            }
+                        }
+                        ("br", _) => {
+                            if let Some(cell) = &mut gathered.cell {
+                                cell.push('\n');
+                            }
+                        }
+                        ("p" | "div", false) => {
+                            if let Some(cell) =
+                                gathered.cell.as_mut().filter(|cell| !cell.is_empty())
+                            {
+                                cell.push('\n');
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Token::CharacterTokens(text) if !gathered.hidden && gathered.depth == 1 => {
+                    if let Some(cell) = &mut gathered.cell {
+                        // Blanks in a page's text are one blank.
+                        let mut blank = cell.ends_with([' ', '\n']) || cell.is_empty();
+                        for c in text.chars() {
+                            if c.is_whitespace() && c != '\u{a0}' {
+                                if !blank {
+                                    cell.push(' ');
+                                }
+                                blank = true;
+                            } else {
+                                cell.push(if c == '\u{a0}' { ' ' } else { c });
+                                blank = false;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            TokenSinkResult::Continue
+        }
+    }
+
+    if !html.contains("<table") && !html.contains("<TABLE") {
+        return None;
+    }
+    let queue = BufferQueue::default();
+    queue.push_back(StrTendril::from_slice(html));
+    let tokenizer = Tokenizer::new(Sink(RefCell::default()), TokenizerOpts::default());
+    let _ = tokenizer.feed(&queue);
+    tokenizer.end();
+    let gathered = tokenizer.sink.0.take();
+    let mut rows: Vec<Vec<String>> = gathered
+        .rows
+        .into_iter()
+        .filter(|row| !row.is_empty())
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| cell.trim_end().to_owned())
+                .collect()
+        })
+        .collect();
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    for row in &mut rows {
+        row.resize(width, String::new());
+    }
+    let cells = width * rows.len();
+    (!gathered.refused && cells >= 2 && width <= MOST && rows.len() <= MOST).then_some(rows)
+}
+
 /// Whether `cell` is a number, as a spreadsheet writes one: digits,
 /// with a sign, a decimal point or comma, thousands apart, a percent
 /// sign or a currency before or behind.
@@ -619,7 +764,9 @@ impl<'a> Shape<'a> {
         }
         let header = self.header_rows();
         if (row < header) != (other < header) {
-            return Err("the header stays above the rows (gH makes a row the header or not)");
+            return Err(
+                "the header stays above the rows (]h [h make the first row the header or not)",
+            );
         }
         let (high, low) = (row.min(other), row.max(other));
         let span = |row: usize| {
@@ -1175,6 +1322,31 @@ mod tests {
         assert_eq!(
             cells_in(&table.as_cells(), false),
             Some(grid(&[&["Name", "Say"], &["#1", "a b"], &["x y", ""]]))
+        );
+    }
+
+    #[test]
+    fn a_table_of_a_web_page_is_read_cell_by_cell() {
+        let html = "<meta charset=utf-8><style>td { color: red }</style><table>\
+            <thead><tr><th>Name</th><th>Price &amp; tax</th></tr></thead>\
+            <tbody><tr><td>A&nbsp;B</td><td>\n  1,50\n</td></tr>\
+            <tr><td colspan=\"2\">both<br>lines</td></tr></tbody></table><table><tr><td>no</td></tr></table>";
+        assert_eq!(
+            cells_in_html(html),
+            Some(grid(&[
+                &["Name", "Price & tax"],
+                &["A B", "1,50"],
+                &["both\nlines", ""]
+            ]))
+        );
+        assert_eq!(cells_in_html("<p>no table</p>"), None);
+        assert_eq!(
+            cells_in_html("<table><tr><td rowspan=2>a</td><td>b</td></tr></table>"),
+            None
+        );
+        assert_eq!(
+            cells_in_html("<table><tr><td><table><tr><td>a</td></tr></table></td></tr></table>"),
+            None
         );
     }
 }

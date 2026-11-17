@@ -482,13 +482,13 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("table row delete"),
     ),
     (
-        "table: the first row its header, or not",
-        "gH  :table header",
+        "table: the first row its header, or a row again",
+        "]h  [h  :table header",
         Does::Run("table header"),
     ),
     (
         "table: copy it as cells, for a spreadsheet",
-        "gY  :table copy",
+        "]y  :table copy",
         Does::Run("table copy"),
     ),
     (

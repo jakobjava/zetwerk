@@ -6,7 +6,8 @@
 //! above or left), as the engine's tables say: `]r` `[r` a row below or
 //! above, `]c` `[c` a column right or left, `]R` `[R` the row moved
 //! down or up, `]C` `[C` the column moved right or left, `]x` `[x` the
-//! row taken out, `]X` `[X` the column; `gH` the header, `gY` the copy.
+//! row taken out, `]X` `[X` the column; `]h` the first row the header,
+//! `[h` the header a row again; `]y` (or `[y`) the copy.
 //! Each is a command too (`:table row add below`, …, see
 //! [`Viewer::shape_command`]) and one step for undo, after which the
 //! cursor is in the cell it was in, where that has gone the one next
@@ -31,7 +32,7 @@ const NOT_CELLS: &str = "this table has more to it than cells (a cell over sever
 impl Viewer {
     /// The table the cursor is in, where it is one that can be shaped:
     /// where it begins, and the cell of the cursor. `Err` says why not.
-    fn table_here(&self) -> Result<(usize, usize), &'static str> {
+    pub(super) fn table_here(&self) -> Result<(usize, usize), &'static str> {
         let editor = self.editor.as_ref().ok_or("no file is being edited")?;
         let (source, cursor) = (editor.source(), editor.cursor());
         // The cursor stands on a character of a cell: behind its start.
@@ -60,13 +61,14 @@ impl Viewer {
     /// `:table` with what this module does: `row add [below|above]`,
     /// `row delete [above]`, `row move up|down`, `column add
     /// [right|left]`, `column delete [left]`, `column move right|left`,
-    /// `header`, `copy`. Whether `what` was one of them.
+    /// `header [on|off]`, `copy`. Whether `what` was one of them.
     pub(super) fn shape_command(&mut self, what: &str) -> bool {
         let words: Vec<&str> = what.split_whitespace().collect();
         let (thing, rest) = match words.as_slice() {
             ["row" | "rows", rest @ ..] if !rest.is_empty() => ("row", rest),
             ["column" | "col" | "columns", rest @ ..] if !rest.is_empty() => ("column", rest),
-            ["header" | "copy" | "cells" | "tsv"] => (words[0], &[][..]),
+            ["header", rest @ ..] => ("header", rest),
+            ["copy" | "cells" | "tsv"] => (words[0], &[][..]),
             _ => return false,
         };
         let known = matches!(
@@ -83,7 +85,8 @@ impl Viewer {
                     ["delete" | "remove"] | ["delete" | "remove", "left"]
                 )
                 | ("column", ["move", "right" | "left"] | ["right" | "left"])
-                | ("header" | "copy" | "cells" | "tsv", [])
+                | ("header", [] | ["on" | "off"])
+                | ("copy" | "cells" | "tsv", [])
         );
         if !known {
             return false;
@@ -143,7 +146,12 @@ impl Viewer {
                 format!("the column moved {last}"),
             ),
             ("header", _) => {
-                let told = if shape.table.header > 0 {
+                let has = shape.table.header > 0;
+                if (last == "on" && has) || (last == "off" && !has) {
+                    let now = if has { "has a header" } else { "has no header" };
+                    return Err(format!("the table {now} already ([h ]h switch it)"));
+                }
+                let told = if has {
                     "the header is a row like the others"
                 } else {
                     "the first row is the header"
@@ -201,7 +209,7 @@ impl Viewer {
         }
     }
 
-    /// `gY`: `cells` of a table into the clipboard, for a spreadsheet;
+    /// `]y`: `cells` of a table into the clipboard, for a spreadsheet;
     /// into the register `"+` too.
     fn copy_cells(&mut self, cells: &str, rows: usize, columns: usize) {
         let written = (self.clipboard.write)(cells);

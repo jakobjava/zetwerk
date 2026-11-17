@@ -1765,8 +1765,11 @@ impl Engine {
                     Key::Char('i') if !press.ctrl => "invisible",
                     // And to shape the table the cursor is in: a row, a
                     // column more below or right (`]`), above or left
-                    // (`[`); this one moved; this one taken out.
-                    Key::Char(c @ ('r' | 'c' | 'R' | 'C' | 'x' | 'X')) if !press.ctrl => {
+                    // (`[`); this one moved; this one taken out; the
+                    // first row the header or not; the table copied.
+                    Key::Char(c @ ('r' | 'c' | 'R' | 'C' | 'x' | 'X' | 'h' | 'y'))
+                        if !press.ctrl =>
+                    {
                         let command = follow::table_key(c, forward);
                         self.effects.push(Effect::Command(command.to_owned()));
                         return;
@@ -2304,16 +2307,6 @@ impl Engine {
             // Nor Vim's `gF`: the host's list of the figures and tables.
             'F' if self.pending.is_idle() && !self.selecting() => {
                 self.effects.push(Effect::Command("figures".to_owned()));
-            }
-            // Nor Vim's `gH` and `gY`: the first row of the host's table
-            // its header or not, the table copied as cells.
-            'H' | 'Y' if self.pending.is_idle() && !self.selecting() => {
-                let command = if c == 'H' {
-                    "table header"
-                } else {
-                    "table copy"
-                };
-                self.effects.push(Effect::Command(command.to_owned()));
             }
             // To where the name under the cursor is defined, as far as
             // the host can tell; and the host's list of places to go.

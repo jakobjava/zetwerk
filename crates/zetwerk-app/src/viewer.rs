@@ -26,6 +26,7 @@ mod manager;
 mod margin;
 pub mod notes;
 mod palette;
+mod paste;
 mod pointer;
 pub mod refer;
 mod refused;
@@ -902,6 +903,8 @@ pub struct Viewer {
     sources_kept: sources_look::Kept,
     /// The register `"+`, and the system clipboard it stands for.
     clipboard: registers::Clipboard,
+    /// What pasting keeps between keys (see [`paste`]).
+    paste: paste::Paste,
     /// What is known about the spelling and grammar of the text.
     language: language::Language,
     /// The notes on the text, and what reviewing keeps (see [`notes`]).
@@ -1028,6 +1031,7 @@ impl Viewer {
             refer: refer::Refer::default(),
             sources_kept: sources_look::Kept::default(),
             clipboard: registers::Clipboard::default(),
+            paste: paste::Paste::default(),
             language: language::Language::default(),
             notes: notes::Notes::default(),
             margin: margin::Margin::default(),
@@ -1747,6 +1751,9 @@ impl Viewer {
     /// on again to where Ctrl-O came back from. On the command line it
     /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
+        if self.paste_key(press) {
+            return;
+        }
         self.message = None;
         let press = self.shift_enter(press);
         if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
@@ -2113,6 +2120,7 @@ impl Viewer {
             || self.notes_command(command)
             || self.refused_command(command)
             || self.vim_command(command)
+            || self.paste_command(command)
         {
             return;
         }

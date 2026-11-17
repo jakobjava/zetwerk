@@ -9639,6 +9639,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "hayagriva",
+ "html5ever",
+ "image",
  "notify",
  "pollster",
  "rayon",
@@ -9646,6 +9648,8 @@ dependencies = [
  "tiny-skia 0.12.0",
  "typst",
  "typst-layout",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "wgpu 30.0.1",
  "winit",
  "zetwerk-core",
