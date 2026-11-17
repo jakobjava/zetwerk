@@ -11,6 +11,7 @@ pub use zetwerk_vim::keys;
 pub mod power;
 pub mod reading;
 pub mod ref_text;
+pub mod scripts;
 pub mod sections;
 pub mod style_text;
 pub mod typst_text;

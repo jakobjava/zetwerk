@@ -31,6 +31,8 @@ pub struct Keymap {
     insert: Vec<(Vec<KeyPress>, Vec<KeyPress>)>,
     /// How long the keys of a mapping begun wait for the next.
     timeout: Duration,
+    /// How keys and input methods type (see `compose`).
+    pub(super) typing: super::Typing,
 }
 
 impl Default for Keymap {
@@ -39,6 +41,7 @@ impl Default for Keymap {
             normal: Vec::new(),
             insert: Vec::new(),
             timeout: TIMEOUT,
+            typing: super::Typing::default(),
         }
     }
 }
@@ -79,6 +82,7 @@ impl Keymap {
             normal,
             insert,
             timeout: TIMEOUT,
+            typing: super::Typing::default(),
         };
         (keymap, complaint)
     }
@@ -88,6 +92,13 @@ impl Keymap {
     #[must_use]
     pub fn with_timeout(mut self, millis: u64) -> Self {
         self.timeout = Duration::from_millis(millis);
+        self
+    }
+
+    /// The same mappings, with typing as `typing` says.
+    #[must_use]
+    pub fn with_typing(mut self, typing: super::Typing) -> Self {
+        self.typing = typing;
         self
     }
 

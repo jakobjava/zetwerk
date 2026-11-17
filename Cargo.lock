@@ -9754,6 +9754,7 @@ dependencies = [
  "proptest",
  "regex",
  "serde_json",
+ "unicode-segmentation",
 ]
 
 [[package]]

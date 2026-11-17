@@ -17,4 +17,5 @@ mod took;
 pub use engine::Following;
 pub use engine::{Edit, Effect, Engine, Format, Host, Mode, Place, Seek, Shown};
 pub use find::{Query, Reading};
+pub use text::Text;
 pub use took::Took;

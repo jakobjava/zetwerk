@@ -1,8 +1,12 @@
 //! Finding one's way around text: lines, characters, columns.
 //!
-//! All positions are byte offsets on character boundaries. A line owns the
-//! line break that ends it: in `"a\nb\n"` there are two lines, and the final
-//! break does not start a third. Empty text is one empty line.
+//! All positions are byte offsets on character boundaries; the cursor
+//! steps by what a reader takes for one character (see [`Text::next`]).
+//! A line owns the line break that ends it: in `"a\nb\n"` there are two
+//! lines, and the final break does not start a third. Empty text is one
+//! empty line.
+
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 /// How wide a tab stop is when counting screen columns.
 const TAB_WIDTH: usize = 8;
@@ -16,22 +20,71 @@ impl<'a> Text<'a> {
         self.0.len()
     }
 
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+
     /// The character starting at `pos`, if `pos` is inside the text.
     pub fn char_at(self, pos: usize) -> Option<char> {
         self.0.get(pos..)?.chars().next()
     }
 
-    /// The position after the character at `pos`.
+    /// The position after the character at `pos`. A character is what a
+    /// reader takes for one (a grapheme cluster): a letter with the marks
+    /// set on it, an emoji with its skin tone, a flag. Line breaks are
+    /// characters of their own, `\r` of `\r\n` too.
     pub fn next(self, pos: usize) -> usize {
-        self.char_at(pos).map_or(self.len(), |c| pos + c.len_utf8())
+        let Some(c) = self.char_at(pos) else {
+            return self.len();
+        };
+        let after = pos + c.len_utf8();
+        // Nothing joins a line break, nor two plain letters.
+        let plain = |at: usize| self.0.as_bytes().get(at).is_none_or(u8::is_ascii);
+        if matches!(c, '\n' | '\r') || (c.is_ascii() && plain(after)) {
+            return after;
+        }
+        let mut cursor = GraphemeCursor::new(pos, self.len(), true);
+        match cursor.next_boundary(self.0, 0) {
+            Ok(Some(end)) => end,
+            _ => after,
+        }
     }
 
     /// The start of the character before `pos`; `pos` itself at the start.
+    /// See [`Text::next`] for what a character is.
     pub fn prev(self, pos: usize) -> usize {
-        self.0
+        let Some(c) = self
+            .0
             .get(..pos)
             .and_then(|before| before.chars().next_back())
-            .map_or(pos, |c| pos - c.len_utf8())
+        else {
+            return pos;
+        };
+        let start = pos - c.len_utf8();
+        let plain = |at: usize| self.0.as_bytes().get(at).is_none_or(u8::is_ascii);
+        // A plain letter after another (or first) and before one is a
+        // character by itself.
+        let plain_before = start == 0 || plain(start - 1);
+        if matches!(c, '\n' | '\r') || (c.is_ascii() && plain_before && plain(pos)) {
+            return start;
+        }
+        let mut cursor = GraphemeCursor::new(pos, self.len(), true);
+        match cursor.prev_boundary(self.0, 0) {
+            Ok(Some(begin)) => begin,
+            _ => start,
+        }
+    }
+
+    /// `range` made to begin and end between characters (see
+    /// [`Text::next`]): a glyph of a page may show only part of one, where
+    /// its font has no glyph for the whole. An empty range stays as it is.
+    pub fn whole(self, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        if range.is_empty() || range.end > self.len() {
+            return range;
+        }
+        let start = self.prev(self.next(range.start)).min(range.start);
+        let end = self.next(self.prev(range.end)).max(range.end);
+        start..end
     }
 
     /// The start of the line containing `pos`.
@@ -128,13 +181,20 @@ impl<'a> Text<'a> {
         }
     }
 
-    /// The screen column of `pos` within its line, counting from 0.
+    /// The screen column of `pos` within its line, counting from 0. A
+    /// character (see [`Text::next`]) is one column, a tab up to the next
+    /// stop.
     pub fn column(self, pos: usize) -> usize {
         let start = self.line_start(pos);
         let before = self.0.get(start..pos).unwrap_or("");
+        if before.is_ascii() {
+            return before
+                .chars()
+                .fold(0, |column, c| column + width(c, column));
+        }
         before
-            .chars()
-            .fold(0, |column, c| column + width(c, column))
+            .graphemes(true)
+            .fold(0, |column, cluster| column + cluster_width(cluster, column))
     }
 
     /// The position in the line starting at `line_start` that covers screen
@@ -142,8 +202,8 @@ impl<'a> Text<'a> {
     pub fn at_column(self, line_start: usize, column: usize) -> usize {
         let line = self.line_text(line_start);
         let mut at = 0;
-        for (offset, c) in line.char_indices() {
-            let next = at + width(c, at);
+        for (offset, cluster) in line.grapheme_indices(true) {
+            let next = at + cluster_width(cluster, at);
             if column < next {
                 return line_start + offset;
             }
@@ -159,6 +219,23 @@ fn width(c: char, column: usize) -> usize {
     } else {
         1
     }
+}
+
+fn cluster_width(cluster: &str, column: usize) -> usize {
+    cluster.chars().next().map_or(0, |c| width(c, column))
+}
+
+/// Whether `c` is a mark set on the letter before it: an accent written
+/// apart (U+0301), as some keyboards and input methods type them.
+pub fn is_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{300}'..='\u{36f}'
+            | '\u{1ab0}'..='\u{1aff}'
+            | '\u{1dc0}'..='\u{1dff}'
+            | '\u{20d0}'..='\u{20ff}'
+            | '\u{fe20}'..='\u{fe2f}'
+    )
 }
 
 /// What kind of character something is, for word motions.
@@ -178,7 +255,8 @@ pub fn class(c: char, big: bool) -> Class {
     match c {
         '\n' => Class::LineBreak,
         ' ' | '\t' => Class::Blank,
-        _ if big || c.is_alphanumeric() || c == '_' => Class::Word,
+        // A mark set on a letter is of the letter's word.
+        _ if big || c.is_alphanumeric() || c == '_' || is_mark(c) => Class::Word,
         _ => Class::Punctuation,
     }
 }
@@ -247,5 +325,43 @@ mod tests {
         assert_eq!(class('-', false), Class::Punctuation);
         assert_eq!(class('-', true), Class::Word);
         assert_eq!(class('\t', true), Class::Blank);
+        // An accent written apart is of the word of its letter.
+        assert_eq!(class('\u{301}', false), Class::Word);
+    }
+
+    #[test]
+    fn a_character_is_what_a_reader_takes_for_one() {
+        // A letter with an accent written apart, an emoji with a skin
+        // tone, a flag, a family joined by joiners: one step each.
+        let text =
+            Text("e\u{301}x\u{1f44d}\u{1f3fd}\u{1f1e9}\u{1f1ea}\u{1f468}\u{200d}\u{1f469}!\n");
+        let mut stops = vec![0];
+        while *stops.last().unwrap_or(&0) < text.len() {
+            stops.push(text.next(*stops.last().unwrap_or(&0)));
+        }
+        assert_eq!(stops, vec![0, 3, 4, 12, 20, 31, 32, 33]);
+        let mut back = vec![text.len()];
+        while *back.last().unwrap_or(&0) > 0 {
+            back.push(text.prev(*back.last().unwrap_or(&0)));
+        }
+        back.reverse();
+        assert_eq!(back, stops);
+        // One column each, and a column finds the whole of it.
+        assert_eq!(
+            (text.column(3), text.column(12), text.column(31)),
+            (1, 3, 5)
+        );
+        assert_eq!((text.at_column(0, 1), text.at_column(0, 3)), (3, 12));
+        assert_eq!(text.line_last(0), 31);
+        // What shows part of one is made to take all of it.
+        assert_eq!((text.whole(4..8), text.whole(8..12)), (4..12, 4..12));
+        assert_eq!((text.whole(0..1), text.whole(3..4)), (0..3, 3..4));
+        assert_eq!(text.whole(5..5), 5..5);
+        // A line break stays a character of its own, also after `\r`.
+        let crlf = Text("a\r\nb");
+        assert_eq!(
+            (crlf.next(1), crlf.next(2), crlf.prev(4), crlf.prev(3)),
+            (2, 3, 3, 2)
+        );
     }
 }

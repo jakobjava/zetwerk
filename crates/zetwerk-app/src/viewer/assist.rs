@@ -859,7 +859,12 @@ impl Viewer {
                 .take(LIST_ROWS)
                 .map(|item| columns(&picker.items[*item].0))
                 .collect();
-            let title = format!("{}: {}\u{2588}", picker.title, picker.query);
+            let title = format!(
+                "{}: {}{}\u{2588}",
+                picker.title,
+                picker.query,
+                self.composed_inline()
+            );
             let chosen = picker.chosen.saturating_sub(first);
             let markup = chrome::list_markup(Some(&title), &rows, chosen, None);
             // In the middle, a third of the way down; where the window is

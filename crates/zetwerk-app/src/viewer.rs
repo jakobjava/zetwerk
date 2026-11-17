@@ -11,6 +11,7 @@ mod aids;
 mod assist;
 mod buffers;
 mod cells;
+mod compose;
 pub mod export;
 mod figures;
 mod find;
@@ -67,6 +68,7 @@ use zetwerk_typst::{CompileOutput, Environment, PageLines, PageMap, Project, Pro
 use zetwerk_vim::{Effect, Seek, Shown as ShownLine};
 
 use self::agent::{AgentEdits, Mark, Proposal};
+pub use self::compose::Typing;
 pub use self::keymap::Keymap;
 pub use self::language::{Check, Issue, Report};
 pub use self::slides::Paging;
@@ -834,6 +836,8 @@ pub struct Viewer {
     mapping: keymap::Waiting,
     /// What Vim's keys that the window carries out keep (see `vim`).
     vim: vim::Vim,
+    /// What is being composed and is not yet typed (see [`compose`]).
+    compose: compose::Compose,
     /// The revision that document was compiled from. Differs from
     /// `compiled_revision` while the newest text has errors.
     document_revision: Option<u64>,
@@ -987,6 +991,7 @@ impl Viewer {
             typed: Vec::new(),
             mapping: keymap::Waiting::default(),
             vim: vim::Vim::default(),
+            compose: compose::Compose::default(),
             document_revision: None,
             predicted: None,
             changed: None,
@@ -1748,6 +1753,9 @@ impl Viewer {
     fn plain_key(&mut self, press: KeyPress) {
         self.message = None;
         let press = self.shift_enter(press);
+        let Some(press) = self.compose_key(press) else {
+            return;
+        };
         if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
             return;
         }
@@ -1921,6 +1929,10 @@ impl Viewer {
     /// last compile is plain text typed into one line of a paragraph.
     /// Returns whether the pages show the current text afterwards.
     fn predict(&mut self) -> bool {
+        // Text typed at once is worked out once, at its last key.
+        if self.compose.burst {
+            return false;
+        }
         if let Some(old) = self.predicted.take() {
             self.planned.retain(|(index, _, _), _| *index != old.index);
         }
@@ -2112,6 +2124,7 @@ impl Viewer {
             || self.notes_command(command)
             || self.refused_command(command)
             || self.vim_command(command)
+            || self.compose_command(command)
         {
             return;
         }
@@ -2308,6 +2321,7 @@ impl Viewer {
         // Drawn after the pages: a page zoomed wider than its pane must
         // not reach over the source.
         self.source_pane(&mut scene, has);
+        self.composed_overlays(&mut scene, has);
         self.status_line(&mut scene, has);
         if self.performance_panel {
             self.performance(&mut scene, has);
@@ -2866,8 +2880,12 @@ impl Viewer {
         };
         let typed = editing.and_then(|editing| Some((editing.prompt, editing.command.as_ref()?)));
         let command = match (&self.mode, typed) {
-            (_, Some((prompt, text))) => Some(format!("{prompt}{text}\u{2588}")),
-            (Mode::Command(text), None) => Some(format!(":{text}\u{2588}")),
+            (_, Some((prompt, text))) => {
+                Some(format!("{prompt}{text}{}\u{2588}", self.composed_inline()))
+            }
+            (Mode::Command(text), None) => {
+                Some(format!(":{text}{}\u{2588}", self.composed_inline()))
+            }
             _ => None,
         };
         let modified = state
@@ -3228,6 +3246,7 @@ mod tests {
     use super::*;
     use crate::keys;
 
+    mod compose;
     mod cursor;
     mod equations;
     mod errors;

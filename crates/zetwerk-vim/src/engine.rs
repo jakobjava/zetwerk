@@ -748,6 +748,16 @@ impl Engine {
         self.pending.operator.is_some() || self.pending.awaiting != Awaiting::Nothing
     }
 
+    /// Whether the next key is a character of the text rather than a
+    /// command: what `f` and `t` look for, what `r` puts in.
+    #[must_use]
+    pub fn awaits_char(&self) -> bool {
+        matches!(
+            self.pending.awaiting,
+            Awaiting::Find { .. } | Awaiting::Replace
+        )
+    }
+
     /// Whether an operator is waiting for its motion.
     #[must_use]
     pub fn operator_pending(&self) -> bool {
