@@ -78,7 +78,10 @@ fn situation(viewer: &Viewer) -> String {
         editor.mode(),
         viewer.message.as_ref().map(|message| &message.text),
         viewer.state().problems,
-        viewer.picker.as_ref().map(|picker| picker.title()),
+        viewer
+            .picker
+            .as_ref()
+            .map(super::super::assist::Picker::title),
         &text[from..cursor],
         &text[cursor..to],
         text.split("/* tutor").next().unwrap_or(text)
@@ -88,7 +91,7 @@ fn situation(viewer: &Viewer) -> String {
 #[test]
 fn every_lesson_is_done_by_the_keys_it_names() {
     let all = lessons("en");
-    assert!(!all.is_empty());
+    assert_ne!(all.len(), 0);
     let mut failed = Vec::new();
     for (index, taught) in all.iter().enumerate() {
         let number = index + 1;
@@ -250,7 +253,10 @@ fn help_says_what_a_key_does_and_enter_does_it() {
     // `g?` is the same list.
     press(&mut viewer, "g?");
     assert_eq!(
-        viewer.picker.as_ref().map(|picker| picker.title()),
+        viewer
+            .picker
+            .as_ref()
+            .map(super::super::assist::Picker::title),
         Some("help")
     );
     press(&mut viewer, "<Esc>");

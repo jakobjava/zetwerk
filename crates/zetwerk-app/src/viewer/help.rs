@@ -1834,14 +1834,13 @@ impl Viewer {
                 Some((rank(asked, what, keys, help_on(keys))?, index))
             })
             .max_by_key(|(rank, index)| (*rank, std::cmp::Reverse(*index)));
-        match best {
-            Some((_, index)) => self.open_help(None, index),
-            None => {
-                self.open_help(None, 0);
-                self.notice(format!(
-                    "nothing is about “{asked}”: type a part of it into the list"
-                ));
-            }
+        if let Some((_, index)) = best {
+            self.open_help(None, index);
+        } else {
+            self.open_help(None, 0);
+            self.notice(format!(
+                "nothing is about “{asked}”: type a part of it into the list"
+            ));
         }
         true
     }
