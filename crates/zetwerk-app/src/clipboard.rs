@@ -579,10 +579,10 @@ pub fn copied(selection: Selection) -> Result<Copied, String> {
 
 /// What a selection offered as `types` holds for a paste, each kind read
 /// by `read` (given the kind and the most bytes to take).
-fn copied_by(
-    types: &[String],
-    read: &dyn Fn(&str, u64) -> Result<Vec<u8>, String>,
-) -> Result<Copied, String> {
+/// What reads one kind of data of a selection, at most so many bytes.
+type ReadKind<'a> = &'a dyn Fn(&str, u64) -> Result<Vec<u8>, String>;
+
+fn copied_by(types: &[String], read: ReadKind) -> Result<Copied, String> {
     let has = |kind: &str| types.iter().any(|t| t == kind);
     let mut copied = Copied {
         types: types.to_vec(),
@@ -636,15 +636,12 @@ pub fn files_in(list: &str) -> Vec<std::path::PathBuf> {
                     .get(..2)
                     .and_then(|hex| std::str::from_utf8(hex).ok())
                     .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-                match (byte, hex) {
-                    (b'%', Some(decoded)) => {
-                        bytes.push(decoded);
-                        rest = &after[2..];
-                    }
-                    _ => {
-                        bytes.push(byte);
-                        rest = after;
-                    }
+                if let (b'%', Some(decoded)) = (byte, hex) {
+                    bytes.push(decoded);
+                    rest = &after[2..];
+                } else {
+                    bytes.push(byte);
+                    rest = after;
                 }
             }
             Some(std::path::PathBuf::from(String::from_utf8(bytes).ok()?))

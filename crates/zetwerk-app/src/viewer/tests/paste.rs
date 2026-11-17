@@ -139,6 +139,10 @@ fn png(wide: u32, high: u32) -> Vec<u8> {
 }
 
 /// A clipboard that holds a small screenshot.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "it stands for a read that can fail"
+)]
 fn screenshot(_: crate::clipboard::Selection) -> Result<Copied, String> {
     Ok(Copied {
         types: vec!["image/png".to_owned()],
@@ -207,6 +211,10 @@ fn an_image_on_the_clipboard_becomes_a_figure_whose_caption_is_typed() {
 /// The number of the last change of a test's clipboard.
 static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "it stands for news that can be none"
+)]
 fn news() -> Option<News> {
     Some(News {
         serial: SERIAL.load(std::sync::atomic::Ordering::Relaxed),
@@ -303,6 +311,9 @@ fn cells_pasted_into_a_table_fill_it_from_the_cursor_on() {
     let _ = std::fs::remove_dir_all(directory2);
 }
 
+/// The files a test's clipboard holds.
+static FILES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 #[test]
 fn files_copied_are_figures_copied_in_or_named_where_they_are() {
     let (mut viewer, directory) = editing("Text.\n");
@@ -313,7 +324,6 @@ fn files_copied_are_figures_copied_in_or_named_where_they_are() {
     .unwrap();
     // As a file manager copies them: an image beside the document is
     // named where it is; what is no image is passed over.
-    static FILES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     *FILES.lock().unwrap() = vec![
         std::env::temp_dir().join("zetwerk-not-there.pdf"),
         directory.join("figures.svg"),

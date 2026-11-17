@@ -29,6 +29,36 @@ const NOT_CELLS: &str = "this table has more to it than cells (a cell over sever
                          line, a footer, …): it is not changed from the page; gs shows how it \
                          is written";
 
+/// The commands of this module, as `shape_command` has them.
+const KNOWN: &[&str] = &[
+    "row add",
+    "row add below",
+    "row add above",
+    "row delete",
+    "row remove",
+    "row delete above",
+    "row remove above",
+    "row move up",
+    "row move down",
+    "row up",
+    "row down",
+    "column add",
+    "column add right",
+    "column add left",
+    "column delete",
+    "column remove",
+    "column delete left",
+    "column remove left",
+    "column move right",
+    "column move left",
+    "column right",
+    "column left",
+    "header",
+    "header on",
+    "header off",
+    "copy",
+];
+
 impl Viewer {
     /// The table the cursor is in, where it is one that can be shaped:
     /// where it begins, and the cell of the cursor. `Err` says why not.
@@ -68,27 +98,11 @@ impl Viewer {
             ["row" | "rows", rest @ ..] if !rest.is_empty() => ("row", rest),
             ["column" | "col" | "columns", rest @ ..] if !rest.is_empty() => ("column", rest),
             ["header", rest @ ..] => ("header", rest),
-            ["copy" | "cells" | "tsv"] => (words[0], &[][..]),
+            ["copy" | "cells" | "tsv"] => ("copy", &[][..]),
             _ => return false,
         };
-        let known = matches!(
-            (thing, rest),
-            ("row", ["add"] | ["add", "below" | "above"])
-                | (
-                    "row",
-                    ["delete" | "remove"] | ["delete" | "remove", "above"]
-                )
-                | ("row", ["move", "up" | "down"] | ["up" | "down"])
-                | ("column", ["add"] | ["add", "right" | "left"])
-                | (
-                    "column",
-                    ["delete" | "remove"] | ["delete" | "remove", "left"]
-                )
-                | ("column", ["move", "right" | "left"] | ["right" | "left"])
-                | ("header", [] | ["on" | "off"])
-                | ("copy" | "cells" | "tsv", [])
-        );
-        if !known {
+        let said = format!("{thing} {}", rest.join(" "));
+        if !KNOWN.contains(&said.trim()) {
             return false;
         }
         if let Err(why) = self.shape(thing, rest) {
@@ -166,13 +180,13 @@ impl Viewer {
             }
         };
         let shaped = shaped.ok_or("that cannot be done to this table: it is all it has")?;
-        self.reshape(start, shaped, &told)
+        self.reshape(start, &shaped, &told)
     }
 
     /// Makes the changes of `shaped` to the table that begins at byte
     /// `start` as one step, puts the cursor into its cell and tells of
     /// it.
-    fn reshape(&mut self, start: usize, shaped: Shaped, told: &str) -> Result<(), String> {
+    fn reshape(&mut self, start: usize, shaped: &Shaped, told: &str) -> Result<(), String> {
         let editor = self.editor.as_mut().ok_or("no file is being edited")?;
         let edits: Vec<(std::ops::Range<usize>, &str)> = shaped
             .edits

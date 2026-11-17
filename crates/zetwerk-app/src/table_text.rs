@@ -10,6 +10,7 @@
 //! between square brackets, a header of such cells, named arguments);
 //! one with a cell over several columns, a line or a footer is not.
 
+use std::fmt::Write as _;
 use std::ops::Range;
 
 use typst::syntax::{LinkedNode, Source, SyntaxKind};
@@ -107,6 +108,116 @@ pub fn cells_in(text: &str, commas: bool) -> Option<Vec<Vec<String>>> {
     ((commas || (rows.len() >= 2 && same)) && even(&rows)).then_some(rows)
 }
 
+/// What is gathered of a web page's table as its tokens come (see
+/// [`cells_in_html`]).
+#[derive(Default)]
+struct Gathered {
+    /// How deep in tables, and whether the first is over.
+    depth: usize,
+    done: bool,
+    rows: Vec<Vec<String>>,
+    cell: Option<String>,
+    /// Where in its row the cell being read is.
+    at: usize,
+    /// In a `style` or `script`, whose text is no cell's.
+    hidden: bool,
+    refused: bool,
+}
+
+/// What takes the tokens.
+struct Sink(std::cell::RefCell<Gathered>);
+
+impl html5ever::tokenizer::TokenSink for Sink {
+    type Handle = ();
+
+    fn process_token(
+        &self,
+        token: html5ever::tokenizer::Token,
+        _: u64,
+    ) -> html5ever::tokenizer::TokenSinkResult<()> {
+        use html5ever::tokenizer::{TagKind, Token, TokenSinkResult};
+        let mut gathered = self.0.borrow_mut();
+        let gathered = &mut *gathered;
+        match token {
+            Token::TagToken(tag) => {
+                let start = tag.kind == TagKind::StartTag;
+                let span = |name: &str| {
+                    tag.attrs
+                        .iter()
+                        .find(|attr| &*attr.name.local == name)
+                        .and_then(|attr| attr.value.trim().parse::<usize>().ok())
+                        .unwrap_or(1)
+                };
+                match (&*tag.name, start) {
+                    ("style" | "script", start) => gathered.hidden = start,
+                    _ if gathered.done => {}
+                    ("table", true) => {
+                        gathered.depth += 1;
+                        gathered.refused |= gathered.depth > 1;
+                    }
+                    ("table", false) => {
+                        gathered.depth = gathered.depth.saturating_sub(1);
+                        gathered.done = gathered.depth == 0;
+                    }
+                    _ if gathered.depth != 1 => {}
+                    ("tr", true) => gathered.rows.push(Vec::new()),
+                    ("td" | "th", true) => {
+                        if gathered.rows.is_empty() {
+                            gathered.rows.push(Vec::new());
+                        }
+                        gathered.refused |= span("rowspan") > 1;
+                        let columns = span("colspan").clamp(1, MOST);
+                        if let Some(row) = gathered.rows.last_mut() {
+                            gathered.at = row.len();
+                            row.extend(std::iter::repeat_n(String::new(), columns));
+                        }
+                        gathered.cell = Some(String::new());
+                    }
+                    ("td" | "th", false) => {
+                        let at = gathered.at;
+                        if let (Some(cell), Some(row)) =
+                            (gathered.cell.take(), gathered.rows.last_mut())
+                            && let Some(place) = row.get_mut(at)
+                        {
+                            cell.trim().clone_into(place);
+                        }
+                    }
+                    ("br", _) => {
+                        if let Some(cell) = &mut gathered.cell {
+                            cell.push('\n');
+                        }
+                    }
+                    ("p" | "div", false) => {
+                        if let Some(cell) = gathered.cell.as_mut().filter(|cell| !cell.is_empty()) {
+                            cell.push('\n');
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Token::CharacterTokens(text) if !gathered.hidden && gathered.depth == 1 => {
+                if let Some(cell) = &mut gathered.cell {
+                    // Blanks in a page's text are one blank.
+                    let mut blank = cell.ends_with([' ', '\n']) || cell.is_empty();
+                    for c in text.chars() {
+                        if c.is_whitespace() && c != '\u{a0}' {
+                            if !blank {
+                                cell.push(' ');
+                            }
+                            blank = true;
+                        } else {
+                            cell.push(if c == '\u{a0}' { ' ' } else { c });
+                            blank = false;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        TokenSinkResult::Continue
+    }
+}
+
 /// What a web page's table (`text/html`, as a browser or a spreadsheet
 /// copies one) holds, row by row: the text of each cell, a line break
 /// in it kept, a cell over several columns followed by empty ones.
@@ -115,122 +226,17 @@ pub fn cells_in(text: &str, commas: bool) -> Option<Vec<Vec<String>>> {
 #[must_use]
 pub fn cells_in_html(html: &str) -> Option<Vec<Vec<String>>> {
     use html5ever::tendril::StrTendril;
-    use html5ever::tokenizer::{
-        BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
-    };
-    use std::cell::RefCell;
-
-    /// What is gathered as the tokens come.
-    #[derive(Default)]
-    struct Gathered {
-        /// How deep in tables, and whether the first is over.
-        depth: usize,
-        done: bool,
-        rows: Vec<Vec<String>>,
-        cell: Option<String>,
-        /// Where in its row the cell being read is.
-        at: usize,
-        /// In a `style` or `script`, whose text is no cell's.
-        hidden: bool,
-        refused: bool,
-    }
-
-    struct Sink(RefCell<Gathered>);
-
-    impl TokenSink for Sink {
-        type Handle = ();
-
-        fn process_token(&self, token: Token, _: u64) -> TokenSinkResult<()> {
-            let mut gathered = self.0.borrow_mut();
-            let gathered = &mut *gathered;
-            match token {
-                Token::TagToken(tag) => {
-                    let start = tag.kind == TagKind::StartTag;
-                    let span = |name: &str| {
-                        tag.attrs
-                            .iter()
-                            .find(|attr| &*attr.name.local == name)
-                            .and_then(|attr| attr.value.trim().parse::<usize>().ok())
-                            .unwrap_or(1)
-                    };
-                    match (&*tag.name, start) {
-                        ("style" | "script", start) => gathered.hidden = start,
-                        _ if gathered.done => {}
-                        ("table", true) => {
-                            gathered.depth += 1;
-                            gathered.refused |= gathered.depth > 1;
-                        }
-                        ("table", false) => {
-                            gathered.depth = gathered.depth.saturating_sub(1);
-                            gathered.done = gathered.depth == 0;
-                        }
-                        _ if gathered.depth != 1 => {}
-                        ("tr", true) => gathered.rows.push(Vec::new()),
-                        ("td" | "th", true) => {
-                            if gathered.rows.is_empty() {
-                                gathered.rows.push(Vec::new());
-                            }
-                            gathered.refused |= span("rowspan") > 1;
-                            let columns = span("colspan").clamp(1, MOST);
-                            if let Some(row) = gathered.rows.last_mut() {
-                                gathered.at = row.len();
-                                row.extend(std::iter::repeat_n(String::new(), columns));
-                            }
-                            gathered.cell = Some(String::new());
-                        }
-                        ("td" | "th", false) => {
-                            let at = gathered.at;
-                            if let (Some(cell), Some(row)) =
-                                (gathered.cell.take(), gathered.rows.last_mut())
-                                && let Some(place) = row.get_mut(at)
-                            {
-                                *place = cell.trim().to_owned();
-                            }
-                        }
-                        ("br", _) => {
-                            if let Some(cell) = &mut gathered.cell {
-                                cell.push('\n');
-                            }
-                        }
-                        ("p" | "div", false) => {
-                            if let Some(cell) =
-                                gathered.cell.as_mut().filter(|cell| !cell.is_empty())
-                            {
-                                cell.push('\n');
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Token::CharacterTokens(text) if !gathered.hidden && gathered.depth == 1 => {
-                    if let Some(cell) = &mut gathered.cell {
-                        // Blanks in a page's text are one blank.
-                        let mut blank = cell.ends_with([' ', '\n']) || cell.is_empty();
-                        for c in text.chars() {
-                            if c.is_whitespace() && c != '\u{a0}' {
-                                if !blank {
-                                    cell.push(' ');
-                                }
-                                blank = true;
-                            } else {
-                                cell.push(if c == '\u{a0}' { ' ' } else { c });
-                                blank = false;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            TokenSinkResult::Continue
-        }
-    }
+    use html5ever::tokenizer::{BufferQueue, Tokenizer, TokenizerOpts};
 
     if !html.contains("<table") && !html.contains("<TABLE") {
         return None;
     }
     let queue = BufferQueue::default();
     queue.push_back(StrTendril::from_slice(html));
-    let tokenizer = Tokenizer::new(Sink(RefCell::default()), TokenizerOpts::default());
+    let tokenizer = Tokenizer::new(
+        Sink(std::cell::RefCell::default()),
+        TokenizerOpts::default(),
+    );
     let _ = tokenizer.feed(&queue);
     tokenizer.end();
     let gathered = tokenizer.sink.0.take();
@@ -387,13 +393,13 @@ pub fn new_table(grid: &[Vec<String>]) -> (String, usize) {
             .iter()
             .map(|number| if *number { "right" } else { "left" })
             .collect();
-        text.push_str(&format!("    align: ({}),\n", align.join(", ")));
+        let _ = writeln!(text, "    align: ({}),", align.join(", "));
     }
     for (index, row) in grid.iter().enumerate() {
         if index == 0 && header {
-            text.push_str(&format!("    table.header({}),\n", cells(row)));
+            let _ = writeln!(text, "    table.header({}),", cells(row));
         } else {
-            text.push_str(&format!("    {},\n", cells(row)));
+            let _ = writeln!(text, "    {},", cells(row));
         }
     }
     text.push_str("  ),\n  caption: [");
@@ -737,7 +743,7 @@ impl<'a> Shape<'a> {
         }
         match (&self.columns.count, &self.columns.widths) {
             (Some(written), _) => {
-                edits.push((written.clone(), (self.table.columns - 1).to_string()))
+                edits.push((written.clone(), (self.table.columns - 1).to_string()));
             }
             (None, Some(widths)) => edits.extend(item_removed(widths, column)),
             (None, None) => return None,
@@ -975,7 +981,12 @@ mod tests {
 
     #[test]
     fn cells_are_read_as_a_spreadsheet_writes_them() {
-        let cases: &[(&str, bool, Option<&[&[&str]]>)] = &[
+        type Case = (
+            &'static str,
+            bool,
+            Option<&'static [&'static [&'static str]]>,
+        );
+        let cases: &[Case] = &[
             ("a\tb\nc\td\n", false, Some(&[&["a", "b"], &["c", "d"]])),
             // Windows line ends, an empty cell, the last row short.
             (
@@ -1134,6 +1145,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, reason = "a table of cases")]
     fn tables_are_shaped_cell_by_cell() {
         type Case = (
             &'static str,

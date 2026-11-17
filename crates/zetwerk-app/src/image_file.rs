@@ -109,7 +109,7 @@ pub fn images_folder(text: &str, folder: &Path) -> PathBuf {
             None => counts.push((parent.to_path_buf(), 1)),
         }
     }
-    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     counts
         .into_iter()
         .map(|(parent, _)| parent)

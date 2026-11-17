@@ -53,6 +53,7 @@ pub(super) fn asks_clipboard(clipboard: &mut Clipboard, editor: &Editor, press: 
 impl Viewer {
     /// `"+` was typed. The clipboard is not read here: only a put that
     /// follows reads it, and not on the window's thread (see `paste`).
+    #[allow(clippy::unused_self, reason = "kept for the key that calls it")]
     pub(super) fn clipboard_to_register(&mut self) {}
 
     /// Notes that the clipboard holds `text`, written there by other

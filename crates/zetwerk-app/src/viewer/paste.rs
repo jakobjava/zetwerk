@@ -107,6 +107,13 @@ struct Large {
 /// What reads a selection for a paste.
 type Reader = fn(Selection) -> Result<Copied, String>;
 
+/// What wakes the window, from any thread.
+type Wake = Arc<std::sync::Mutex<Box<dyn Fn() + Send>>>;
+
+/// Cells that wait for a yes to write over cells: of the table that
+/// begins at that byte, from that row and column on.
+type Waiting = (usize, (usize, usize), Vec<Vec<String>>);
+
 /// What pasting keeps between keys.
 pub(super) struct Paste {
     /// What reads a selection: the system's; `None` in a test, where
@@ -117,7 +124,7 @@ pub(super) struct Paste {
     /// What writes the primary selection.
     pub(super) write_primary: fn(&str) -> Result<(), String>,
     /// What wakes the window when a read is over; none in a test.
-    wake: Option<Arc<std::sync::Mutex<Box<dyn Fn() + Send>>>>,
+    wake: Option<Wake>,
     pub(super) reading: Option<Reading>,
     /// The change of the clipboard that what zetwerk yanked or deleted
     /// since is newer than.
@@ -137,7 +144,7 @@ pub(super) struct Paste {
     large: Option<Large>,
     /// Cells that wait for a yes to write over cells: of the table
     /// beginning at that byte, from that row and column.
-    cells: Option<(usize, (usize, usize), Vec<Vec<String>>)>,
+    cells: Option<Waiting>,
     /// What the primary selection was last given.
     pub(super) known_primary: Option<String>,
 }
@@ -204,10 +211,7 @@ fn block_place(
     // The paragraph's part that the cursor is in, in the nearest markup
     // that holds paragraphs.
     let mut part = leaf;
-    loop {
-        let Some(parent) = part.parent().cloned() else {
-            break;
-        };
+    while let Some(parent) = part.parent().cloned() {
         let holds = parent.kind() == SyntaxKind::Markup
             && (parent.parent().is_none()
                 || parent
@@ -239,12 +243,12 @@ fn block_place(
             .rev()
             .find(|node| node.kind() == SyntaxKind::Parbreak && node.range().start < at)
             .map_or(markup.range().start, |parbreak| parbreak.range().end);
-        let lead = if text[..start].trim().is_empty() || text[..start].ends_with('\n') {
+        let blank = if text[..start].trim().is_empty() || text[..start].ends_with('\n') {
             ""
         } else {
             "\n\n"
         };
-        return (start, lead, "\n\n");
+        return (start, blank, "\n\n");
     }
     let end = siblings[index..]
         .iter()
@@ -252,12 +256,12 @@ fn block_place(
         .map(|parbreak| parbreak.range().start)
         .or_else(|| content_end(&siblings))
         .unwrap_or(markup.range().end);
-    let lead = if text[..end].trim().is_empty() {
+    let after = if text[..end].trim().is_empty() {
         ""
     } else {
         "\n\n"
     };
-    (end, lead, "")
+    (end, after, "")
 }
 
 impl Viewer {
@@ -656,7 +660,7 @@ impl Viewer {
                     &beside,
                     file,
                     before,
-                    "it is beside the document already".to_owned(),
+                    &format!("{beside}: it is beside the document already"),
                 );
                 continue;
             }
@@ -749,25 +753,24 @@ impl Viewer {
             *written == hash
                 && std::fs::metadata(path).is_ok_and(|meta| meta.len() == bytes.len() as u64)
         });
-        let path = match again {
-            Some((_, path)) => path.clone(),
-            None => {
-                let path = image_file::free_path(&folder.join(&images), &stem, ending);
-                let written = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)
-                    .and_then(|mut file| std::io::Write::write_all(&mut file, bytes));
-                if let Err(err) = written {
-                    self.alert(format!(
-                        "the image was not written: {}: {err}",
-                        path.display()
-                    ));
-                    return;
-                }
-                self.paste.written = Some((hash, path.clone()));
-                path
+        let path = if let Some((_, path)) = again {
+            path.clone()
+        } else {
+            let path = image_file::free_path(&folder.join(&images), &stem, ending);
+            let written = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, bytes));
+            if let Err(err) = written {
+                self.alert(format!(
+                    "the image was not written: {}: {err}",
+                    path.display()
+                ));
+                return;
             }
+            self.paste.written = Some((hash, path.clone()));
+            path
         };
         let name = path
             .file_name()
@@ -782,12 +785,12 @@ impl Viewer {
             image_file::size(bytes.len())
         );
         self.file_changed(&path);
-        self.put_figure(&named, &path, before, told);
+        self.put_figure(&named, &path, before, &told);
     }
 
     /// A figure of the image file `named` (as the document names it; it
     /// is `path`) put in, its caption to be typed.
-    fn put_figure(&mut self, named: &str, path: &Path, before: bool, told: String) {
+    fn put_figure(&mut self, named: &str, path: &Path, before: bool, told: &str) {
         let call = format!("image(\"{}\")", named.replace('"', "\\\""));
         let block = format!("#figure(\n  {call},\n  caption: [],\n)");
         let caption = block
