@@ -17,7 +17,7 @@ mod more;
 mod read;
 mod shown;
 
-pub use follow::Following;
+pub use follow::{Following, keys_after};
 
 /// Columns one `>` or `<` shifts by, and the width of a typed Tab.
 const SHIFT_WIDTH: usize = 2;
@@ -1779,6 +1779,9 @@ impl Engine {
                     // Not Vim's: a proposed change shown on the page as
                     // it is, or as it would be.
                     Key::Char('p') => Some("proposal flip"),
+                    // Nor Vim's `za` (pages have no folds): the next set
+                    // of the host's aids over the page.
+                    Key::Char('a') => Some("set aids=next"),
                     _ => None,
                 };
                 if let Some(command) = spelling {

@@ -77,7 +77,7 @@ struct Choices {
 #[derive(Default)]
 pub(super) struct Language {
     /// What the user has decided; nothing is checked by default.
-    settings: Settings,
+    pub(super) settings: Settings,
     /// The thread that checks, once something was to be checked.
     service: Option<Service>,
     /// How that thread says it has an answer.
@@ -751,7 +751,7 @@ impl Viewer {
 
     /// Has the thread go by the settings as they are now, and all that
     /// was found forgotten.
-    fn reconfigure_language(&mut self) {
+    pub(super) fn reconfigure_language(&mut self) {
         self.language.forget();
         if let Some(service) = &self.language.service {
             service.configure(self.language.settings.clone());

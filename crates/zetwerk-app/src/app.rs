@@ -63,6 +63,9 @@ pub struct Options {
     pub language: zetwerk_language::Settings,
     /// Where the user's own starters for new documents are.
     pub templates: Option<PathBuf>,
+    /// What the settings file says of the options, and how to keep
+    /// what is changed (see [`crate::settings`]).
+    pub settings: crate::settings::Stored,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.

@@ -56,6 +56,29 @@ pub struct Editor {
     stepped: Option<(u64, Vec<Range<usize>>)>,
     /// What the text is read as, for searching it on the page.
     read: crate::reading::Cache,
+    /// What typing does of itself, as the user wants it.
+    rules: Rules,
+}
+
+/// What typing on a page does of itself, as the user wants it (see
+/// `viewer::set`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rules {
+    /// Whether `$` in running text begins an equation; else it is a
+    /// dollar sign.
+    pub dollar: bool,
+    /// Whether equations are tidied after keys: marks that raise nothing
+    /// go, letters typed together become a product.
+    pub tidy: bool,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            dollar: true,
+            tidy: true,
+        }
+    }
 }
 
 /// Something that shows the text in rows other than the source pane's:
@@ -121,6 +144,7 @@ impl Editor {
             top: 0,
             stepped: None,
             read: crate::reading::Cache::default(),
+            rules: Rules::default(),
         };
         Ok((editor, opened))
     }
@@ -157,6 +181,7 @@ impl Editor {
             shown_revision: before,
             read: &self.read,
             on_page: matches!(shown, Shown::Pages(_)),
+            rules: self.rules,
         };
         let length = host.document.text().len();
         let effects = self.engine.key(press, &mut host);
@@ -170,7 +195,7 @@ impl Editor {
             // Not after an undo or a redo, which bring back what was
             // there: nothing is tidied away from that or made of it, or
             // redo would lead nowhere.
-            if self.document.text().len() < length {
+            if self.document.text().len() < length && self.rules.tidy {
                 self.tidy_equation();
             }
             if !typing && self.document.revision() != before {
@@ -195,14 +220,15 @@ impl Editor {
             // The equation typing took the cursor out of: what was typed
             // last in it is over.
             let out = inside.filter(|start| typing && self.equation_inside() != Some(*start));
-            if let Some(start) = out {
+            if let Some(start) = out.filter(|_| self.rules.tidy) {
                 self.spell_out_names(Some(start));
             }
             // So is a word the cursor moved off while typing.
             let moved = typing && inside.is_some() && self.engine.cursor() != cursor;
-            if self.document.revision() != before
+            if (self.document.revision() != before
                 || typing != (self.engine.mode() == Mode::Insert)
-                || moved
+                || moved)
+                && self.rules.tidy
             {
                 self.spell_out_names(None);
             }
@@ -518,6 +544,7 @@ impl Editor {
             shown_revision: before,
             read: &self.read,
             on_page: false,
+            rules: self.rules,
         };
         self.engine.replace(&mut host, edits);
         match self.failure.take() {
@@ -535,6 +562,11 @@ impl Editor {
     /// cursor `within` bytes into it. See [`Engine::completed`].
     pub fn completed(&mut self, replaced: usize, text: String, within: usize) -> KeyPress {
         self.engine.completed(replaced, text, within)
+    }
+
+    /// Makes typing do of itself what `rules` say.
+    pub fn set_rules(&mut self, rules: Rules) {
+        self.rules = rules;
     }
 
     /// Puts the cursor at byte `offset` as a jump: `` ` ` `` leads back.
@@ -723,6 +755,7 @@ impl Editor {
             shown_revision,
             read: &self.read,
             on_page: false,
+            rules: self.rules,
         };
         ask(&mut self.engine, &host)
     }
@@ -1013,6 +1046,7 @@ impl Editor {
             shown_revision,
             read: &self.read,
             on_page: false,
+            rules: self.rules,
         };
         for key in keys.chain([press]) {
             self.engine.key(key, &mut host);
@@ -1066,6 +1100,8 @@ struct DocumentHost<'a> {
     read: &'a crate::reading::Cache,
     /// Whether the edits are made by keys on a page, not by an agent.
     on_page: bool,
+    /// What typing does of itself.
+    rules: Rules,
 }
 
 /// How often what a deletion left in an equation is cleared away: what
@@ -1172,7 +1208,15 @@ impl Host for DocumentHost<'_> {
     }
 
     fn typed(&self, at: usize, c: char) -> Option<(Range<usize>, String, usize)> {
-        crate::typst_text::typed(&self.document.buffer().0, at, c)
+        let typed = crate::typst_text::typed(&self.document.buffer().0, at, c);
+        // A dollar sign where it would begin an equation, if the user
+        // wants none begun so: one that shows as itself.
+        let begins =
+            |(range, with, _): &(Range<usize>, String, usize)| *range == (at..at) && with == "$$";
+        if c == '$' && !self.rules.dollar && typed.as_ref().is_some_and(begins) {
+            return Some((at..at, "\\$".to_owned(), 2));
+        }
+        typed
     }
 
     fn set_off(

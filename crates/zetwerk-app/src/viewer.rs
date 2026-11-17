@@ -25,12 +25,14 @@ mod local;
 mod manager;
 mod margin;
 pub mod notes;
+pub(crate) mod options;
 mod palette;
 mod pointer;
 pub mod refer;
 mod refused;
 mod registers;
 mod saving;
+mod set;
 mod slides;
 mod sources;
 mod sources_add;
@@ -927,6 +929,8 @@ pub struct Viewer {
     find: find::Find,
     /// What the window waits for (see [`waiting`]).
     waiting: waiting::Waiting,
+    /// The user's settings (see [`set`]).
+    settings: set::Settings,
     pub stats: Stats,
 }
 
@@ -1039,6 +1043,7 @@ impl Viewer {
             start: start::Start::default(),
             find: find::Find::default(),
             waiting: waiting::Waiting::default(),
+            settings: set::Settings::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1094,6 +1099,7 @@ impl Viewer {
                  gD for how it looks, g? for all there is to do",
             );
         }
+        self.configure_settings(&options.settings, options.complaint.is_some());
         if let Some(complaint) = &options.complaint {
             self.alert(complaint.clone());
         }
@@ -1408,10 +1414,9 @@ impl Viewer {
         };
         self.set_ui_scale(ui);
         self.notice(format!(
-            "interface at {:.0} %  (:ui + and :ui - change it; to keep it, \
-             ui_scale = {:.2} under [view] in config.toml)",
-            self.ui * 100.0,
-            self.ui
+            "interface at {:.0} %  (:ui + and :ui - change it; it is kept as \
+             ui_scale under [view])",
+            self.ui * 100.0
         ));
         true
     }
@@ -1748,7 +1753,11 @@ impl Viewer {
     fn plain_key(&mut self, press: KeyPress) {
         self.message = None;
         let press = self.shift_enter(press);
-        if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
+        if self.stop_key(press)
+            || self.set_key(press)
+            || self.confirm_key(press)
+            || self.cell_block_key(press)
+        {
             return;
         }
         if self.grid.is_some() {
@@ -1850,6 +1859,7 @@ impl Viewer {
                 columns: self.source_size.0,
             },
         };
+        editor.set_rules(self.settings.rules());
         let typed = editor.key(press, &shown);
         let typing = editor.mode() == editor::Mode::Insert;
         // A paragraph is one line of the source and may fill pages: the
@@ -2100,12 +2110,14 @@ impl Viewer {
     }
 
     fn execute(&mut self, command: &str) {
+        self.settings_before(command);
         if self.start_command(command) {
             return;
         }
         let unwritten = self.unwritten();
         let modified = !unwritten.is_empty();
         if self.file_command(command)
+            || self.set_command(command)
             || self.ui_command(command)
             || self.settings_command(command)
             || self.language_command(command)
@@ -2316,6 +2328,7 @@ impl Viewer {
         self.review_panels(&mut scene, has);
         self.hints(&mut scene, has);
         self.assist_panels(&mut scene, has);
+        self.settings_panel(&mut scene, has);
         self.margin_panel(&mut scene, has);
         self.refused_panel(&mut scene, has);
         scene
@@ -3238,6 +3251,7 @@ mod tests {
     mod left_behind;
     mod panels;
     mod parts;
+    mod settings;
     mod speed;
     mod typing;
     mod typist;

@@ -236,7 +236,8 @@ impl Viewer {
             || self.is_picking()
             || self.is_grid()
             || self.is_jumping()
-            || self.is_retyping();
+            || self.is_retyping()
+            || self.is_setting();
         if plain {
             self.plain_key(press);
         } else {

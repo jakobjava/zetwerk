@@ -357,6 +357,21 @@ const ALL: &[(&str, &str, Does)] = &[
     ("interface larger", ":ui +", Does::Run("ui +")),
     ("interface smaller", ":ui -", Does::Run("ui -")),
     (
+        "settings: all options — what the page shows, typing, keys, agents, …",
+        ":set",
+        Does::Run("set"),
+    ),
+    (
+        "aids on the page: quiet, writing, everything (the next)",
+        "za  :set aids=writing",
+        Does::Run("set aids=next"),
+    ),
+    (
+        "an option: on, off, switched, asked, as usual, made so",
+        ":set numbers  :set nonumbers  :set numbers!  :set numbers?  :set numbers&  :set pause=300",
+        Does::Ask("set "),
+    ),
+    (
         "document: how it looks — font, paper, page numbers, …",
         "gD",
         Does::Run("doc"),
@@ -543,7 +558,7 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("nextkeys"),
     ),
     (
-        "the rest of a word, faint behind the cursor (Tab takes it): on or off",
+        "the rest of a word, faint behind the cursor (Ctrl-Y takes it): on or off",
         ":ghost",
         Does::Run("ghost"),
     ),

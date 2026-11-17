@@ -57,7 +57,7 @@ const ABOVE: &[&str] = &["numerator", "exponent", "upper", "upper limit", "index
 /// What the aids of this module keep between frames.
 pub(super) struct Focus {
     /// Whether they are drawn (`:hints`).
-    on: bool,
+    pub(super) on: bool,
     /// What was found, and for which text, cursor and pages.
     found: Option<(Key, Found)>,
 }
@@ -452,7 +452,13 @@ impl Viewer {
                 (x0, y0, (x1 - x0).max(thin), (y1 - y0).max(thin)),
             );
         }
-        for (rect, side, word) in &marks.hints {
+        // The words only where they are wanted (see `set`).
+        let words = if self.settings.place_words {
+            marks.hints.as_slice()
+        } else {
+            &[]
+        };
+        for (rect, side, word) in words {
             let Some(image) = self.chrome.render(&hint_markup(word), zoom) else {
                 continue;
             };
