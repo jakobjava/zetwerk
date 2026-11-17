@@ -49,7 +49,7 @@ use crate::settings::{Edit, Group, Kind, Opt, Preset, Stored, Value, When, Write
 /// How many rows of the panel are shown at once.
 const ROWS: usize = 18;
 /// How wide the panel is, in points.
-const WIDTH: f64 = 340.0;
+const WIDTH: f64 = 300.0;
 /// The colours of the interface (as in `chrome`).
 const GROUND: &str = "#282828";
 const TEXT: &str = "#ebdbb2";
@@ -1528,7 +1528,7 @@ impl Viewer {
              #block(width: {WIDTH}pt)[\n\
              #text(fill: rgb(\"{ACCENT}\"), {title})\n\
              #v(2pt)\n\
-             #grid(columns: (1fr, auto, auto), column-gutter: 4pt, row-gutter: 1pt,\n{cells})\n\
+             #grid(columns: (auto, 1fr, auto), column-gutter: 12pt, row-gutter: 1pt,\n{cells})\n\
              #v(4pt)\n\
              #text(fill: rgb(\"{TEXT}\"), size: 8pt, {about})\n\
              #v(1pt)\n\
