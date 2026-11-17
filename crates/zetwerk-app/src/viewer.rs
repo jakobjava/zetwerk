@@ -4891,6 +4891,9 @@ mod tests {
     #[test]
     fn the_source_is_drawn_row_by_row() {
         let (mut viewer, directory) = editing("one\ntwo\n\nfour\n");
+        // Without the bar beside the line that changes: its colour is an
+        // image too, made once.
+        press(&mut viewer, ":changes off<CR>");
         let mut held = HashSet::new();
         let scene = viewer.scene(&|id| held.contains(&id));
         let images = scene.images.len();
