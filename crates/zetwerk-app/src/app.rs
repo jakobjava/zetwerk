@@ -63,6 +63,8 @@ pub struct Options {
     pub language: zetwerk_language::Settings,
     /// Where the user's own starters for new documents are.
     pub templates: Option<PathBuf>,
+    /// What the user has to say about showing what changed.
+    pub changes: viewer::ChangeOptions,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -435,6 +437,7 @@ impl Session {
         let mut viewer = viewer;
         viewer.wake_for_language(wake(proxy));
         viewer.wake_for_review(wake(proxy));
+        viewer.wake_for_changes(wake(proxy));
         let mut session = Self {
             window,
             env,
@@ -605,6 +608,7 @@ impl Session {
                 .map_or_else(|| path.clone(), |watcher| watcher.known_as(path))
         };
         let paths: Vec<PathBuf> = paths.iter().map(known).collect();
+        self.viewer.git_files_changed(&paths);
         for path in paths.iter().filter(|path| dependencies.contains(path)) {
             changed |= self.viewer.file_changed(path);
         }
@@ -619,6 +623,7 @@ impl Session {
             // And where another start of zetwerk says it wanted a file
             // that is open here.
             watcher.watch(&self.viewer.knocks());
+            watcher.watch(&self.viewer.git_watched());
         }
     }
 

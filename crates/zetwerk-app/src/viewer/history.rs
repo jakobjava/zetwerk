@@ -194,7 +194,7 @@ fn describe(changes: &[Change]) -> String {
 /// one the text is in, nothing for those undo leads back to, `undone`
 /// for those redo leads to, and for all others that they are on another
 /// branch.
-fn rows(history: &History) -> Vec<(String, Target)> {
+pub(super) fn rows(history: &History) -> Vec<(String, Target)> {
     let line = history.line();
     // Where on the line each state is, if it is on it.
     let mut places: Vec<Option<usize>> = vec![None; history.len()];

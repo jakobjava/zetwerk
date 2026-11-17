@@ -1763,6 +1763,9 @@ impl Engine {
                     Key::Char('n') if !press.ctrl => "notes",
                     // And to what the page shows as nothing.
                     Key::Char('i') if !press.ctrl => "invisible",
+                    // And to what changed since a version (as in Vim's diff
+                    // mode).
+                    Key::Char('v') if !press.ctrl => "changes",
                     _ => return self.fail(),
                 };
                 let way = if forward { "next" } else { "previous" };
@@ -1779,6 +1782,8 @@ impl Engine {
                     // Not Vim's: a proposed change shown on the page as
                     // it is, or as it would be.
                     Key::Char('p') => Some("proposal flip"),
+                    // And a change shown as it was.
+                    Key::Char('c') => Some("changes flip"),
                     _ => None,
                 };
                 if let Some(command) = spelling {

@@ -15,6 +15,11 @@
 //! slides = false      # one page at a time, whole
 //! ui_scale = 1.0      # how large everything that is not a page is
 //!
+//! [changes]
+//! bars = true        # a bar beside every line that changed
+//! since = "saved"     # what with: "saved", "opened", or a commit ("HEAD")
+//! git = true          # ask git for the branch and older versions
+//!
 //! [power]
 //! mode = "auto"       # or "saver", "performance"
 //!
@@ -58,6 +63,8 @@ pub struct Config {
     pub ai: Ai,
     #[serde(default)]
     pub view: View,
+    #[serde(default)]
+    pub changes: Changes,
     #[serde(default)]
     pub power: Power,
     #[serde(default)]
@@ -110,6 +117,32 @@ pub struct View {
     pub slides: bool,
     /// How many times its usual size the interface is.
     pub ui_scale: Option<f64>,
+}
+
+/// What is shown of what changed since a version.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Changes {
+    /// Whether lines that changed have a bar beside them.
+    pub bars: Option<bool>,
+    /// What the text is compared with: `saved`, `opened`, or a revision
+    /// of git.
+    pub since: Option<String>,
+    /// Whether git is asked at all.
+    pub git: Option<bool>,
+}
+
+impl Changes {
+    /// The settings as the viewer takes them.
+    #[must_use]
+    pub fn options(&self) -> zetwerk_app::viewer::ChangeOptions {
+        let usual = zetwerk_app::viewer::ChangeOptions::default();
+        zetwerk_app::viewer::ChangeOptions {
+            bars: self.bars.unwrap_or(usual.bars),
+            since: self.since.clone().unwrap_or(usual.since),
+            git: self.git.unwrap_or(usual.git),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -336,6 +369,32 @@ fn parse(text: &str) -> Result<Config, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_changed_is_shown_unless_the_settings_say_otherwise() {
+        let usual = parse("").unwrap_or_default().changes.options();
+        assert_eq!(usual, zetwerk_app::viewer::ChangeOptions::default());
+        assert!(usual.bars && usual.git && usual.since == "saved");
+        let own = parse(
+            "[changes]
+bars = false
+since = \"HEAD\"
+git = false
+",
+        )
+        .unwrap_or_default()
+        .changes
+        .options();
+        assert!(!own.bars && !own.git && own.since == "HEAD");
+        assert!(
+            parse(
+                "[changes]
+colour = 1
+"
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn settings_are_optional_and_checked() {

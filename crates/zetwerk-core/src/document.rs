@@ -1184,6 +1184,13 @@ impl<B: Buffer> Document<B> {
         }
     }
 
+    /// The state of the history the file holds, as far as it is known:
+    /// the one last saved or read. `None` for a text that has no file.
+    #[must_use]
+    pub fn saved_state(&self) -> Option<StateId> {
+        self.saved
+    }
+
     /// Applies `edits` one after the other; each range refers to the text
     /// as the edits before it left it. Either all are applied or none.
     ///

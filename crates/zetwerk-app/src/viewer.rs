@@ -11,6 +11,7 @@ mod aids;
 mod assist;
 mod buffers;
 mod cells;
+mod changes;
 pub mod export;
 mod figures;
 mod find;
@@ -67,6 +68,7 @@ use zetwerk_typst::{CompileOutput, Environment, PageLines, PageMap, Project, Pro
 use zetwerk_vim::{Effect, Seek, Shown as ShownLine};
 
 use self::agent::{AgentEdits, Mark, Proposal};
+pub use self::changes::{ChangeOptions, Since};
 pub use self::keymap::Keymap;
 pub use self::language::{Check, Issue, Report};
 pub use self::slides::Paging;
@@ -925,6 +927,8 @@ pub struct Viewer {
     start: start::Start,
     /// The matches of a search and what keys took (see [`find`]).
     find: find::Find,
+    /// What changed since a version the user names (see [`changes`]).
+    changes: changes::Changes,
     /// What the window waits for (see [`waiting`]).
     waiting: waiting::Waiting,
     pub stats: Stats,
@@ -1038,6 +1042,7 @@ impl Viewer {
             pointer: pointer::Pointer::default(),
             start: start::Start::default(),
             find: find::Find::default(),
+            changes: changes::Changes::default(),
             waiting: waiting::Waiting::default(),
             stats: Stats::default(),
         };
@@ -1062,6 +1067,7 @@ impl Viewer {
         let restored = editor.restored();
         let remarks = editor.remarks().to_vec();
         self.editor = Some(editor);
+        self.changes_opened();
         self.panes = Panes::Split;
         self.announce(opened, restored);
         self.announce_remarks(&remarks);
@@ -1083,6 +1089,7 @@ impl Viewer {
         }
         self.inserts.clone_from(&options.inserts);
         self.set_language(&options.language);
+        self.changes_configured(&options.changes);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
             self.ui = ui.clamp(UI_SMALLEST, UI_LARGEST);
             self.scale = self.display * self.ui;
@@ -1163,6 +1170,9 @@ impl Viewer {
             self.project.set_source(editor.source().clone());
         }
         if let Some(world) = self.history_world() {
+            return (self.revision, world);
+        }
+        if let Some(world) = self.proof_world() {
             return (self.revision, world);
         }
         let mut put = self.put_to_show();
@@ -1757,6 +1767,9 @@ impl Viewer {
         if self.start_key(press) || self.refused_key(press) || self.margin_key(press) {
             return;
         }
+        if self.changes_key(press) {
+            return;
+        }
         if self.bib_undo_key(press) {
             return;
         }
@@ -2076,6 +2089,9 @@ impl Viewer {
         if self.looks_back() {
             return None;
         }
+        if self.proof_shown() {
+            return None;
+        }
         if self.document_revision == Some(self.revision) {
             return Some(Change::NONE);
         }
@@ -2112,6 +2128,7 @@ impl Viewer {
             || self.notes_command(command)
             || self.refused_command(command)
             || self.vim_command(command)
+            || self.changes_command(command)
         {
             return;
         }
@@ -2298,6 +2315,7 @@ impl Viewer {
         self.caret_at = None;
         self.equation_set = false;
         self.language_frame();
+        self.changes_frame();
         if self.grid.is_some() {
             self.grid_scene(&mut scene, has);
             self.status_line(&mut scene, has);
@@ -2317,6 +2335,7 @@ impl Viewer {
         self.hints(&mut scene, has);
         self.assist_panels(&mut scene, has);
         self.margin_panel(&mut scene, has);
+        self.changes_panels(&mut scene, has);
         self.refused_panel(&mut scene, has);
         scene
     }
@@ -2385,6 +2404,7 @@ impl Viewer {
                 self.shown.insert(visible.index, Shown { zoom, tiles });
             }
             self.line_numbers(scene, has, visible.index, origin);
+            self.change_bars(scene, has, visible.index, origin);
             self.step_marks(scene, has, visible.index, origin);
             self.language_page(scene, has, visible.index, origin);
             self.find_marks(scene, has, visible.index, origin);
@@ -2853,6 +2873,7 @@ impl Viewer {
 
     fn status_line(&mut self, scene: &mut Scene, has: &dyn Fn(TextureId) -> bool) {
         let said_of_compiling = self.said_of_compiling();
+        let changes = self.changes_status();
         let state = self.state();
         let editing = state.editing.as_ref();
         let replacing = editing.is_some_and(|editing| editing.replacing);
@@ -2932,6 +2953,7 @@ impl Viewer {
             state.page, state.pages
         );
         let right = format!("{}{right}", self.search_count());
+        let right = format!("{changes}{right}");
         let status = Status {
             mode,
             left,
@@ -3228,6 +3250,7 @@ mod tests {
     use super::*;
     use crate::keys;
 
+    mod changes;
     mod cursor;
     mod equations;
     mod errors;

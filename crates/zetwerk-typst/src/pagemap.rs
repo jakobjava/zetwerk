@@ -822,6 +822,30 @@ impl PageLines {
             .min_by(|a, b| order(aside(a), aside(b)))
             .map(|glyph| (glyph.file, glyph.offset))
     }
+
+    /// The lines that show some of the bytes `ranges` of `file` (in
+    /// order, apart): each line with the index of the range it shows,
+    /// once for each.
+    #[must_use]
+    pub fn showing(&self, file: FileId, ranges: &[Range<usize>]) -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        for (index, line) in self.lines.iter().enumerate() {
+            for glyph in line.glyphs.iter().filter(|glyph| glyph.file == file) {
+                // From the first range that ends behind where the glyph
+                // begins, those that begin before it ends.
+                let first = ranges.partition_point(|range| range.end <= glyph.offset);
+                let end = glyph.end.max(glyph.offset + 1);
+                let shown = ranges[first..]
+                    .iter()
+                    .take_while(|range| range.start < end)
+                    .count();
+                found.extend((first..first + shown).map(|range| (index, range)));
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
 }
 
 fn order(a: f64, b: f64) -> std::cmp::Ordering {

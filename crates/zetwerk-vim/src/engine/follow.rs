@@ -94,6 +94,7 @@ const Z: &[(&str, &str)] = &[
     ("t Enter", "this line to the top"),
     ("b -", "this line to the bottom"),
     ("p", "the proposed change: as it would be, as it is"),
+    ("c", "the change here: as it was, as it is"),
 ];
 
 /// The keys after `Z`.
@@ -107,6 +108,7 @@ const FORWARD: &[(&str, &str)] = &[
     ("p", "to the next proposed change"),
     ("n", "to the next note"),
     ("i", "to the next thing that shows as nothing"),
+    ("v", "to the next change since the version compared with"),
 ];
 const BACKWARD: &[(&str, &str)] = &[
     ("[", "to the page before"),
@@ -115,6 +117,7 @@ const BACKWARD: &[(&str, &str)] = &[
     ("p", "to the proposed change before"),
     ("n", "to the note before"),
     ("i", "to the thing before that shows as nothing"),
+    ("v", "to the change before"),
 ];
 
 /// What can follow an operator, besides itself doubled.

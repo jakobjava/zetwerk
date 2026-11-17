@@ -492,6 +492,56 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("proposal flip"),
     ),
     (
+        "changes since the file was saved (or since …): next, previous",
+        "]v  [v",
+        Does::Run("changes next"),
+    ),
+    (
+        "change here: as it was, set over it (Enter takes it back, y yanks it)",
+        "zc",
+        Does::Run("changes flip"),
+    ),
+    (
+        "changes since the version compared with: all of them, to go to",
+        ":changes list",
+        Does::Run("changes list"),
+    ),
+    (
+        "changes: compare with saved, opened, a step, a commit",
+        ":changes since",
+        Does::Run("changes since"),
+    ),
+    (
+        "changes: the old version of the paragraph here back",
+        ":revert",
+        Does::Run("revert"),
+    ),
+    (
+        "changes: the whole document marked as a proof",
+        ":changes proof",
+        Does::Run("changes proof"),
+    ),
+    (
+        "changes: the proof written as a PDF",
+        ":changes pdf",
+        Does::Ask("changes pdf "),
+    ),
+    (
+        "bars beside the lines that changed: on or off",
+        ":changes off",
+        Does::Run("changes off"),
+    ),
+    (
+        "git: the commits of this file, to compare with",
+        ":git log",
+        Does::Run("git log"),
+    ),
+    (
+        "git: commit the document's files (asks first)",
+        ":git commit",
+        Does::Ask("git commit "),
+    ),
+    (
         "lines say how far they are from the cursor (for 5j): on or off",
         ":numbers",
         Does::Run("numbers"),

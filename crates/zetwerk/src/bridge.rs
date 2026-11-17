@@ -868,6 +868,10 @@ mod tests {
             inserts: Vec::new(),
             language: zetwerk_language::Settings::default(),
             templates: None,
+            changes: zetwerk_app::viewer::ChangeOptions {
+                git: false,
+                ..zetwerk_app::viewer::ChangeOptions::default()
+            },
         }
     }
 
