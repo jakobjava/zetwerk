@@ -1026,7 +1026,7 @@ impl Viewer {
                 self.open_picker("commits of this file", items, 0);
             }
             Answer::Log(Err(why)) | Answer::ToCommit(Err(why), _) => {
-                self.alert(format!("git: {why}"))
+                self.alert(format!("git: {why}"));
             }
             Answer::ToCommit(Ok(files), message) => self.ask_commit(files, message),
             Answer::Committed(result) => {
@@ -1244,7 +1244,7 @@ impl Viewer {
         let count = self.changes_found().map(|found| found.passages.len());
         match (count, &since) {
             (None, Since::Git(revision)) => {
-                self.notice(format!("asking git for the file in {revision} …"))
+                self.notice(format!("asking git for the file in {revision} …"));
             }
             (None, _) => self.alert("that version is not known: nothing to compare with"),
             (Some(count), since) => self.notice(format!(
@@ -1519,6 +1519,10 @@ impl Viewer {
     }
 
     /// Draws on page `index` the paragraph set as it was, if it is there.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "where it goes, what it says, and drawing it"
+    )]
     fn slip_page(
         &mut self,
         scene: &mut Scene,
@@ -1765,7 +1769,7 @@ impl Viewer {
             (Key::Char('d'), true) => self.scroll(0.0, height / 2.0),
             (Key::Char('u'), true) => self.scroll(0.0, -height / 2.0),
             (Key::Char('f'), true) | (Key::Char(' ') | Key::PageDown, false) => {
-                self.scroll(0.0, height * 0.9)
+                self.scroll(0.0, height * 0.9);
             }
             (Key::Char('b'), true) | (Key::PageUp, false) => self.scroll(0.0, -height * 0.9),
             (Key::Char('G') | Key::End, _) => self.scroll(0.0, f64::INFINITY),
@@ -2070,7 +2074,7 @@ mod tests {
         assert!(proof.contains("A #zetwerk-bar()*strong*"), "{proof}");
         // It typesets.
         let world = typst::syntax::parse(&proof);
-        assert!(world.errors_and_warnings().0.is_empty());
+        assert_eq!(world.errors_and_warnings().0.len(), 0);
     }
 
     #[test]

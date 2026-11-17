@@ -73,6 +73,11 @@ pub fn hunks<T: PartialEq>(old: &[T], new: &[T]) -> Vec<Hunk> {
 
 /// The pairs of things alike in `a` and `b` that the fewest changes
 /// leave, in order. `None` if more than `most` changes are needed.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::many_single_char_names,
+    reason = "the names and the signed diagonals of Myers' paper; lists are far shorter than isize::MAX"
+)]
 fn matched<T: PartialEq>(a: &[T], b: &[T], most: usize) -> Option<Vec<(usize, usize)>> {
     let (n, m) = (a.len() as isize, b.len() as isize);
     let limit = (a.len() + b.len()).min(most) as isize;
@@ -267,6 +272,10 @@ fn paragraph_bytes(items: &Range<usize>, paragraphs: &[Range<usize>], len: usize
 /// of the text. A passage whose words are the same (its lines were only
 /// broken otherwise, or blanks changed) is none.
 #[must_use]
+#[allow(
+    clippy::many_single_char_names,
+    reason = "the counts and places of two lists side by side"
+)]
 pub fn passages(
     old: &str,
     old_paragraphs: &[Range<usize>],
@@ -527,7 +536,7 @@ mod tests {
         let started = std::time::Instant::now();
         let found = hunks(&a, &b);
         assert!(started.elapsed().as_secs() < 5);
-        assert!(!found.is_empty());
+        assert_ne!(found.len(), 0);
         let alike: Vec<u8> = vec![1; 5000];
         assert_eq!(hunks(&alike, &alike), Vec::new());
         // Long and much alike, bigger than the bound: still right.
@@ -572,7 +581,7 @@ mod tests {
                 "Last."
             ]
         );
-        assert!(paragraphs(&Source::detached("\n\n")).is_empty());
+        assert_eq!(paragraphs(&Source::detached("\n\n")).len(), 0);
     }
 
     fn compared(old: &str, new: &str) -> Vec<Passage> {
@@ -601,7 +610,7 @@ mod tests {
         assert_eq!(compared(old, old), Vec::new());
         // A paragraph parted in two is a change, though no word is.
         let parted = compared("A b c d.\n", "A b\n\nc d.\n");
-        assert!(!parted.is_empty());
+        assert_ne!(parted.len(), 0);
     }
 
     #[test]
@@ -612,7 +621,7 @@ mod tests {
         let pieces = ["word ", "\n\n", " ", "x", "\n", "= ", "kappa lambda"];
         for _ in 0..500 {
             let mut new = base.to_owned();
-            for _ in 0..1 + seeded.next(4) {
+            for _ in 0..=seeded.next(4) {
                 let at = seeded.next(new.len() + 1);
                 let end = (at + seeded.next(12)).min(new.len());
                 if new.is_char_boundary(at) && new.is_char_boundary(end) {

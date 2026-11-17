@@ -2115,6 +2115,7 @@ impl Viewer {
         self.predicted.is_some()
     }
 
+    #[allow(clippy::too_many_lines, reason = "a line for every command")]
     fn execute(&mut self, command: &str) {
         if self.start_command(command) {
             return;
