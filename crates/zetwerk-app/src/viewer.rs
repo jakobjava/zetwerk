@@ -34,6 +34,7 @@ mod manager;
 mod margin;
 pub mod notes;
 pub(crate) mod options;
+pub mod packages;
 mod pages;
 mod palette;
 mod paste;
@@ -1001,6 +1002,8 @@ pub struct Viewer {
     changes: changes::Changes,
     /// What the window waits for (see [`waiting`]).
     waiting: waiting::Waiting,
+    /// What is kept of packages (see [`packages`]).
+    packages: packages::Packages,
     /// What the pages put in whole keep between keys (see [`pages`]).
     pages: pages::Pages,
     /// The talk being given, and what is known of the deck (see [`present`]).
@@ -1132,6 +1135,7 @@ impl Viewer {
             find: find::Find::default(),
             changes: changes::Changes::default(),
             waiting: waiting::Waiting::default(),
+            packages: packages::Packages::default(),
             pages: pages::Pages::default(),
             present: present::Present::default(),
             report: report::Recorder::default(),
@@ -1188,6 +1192,7 @@ impl Viewer {
         self.set_talk(options.talk.clone());
         self.report_configured(&options.report, options.font_set);
         self.set_language(&options.language);
+        self.set_packages(&options.packages);
         self.set_review(options.review);
         self.changes_configured(&options.changes);
         self.comfort_configured(options.comfort);
@@ -1895,6 +1900,9 @@ impl Viewer {
         if self.grid.is_some() {
             return self.grid_key(press);
         }
+        if self.packages_key(press) {
+            return;
+        }
         if self.tutor_key(press) || self.help_key(press) {
             return;
         }
@@ -2267,7 +2275,10 @@ impl Viewer {
         if self.start_command(command) {
             return;
         }
-        if self.tutor_command(command) || self.help_command(command) {
+        if self.packages_command(command)
+            || self.tutor_command(command)
+            || self.help_command(command)
+        {
             return;
         }
         let unwritten = self.unwritten();
@@ -3439,6 +3450,7 @@ mod tests {
     mod latex;
     mod left_behind;
     mod names;
+    mod packages;
     mod pages;
     mod panels;
     mod parts;

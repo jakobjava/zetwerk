@@ -114,6 +114,12 @@ pub trait Editor: Send + Sync + 'static {
     /// that stand in none.
     fn figures(&self) -> Result<serde_json::Value, String>;
 
+    /// The Typst packages the document imports and those on the
+    /// machine; nothing is fetched.
+    fn packages(&self) -> Result<serde_json::Value, String> {
+        Err("packages are not known here".to_owned())
+    }
+
     /// What is wrong with the spelling and the grammar of the text.
     fn check_language(&self) -> Result<serde_json::Value, String>;
 

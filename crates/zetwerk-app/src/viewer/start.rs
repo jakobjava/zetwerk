@@ -548,7 +548,7 @@ impl Viewer {
 
     /// Where new documents go: beside the one being edited, or where the
     /// window was opened.
-    fn folder(&self) -> PathBuf {
+    pub(super) fn folder(&self) -> PathBuf {
         let beside = self.editor.as_ref().and_then(|editor| {
             let path = std::path::absolute(editor.path()).ok()?;
             path.parent().map(Path::to_owned)
@@ -625,6 +625,7 @@ impl Viewer {
                 Target::Command(format!("template {}", path.display())),
             ));
         }
+        items.extend(self.package_starters());
         self.open_picker("begin with", items, 0);
     }
 
@@ -649,6 +650,9 @@ impl Viewer {
     /// `:template <name>`: fills the empty document with the starter of
     /// that name, or with the user's own of that name or path.
     fn use_starter(&mut self, which: &str) {
+        if which.starts_with('@') {
+            return self.begin_from_package(which);
+        }
         let own = match (&self.start.templates, which.contains('/')) {
             (_, true) => Some(PathBuf::from(which)),
             (Some(directory), false) => {
@@ -678,7 +682,7 @@ impl Viewer {
     ///
     /// If no document is open, there is text in it, or a file cannot be
     /// made.
-    fn fill(&mut self, text: &str, beside: &[(&str, &str)]) -> Result<(), String> {
+    pub(super) fn fill(&mut self, text: &str, beside: &[(&str, &str)]) -> Result<(), String> {
         let folder = self.folder();
         let editor = self.editor.as_ref().ok_or(NO_DOCUMENT)?;
         if !editor.text().trim().is_empty() {

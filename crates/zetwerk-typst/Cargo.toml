@@ -15,6 +15,18 @@ typst-pdf.workspace = true
 typst-ide.workspace = true
 comemo.workspace = true
 rayon.workspace = true
+toml.workspace = true
+serde_json.workspace = true
+# Fetching packages (see `packages`): the versions Typst's own package
+# downloader links, so nothing new is built.
+ureq = { version = "=2.12.1", default-features = false, features = ["native-tls"] }
+native-tls = "=0.2.18"
+tar = "=0.4.46"
+flate2 = "=1.1.11"
+
+[features]
+# A stand-in for the package registry on 127.0.0.1, for tests of fetching.
+stand-in = []
 
 [lints]
 workspace = true

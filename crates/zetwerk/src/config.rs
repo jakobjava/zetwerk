@@ -51,6 +51,14 @@
 //! languagetool = "http://localhost:8081"
 //! allow_remote = false
 //!
+//! [packages]
+//! # Whether Typst packages a document imports and this machine lacks are
+//! # fetched from packages.typst.org: "ask" (g in :why, or :package get,
+//! # each time), "always" (as soon as a document lacks one; not those an
+//! # agent imports) or "never". What is sent is a request for the package
+//! # by name and version, nothing of the document.
+//! download = "ask"
+//!
 //! # Your own keys, as in Vim's nnoremap and inoremap.
 //! [[insert]]            # your own things for the `#` menu
 //! name = "diagram"
@@ -120,6 +128,9 @@ pub struct Config {
     pub aids: toml::Table,
     #[serde(default)]
     pub typing: toml::Table,
+    /// Whether packages are fetched (`packages.download`).
+    #[serde(default)]
+    pub packages: toml::Table,
     /// What was left out, and why, each with its line.
     #[serde(skip)]
     pub ignored: Vec<String>,
@@ -134,7 +145,7 @@ pub struct Report {
 }
 
 /// The sections only options of the table are in (see [`Config::aids`]).
-const OWN_SECTIONS: &[&str] = &["aids", "typing"];
+const OWN_SECTIONS: &[&str] = &["aids", "typing", "packages"];
 
 /// What the settings file says that is no option of the table: the
 /// user's keys, and things for the `#` menu.
@@ -942,6 +953,18 @@ colour = 1
 
     fn slip_of(text: &str) -> usize {
         parse(text).map_or(0, |config| config.ignored.len())
+    }
+
+    #[test]
+    fn packages_are_fetched_when_asked_unless_the_settings_say_otherwise() {
+        for said in ["ask", "always", "never"] {
+            let (found, ignored) = explicit(&format!("[packages]\ndownload = \"{said}\"\n"));
+            assert_eq!(found, [("packages.download", Value::Text(said.into()))]);
+            assert!(ignored.is_empty(), "{ignored:?}");
+        }
+        let (found, ignored) = explicit("[packages]\ndownload = \"sometimes\"\nfetch = 1\n");
+        assert_eq!(found, Vec::new());
+        assert_eq!(ignored.len(), 2, "{ignored:?}");
     }
 
     #[test]

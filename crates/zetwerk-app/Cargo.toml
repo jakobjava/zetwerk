@@ -40,5 +40,9 @@ html5ever.workspace = true
 wayland-client.workspace = true
 wayland-protocols-wlr.workspace = true
 
+[dev-dependencies]
+# A stand-in for the package registry, for tests of fetching.
+zetwerk-typst = { workspace = true, features = ["stand-in"] }
+
 [lints]
 workspace = true

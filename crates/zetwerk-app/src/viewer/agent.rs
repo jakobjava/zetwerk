@@ -480,6 +480,9 @@ impl Viewer {
         }
         self.predicted_at = None;
         self.edited = Some(edited);
+        if edited == Edited::Agent {
+            self.packages_by_agent();
+        }
         self.sync_proposals();
     }
 

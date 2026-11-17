@@ -252,7 +252,7 @@ pub(super) fn for_writer(message: &str) -> String {
         return "something is closed here that was never opened".to_owned();
     }
     if message.contains("package") && message.contains("not found") {
-        return format!("{message} (packages are not downloaded)");
+        return super::packages::missing_said(message);
     }
     if message.starts_with("loop seems to be infinite") {
         return "a loop here never ends".to_owned();
@@ -689,6 +689,7 @@ impl Viewer {
             Key::Char('c') if self.likely_here(&refusal).is_some() => {
                 self.correct_refused(&refusal);
             }
+            Key::Char('g') if self.package_offered() => self.fetch_missing(),
             Key::Char('u') if self.good_state().is_some() => self.back_to_good(),
             Key::Char('e')
                 if self
@@ -900,6 +901,7 @@ impl Viewer {
         if refusal.range.is_some() {
             lines.push("Enter  go there".to_owned());
         }
+        lines.extend(self.package_lines());
         if let Some((_, with)) = self.refused_thing(&refusal)
             && !with.is_empty()
         {

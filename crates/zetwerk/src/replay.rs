@@ -91,6 +91,11 @@ pub fn run(args: &Args, report: &Path) -> Result<(), String> {
         inserts: config.inserts(),
         language,
         templates: None,
+        // A replay asks no network for packages.
+        packages: zetwerk_app::viewer::packages::Settings {
+            download: zetwerk_app::viewer::packages::Download::Never,
+            ..Default::default()
+        },
         review: config.review.settings(),
         talk: config.present.talk(),
         authors: config.authors.settings(),

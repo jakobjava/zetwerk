@@ -230,6 +230,8 @@ fn options(
         inserts: config.inserts(),
         language: config.language.settings(),
         templates: config::templates(),
+        // `packages.download` comes with the other options of the table.
+        packages: zetwerk_app::viewer::packages::Settings::default(),
         review: config.review.settings(),
         talk: config.present.talk(),
         report: replay::report_settings(config),

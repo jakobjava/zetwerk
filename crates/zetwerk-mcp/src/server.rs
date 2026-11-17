@@ -534,6 +534,20 @@ impl Server {
         self.value(crate::Editor::figures).await
     }
 
+    /// The Typst packages the document imports (`imported`: each
+    /// `package` as `@namespace/name:version`, whether it is
+    /// `on_machine`, `kept` as `own` or `fetched`, the `files` that import
+    /// it and the names of it they `uses`) and the packages on this
+    /// machine (`on_machine`, with `description`, `entrypoint` and whether
+    /// it is a `template`). Import only what is on the machine: nothing
+    /// is fetched for an agent. An import of a package that is not here
+    /// makes Typst refuse the document, and the user is asked whether to
+    /// fetch it.
+    #[tool(annotations(title = "List packages", read_only_hint = true))]
+    async fn list_packages(&self) -> Result<CallToolResult, ErrorData> {
+        self.value(crate::Editor::packages).await
+    }
+
     /// What can be referred to: the sections, figures, tables and
     /// equations of the document and the sources of its bibliography.
     /// Each of `targets` has its `kind`, its `label` (null if it has

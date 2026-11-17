@@ -662,4 +662,15 @@ pub(crate) const TABLE: &[Opt] = &[
         |v, value| v.settings.hold("changes.git", value.clone()),
     )
     .next_start(),
+    opt(
+        "packages.download",
+        Group::Files,
+        Kind::Choice(&["ask", "always", "never"]),
+        Usual::Is("ask"),
+        "whether packages a document lacks are fetched from packages.typst.org: \
+         when you say so (g in :why), always, or never; only their name and \
+         version are sent",
+        |v| Value::Text(v.packages_download().to_owned()),
+        |v, value| v.set_packages_download(value.text()),
+    ),
 ];
