@@ -161,6 +161,8 @@ enum Event {
 /// Opens the window and runs until it is closed. `ready` is called once
 /// with a handle for talking to the window from other threads.
 pub fn run(options: Options, ready: impl FnOnce(Handle)) -> Result<(), String> {
+    // Before anything makes the state directory: whether this is the first start.
+    crate::viewer::tutor::note_first_run(&options.state_dir);
     // Typst parallelises through rayon's global pool, which by default
     // starts a thread per core the first time it is used. Document compiles
     // run in a pool of their own (see `Compiler`); what is left for the

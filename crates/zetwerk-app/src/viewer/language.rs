@@ -297,6 +297,12 @@ impl Viewer {
         }
     }
 
+    /// The language the settings say to check in, whatever the document
+    /// says, if they say one: the user's own (see `tutor`).
+    pub(super) fn settings_language(&self) -> Option<&str> {
+        self.language.settings.language.as_deref()
+    }
+
     /// Has `wake` called when what was found is to be collected: it
     /// should make the window draw.
     pub fn wake_for_language(&mut self, wake: impl Fn() + Send + Sync + 'static) {

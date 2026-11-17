@@ -21,6 +21,7 @@ mod figures;
 mod find;
 mod focus;
 mod handout;
+mod help;
 mod hints;
 mod history;
 mod inplace;
@@ -58,6 +59,7 @@ mod sources_undo;
 pub mod start;
 mod structure;
 mod styles;
+pub mod tutor;
 mod vim;
 mod waiting;
 mod written;
@@ -1011,6 +1013,8 @@ pub struct Viewer {
     /// document was left (see [`place`]).
     comfort: comfort::Comfort,
     place: place::Place,
+    /// The lesson the window shows, if it does (see [`tutor`]).
+    tutor: tutor::Tutor,
     pub stats: Stats,
     /// Who wrote what (see `authors`).
     authors: authors::Authors,
@@ -1134,6 +1138,7 @@ impl Viewer {
             settings: set::Settings::default(),
             comfort: comfort::Comfort::default(),
             place: place::Place::default(),
+            tutor: tutor::Tutor::default(),
             stats: Stats::default(),
             authors: authors::Authors::default(),
         };
@@ -1768,6 +1773,7 @@ impl Viewer {
         self.margin_compiled(&output.world);
         self.refused_compiled(&output.world);
         self.place_compiled();
+        self.tutor_compiled();
     }
 
     /// The user turned the wheel or dragged on the touchpad, by this many
@@ -1888,6 +1894,9 @@ impl Viewer {
         }
         if self.grid.is_some() {
             return self.grid_key(press);
+        }
+        if self.tutor_key(press) || self.help_key(press) {
+            return;
         }
         if self.start_key(press)
             || self.refused_key(press)
@@ -2258,6 +2267,9 @@ impl Viewer {
         if self.start_command(command) {
             return;
         }
+        if self.tutor_command(command) || self.help_command(command) {
+            return;
+        }
         let unwritten = self.unwritten();
         let modified = !unwritten.is_empty();
         if self.file_command(command)
@@ -2560,6 +2572,7 @@ impl Viewer {
             self.authors_page(scene, has, visible.index, origin);
             self.change_bars(scene, has, visible.index, origin);
             self.step_marks(scene, has, visible.index, origin);
+            self.tutor_marks(scene, has, visible.index, origin);
             self.language_page(scene, has, visible.index, origin);
             self.find_marks(scene, has, visible.index, origin);
             self.margin_page(scene, has, visible.index, origin);
@@ -3112,6 +3125,7 @@ impl Viewer {
         );
         let right = format!("{}{right}", self.search_count());
         let right = format!("{changes}{right}");
+        let right = format!("{}{right}", self.tutor_status());
         let status = Status {
             mode,
             left,
@@ -3434,6 +3448,7 @@ mod tests {
     mod review;
     mod settings;
     mod speed;
+    mod tutor;
     mod typing;
     mod typist;
     mod vim;

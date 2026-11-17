@@ -547,6 +547,9 @@ impl Viewer {
         if self.refer_describe() {
             return;
         }
+        if self.describe_thing() {
+            return;
+        }
         let Some(editor) = &self.editor else {
             return;
         };
@@ -945,7 +948,8 @@ impl Viewer {
                 .collect();
             let title = format!("{}: {}\u{2588}", picker.title, picker.query);
             let chosen = picker.chosen.saturating_sub(first);
-            let markup = chrome::list_markup(Some(&title), &rows, chosen, None);
+            let markup =
+                chrome::list_markup(Some(&title), &rows, chosen, self.help_detail().as_deref());
             // In the middle, a third of the way down; where the window is
             // too narrow for it, from its left edge: what is cut off is
             // the end of the lines, not their beginning.
@@ -1019,6 +1023,17 @@ impl Picker {
             self.offered = true;
             self.shown.insert(0, self.items.len() - 1);
         }
+    }
+
+    /// What the list is called.
+    pub(super) fn title(&self) -> &'static str {
+        self.title
+    }
+
+    /// What the chosen entry is listed as, if one is chosen.
+    pub(super) fn chosen_label(&self) -> Option<&str> {
+        let item = *self.shown.get(self.chosen)?;
+        self.items.get(item).map(|(label, _)| label.as_str())
     }
 
     /// Where the chosen entry leads, if one is chosen.

@@ -315,7 +315,7 @@ fn following_markup(typed: &str, rows: &[(String, String)], columns: usize) -> S
          {cells})",
         count = columns * 2,
         gutters = gutters.join(", "),
-        title = string(&format!("{typed} …")),
+        title = string(&super::help::following_title(typed)),
     )
 }
 
@@ -561,6 +561,18 @@ impl Viewer {
         let up = self.waits_for_key();
         self.hints.list = if up { List::Up } else { List::Away };
         up
+    }
+
+    /// The keys typed, where the list of what can follow them is up:
+    /// what `?` gives help on then (see `help`).
+    pub(super) fn following_listed(&self) -> Option<String> {
+        if self.hints.list != List::Up || !self.typed.is_empty() {
+            return None;
+        }
+        self.editor
+            .as_ref()?
+            .following()
+            .map(|following| following.typed)
     }
 
     /// Whether the keys typed wait for another, and what can follow them

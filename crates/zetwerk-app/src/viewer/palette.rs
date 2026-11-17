@@ -28,6 +28,86 @@ enum Does {
 /// All there is to do: what it is, the keys for it, and what choosing it
 /// does.
 const ALL: &[(&str, &str, Does)] = &[
+    (
+        "lessons: zetwerk taught on the page, step by step",
+        ":tutor  :tutor 4",
+        Does::Run("tutor"),
+    ),
+    (
+        "in a lesson: the keys of the step at hand",
+        "Ctrl-T  :hint",
+        Does::Run("hint"),
+    ),
+    (
+        "help on a key, a command or a word, with an example",
+        ":help <word>",
+        Does::Ask("help "),
+    ),
+    (
+        "move: a character, a line (on a page: a line of the page)",
+        "h  j  k  l",
+        Does::Tells,
+    ),
+    ("move: a word on, back, to its end", "w  b  e", Does::Tells),
+    (
+        "move: to the start, the end of the line shown",
+        "0  $",
+        Does::Tells,
+    ),
+    ("move: a paragraph back, on", "{  }", Does::Tells),
+    ("move: to the beginning, the end", "gg  G", Does::Tells),
+    (
+        "move: to a character of the line, up to it; again",
+        "f  t  ;  ,",
+        Does::Tells,
+    ),
+    (
+        "scroll half a window down, up; a whole one",
+        "Ctrl-D  Ctrl-U  Ctrl-F",
+        Does::Tells,
+    ),
+    ("delete the character under the cursor", "x  X", Does::Tells),
+    (
+        "delete what a motion covers; the paragraph; to its end",
+        "dw  dd  D",
+        Does::Tells,
+    ),
+    (
+        "change: delete, then type in its place",
+        "cw  ciw  cc  C",
+        Does::Tells,
+    ),
+    (
+        "copy (yank), put behind, put before",
+        "yy  p  P",
+        Does::Tells,
+    ),
+    (
+        "select: by characters, by paragraphs; then what to do",
+        "v  V",
+        Does::Tells,
+    ),
+    (
+        "a word, a paragraph, an equation, …: behind d, c, y, gb",
+        "iw  ap  i$",
+        Does::Tells,
+    ),
+    ("the last change again, here", ".", Does::Tells),
+    (
+        "write at the start, the end of the line; a paragraph above",
+        "I  A  O",
+        Does::Tells,
+    ),
+    (
+        "stop typing; leave a list or a selection",
+        "Esc",
+        Does::Tells,
+    ),
+    (
+        "a list of what a motion covers; code; a comment",
+        "gl  gt  gc",
+        Does::Tells,
+    ),
     ("write: begin typing at the cursor", "i  a  o", Does::Tells),
     (
         "put in an equation, figure, table, … (while typing)",
@@ -835,6 +915,21 @@ pub(super) fn entries() -> impl Iterator<Item = (&'static str, Option<&'static s
     ALL.iter().map(|(_, keys, does)| match does {
         Does::Run(command) | Does::Ask(command) => (*keys, Some(*command)),
         Does::Tells => (*keys, None),
+    })
+}
+
+/// Every entry of the list of all there is to do, in order: what it is,
+/// its keys, and the command it runs (with `false`) or begins for the
+/// user to finish (with `true`), if it does.
+pub(super) fn all()
+-> impl Iterator<Item = (&'static str, &'static str, Option<(&'static str, bool)>)> {
+    ALL.iter().map(|(what, keys, does)| {
+        let command = match does {
+            Does::Run(command) => Some((*command, false)),
+            Does::Ask(command) => Some((*command, true)),
+            Does::Tells => None,
+        };
+        (*what, *keys, command)
     })
 }
 

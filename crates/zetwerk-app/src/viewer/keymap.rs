@@ -258,6 +258,7 @@ impl Viewer {
         }
         self.hints_keyed();
         self.report_keyed();
+        self.tutor_keyed();
     }
 
     /// Notes what keys typed while a mapping may be begun were typed into,
