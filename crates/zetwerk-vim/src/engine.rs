@@ -13,6 +13,7 @@ use crate::took::Took;
 
 mod block;
 mod follow;
+mod kept;
 mod memory;
 mod more;
 mod read;
@@ -1835,6 +1836,12 @@ impl Engine {
                     Key::Char('a') => Some("set aids=next"),
                     // And a change shown as it was.
                     Key::Char('c') => Some("changes flip"),
+                    // Nor these: the host's ways of looking at the page
+                    // for long (see its `comfort`).
+                    Key::Char('T') => Some("typewriter"),
+                    Key::Char('f') => Some("focus"),
+                    Key::Char('n') => Some("night"),
+                    Key::Char('e') => Some("zen"),
                     _ => None,
                 };
                 if let Some(command) = spelling {

@@ -1044,6 +1044,7 @@ mod tests {
                 git: false,
                 ..zetwerk_app::viewer::ChangeOptions::default()
             },
+            comfort: zetwerk_app::viewer::comfort::Settings::default(),
         }
     }
 

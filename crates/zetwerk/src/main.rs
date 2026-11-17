@@ -43,6 +43,14 @@ Settings are read from ~/.config/zetwerk/config.toml:
   slides = false          one page at a time, whole
   ui_scale = 1.0          how large the status line, the lists and the
                           source are; :ui 1.5, :ui + and :ui - while open
+  restore = true          open a document where it was left: cursor,
+                          view, marks, registers (--fresh: not this time)
+  colours = \"day\"         or \"night\", \"sepia\", \"auto\" (the desktop's
+                          choice or the hour): the pages on screen only;
+                          :night, :sepia, zn while open
+  typewriter = false      the line typed stays in the middle; :typewriter, zT
+  focus = \"off\"           or \"paragraph\", \"sentence\": the rest faint;
+                          :focus, zf; :zen (ze) hides all else too
   [power]
   mode = \"auto\"           or \"saver\", \"performance\"
   [present]
@@ -101,6 +109,8 @@ Options:
                           does not find it itself
       --power <mode>      auto (default), saver or performance
       --embedded-fonts    Use only the fonts shipped with Typst
+      --fresh             Open the document at its start, not where it
+                          was left (that is still kept for next time)
   -h, --help              Show this help
 
 Options for `render`:
@@ -146,6 +156,10 @@ enum Command {
 }
 
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flags of the command line, each its own"
+)]
 struct Args {
     command: Command,
     /// Positional arguments after the command.
@@ -160,6 +174,8 @@ struct Args {
     screenshot: Option<PathBuf>,
     /// Whether the keys of the script wait for each other's effect.
     paced: bool,
+    /// Whether the document is opened at its start this time.
+    fresh: bool,
     main: Option<PathBuf>,
     /// A report to play again.
     replay: Option<PathBuf>,
@@ -220,6 +236,7 @@ fn options(
         authors: config.authors.settings(),
         settings: settings.clone(),
         changes: config.changes.options(),
+        comfort: config.view.comfort(args.fresh),
     })
 }
 
@@ -352,6 +369,7 @@ fn parse(mut parser: lexopt::Parser) -> Result<Option<Args>, String> {
             }
             Long("screenshot") => args.screenshot = Some(parser.value().map_err(fail)?.into()),
             Long("paced") => args.paced = true,
+            Long("fresh") => args.fresh = true,
             Long("main") => args.main = Some(parser.value().map_err(fail)?.into()),
             Long("replay") => args.replay = Some(parser.value().map_err(fail)?.into()),
             Value(value) if args.command == Command::Open && args.values.is_empty() => {

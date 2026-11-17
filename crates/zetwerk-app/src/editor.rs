@@ -21,6 +21,7 @@ use crate::keys::{Key, KeyPress};
 pub use zetwerk_vim::Mode;
 
 mod credits;
+mod kept;
 mod mark;
 pub use mark::Mark;
 

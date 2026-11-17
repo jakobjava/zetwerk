@@ -179,6 +179,7 @@ impl Session {
         std::thread::spawn(move || drop(old));
         viewer.wake_for_language(wake());
         viewer.wake_for_handouts(wake());
+        self.viewer.leaving();
         self.viewer.sync();
         self.viewer = viewer;
         self.viewer.export_in_background(wake());

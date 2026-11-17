@@ -132,6 +132,10 @@ const Z: &[(&str, &str)] = &[
     ),
     ("a", "aids on the page: quiet, writing, everything"),
     ("c", "the change here: as it was, as it is"),
+    ("T", "typewriter: the line stays at its height"),
+    ("f", "focus: all but this paragraph faint"),
+    ("n", "night: the page light on dark"),
+    ("e", "zen: nothing but the text"),
 ];
 
 /// The keys after `Z`.

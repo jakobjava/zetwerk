@@ -94,6 +94,9 @@ pub fn run(args: &Args, report: &Path) -> Result<(), String> {
         review: config.review.settings(),
         talk: config.present.talk(),
         authors: config.authors.settings(),
+        // Played from the start of what was recorded, not where a copy
+        // was left.
+        comfort: config.view.comfort(true),
         // The copy played in is no repository of the user's.
         changes: zetwerk_app::viewer::ChangeOptions {
             git: false,

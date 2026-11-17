@@ -250,6 +250,7 @@ impl Viewer {
             return;
         };
         let (new, source) = (editor.file(), editor.source().clone());
+        self.place_renamed(old, to);
         self.project.renamed(old, source, to);
         self.notes_renamed(old, new);
         self.review_renamed(old, new);

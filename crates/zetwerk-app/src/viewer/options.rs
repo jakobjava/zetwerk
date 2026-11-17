@@ -576,6 +576,50 @@ pub(crate) const TABLE: &[Opt] = &[
     )
     .next_start(),
     opt(
+        "view.restore",
+        Group::Window,
+        Kind::Switch,
+        ON,
+        "a document opens where it was left: the cursor, the view, the aids",
+        |v| held(v, "view.restore"),
+        |v, value| v.settings.hold("view.restore", value.clone()),
+    )
+    .next_start(),
+    opt(
+        "view.colours",
+        Group::Window,
+        Kind::Choice(&["day", "night", "sepia", "auto"]),
+        Usual::Is("day"),
+        "the colours of the pages: auto follows the desktop, else night from \
+         20:00 to 07:00 (:night, :colours for now)",
+        |v| held(v, "view.colours"),
+        |v, value| v.settings.hold("view.colours", value.clone()),
+    )
+    .next_start()
+    .session(&["night", "sepia", "colours"]),
+    opt(
+        "view.typewriter",
+        Group::Window,
+        Kind::Switch,
+        OFF,
+        "the line typed on stays at its height (:typewriter for now)",
+        |v| held(v, "view.typewriter"),
+        |v, value| v.settings.hold("view.typewriter", value.clone()),
+    )
+    .next_start()
+    .session(&["typewriter"]),
+    opt(
+        "view.focus",
+        Group::Window,
+        Kind::Choice(&["off", "paragraph", "sentence"]),
+        Usual::Is("off"),
+        "all but this paragraph or sentence faint (:focus, :zen for now)",
+        |v| held(v, "view.focus"),
+        |v, value| v.settings.hold("view.focus", value.clone()),
+    )
+    .next_start()
+    .session(&["focus", "zen"]),
+    opt(
         "changes.bars",
         Group::Page,
         Kind::Switch,
