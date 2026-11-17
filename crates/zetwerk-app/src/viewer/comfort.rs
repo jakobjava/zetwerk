@@ -98,6 +98,10 @@ const MORNING: u32 = 7;
 const LOOK_AT_CLOCK: Duration = Duration::from_secs(60);
 
 /// What zen hid, to be shown again when it ends.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the switches of the aids, each its own"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Hidden {
     pub(super) numbers: bool,
@@ -319,7 +323,7 @@ fn desktop_prefers_dark() -> Option<bool> {
 
 impl Viewer {
     /// Takes the user's settings for all this.
-    pub(super) fn comfort_configured(&mut self, settings: &Settings) {
+    pub(super) fn comfort_configured(&mut self, settings: Settings) {
         self.comfort.colours = settings.colours;
         if settings.colours == Colours::Auto {
             self.comfort.desktop_dark = self.comfort.desktop_dark.or_else(desktop_prefers_dark);
@@ -474,7 +478,7 @@ impl Viewer {
     fn typewriter_on(&mut self, height: Option<f64>) {
         let here = self.cursor_line().and_then(|(page, top, bottom)| {
             let page = self.layout.pages.get(page)?;
-            let middle = f64::from(page.y) + (top + bottom) / 2.0 * self.view.zoom;
+            let middle = f64::from(page.y) + f64::midpoint(top, bottom) * self.view.zoom;
             let height = (middle - self.view.top * self.view.zoom) / f64::from(self.view.height);
             (NEAR_EDGE..=1.0 - NEAR_EDGE)
                 .contains(&height)
@@ -514,7 +518,7 @@ impl Viewer {
             return false;
         };
         let zoom = self.view.zoom;
-        let middle = f64::from(page_box.y) + (top + bottom) / 2.0 * zoom;
+        let middle = f64::from(page_box.y) + f64::midpoint(top, bottom) * zoom;
         let view_top = self.view.top * zoom;
         let in_view = middle >= view_top && middle <= view_top + f64::from(self.view.height);
         let same = self.comfort.line.is_some_and(|(was, was_top, was_bottom)| {

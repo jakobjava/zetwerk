@@ -51,7 +51,7 @@ fn line_height_on_screen(viewer: &Viewer) -> Option<f64> {
     let (page, top, bottom) = viewer.cursor_line()?;
     let page = viewer.layout.pages.get(page)?;
     let zoom = viewer.view.zoom;
-    Some(f64::from(page.y) + (top + bottom) / 2.0 * zoom - viewer.view.top * zoom)
+    Some(f64::from(page.y) + f64::midpoint(top, bottom) * zoom - viewer.view.top * zoom)
 }
 
 #[test]
@@ -253,13 +253,13 @@ fn focus_leaves_the_paragraph_clear_and_veils_the_rest() {
     compile(&mut viewer);
     press(&mut viewer, "gsgs/target<CR>");
     let plain = viewer.scene(&|_| false);
-    assert!(super::super::comfort::veils(&plain).is_empty());
+    assert_eq!(super::super::comfort::veils(&plain), Vec::<[f32; 4]>::new());
     press(&mut viewer, "zf");
     let scene = viewer.scene(&|_| false);
     let veils = super::super::comfort::veils(&scene);
     assert!(!veils.is_empty() && veils.len() <= 4 * 3, "{veils:?}");
     let (x, top, bottom) = viewer.cursor_at.unwrap();
-    let middle = (top + bottom) / 2.0;
+    let middle = f64::midpoint(top, bottom);
     let covered = |[vx, vy, w, h]: [f32; 4]| {
         let (vx, vy, w, h) = (f64::from(vx), f64::from(vy), f64::from(w), f64::from(h));
         x > vx && x < vx + w && middle > vy && middle < vy + h

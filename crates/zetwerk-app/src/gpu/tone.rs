@@ -199,7 +199,7 @@ mod tests {
     fn the_uniform_is_as_long_as_the_shader_reads_it() {
         let paper = Paper {
             tone: Tone::Night,
-            quads: vec![0..3],
+            quads: std::iter::once(0..3).collect(),
             pages: vec![[0.0, 0.0, 10.0, 10.0]; 20],
             pictures: vec![[1.0, 1.0, 2.0, 2.0]],
         };

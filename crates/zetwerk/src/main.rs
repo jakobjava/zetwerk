@@ -135,6 +135,10 @@ enum Command {
 }
 
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flags of the command line, each its own"
+)]
 struct Args {
     command: Command,
     /// Positional arguments after the command.

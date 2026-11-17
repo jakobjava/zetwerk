@@ -40,6 +40,10 @@ const KEEP_EVERY: Duration = Duration::from_secs(10);
 const REGISTER_MOST: usize = 10 * 1024;
 
 /// What this module keeps.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the place, not states of one thing"
+)]
 #[derive(Default)]
 pub(super) struct Place {
     /// Whether no place is found again nor kept (`[view] restore =
@@ -393,7 +397,7 @@ impl Kept {
                     })();
                 }
                 ("aid", [name, value], _) => {
-                    kept.aids.push(((*name).to_owned(), (*value).to_owned()))
+                    kept.aids.push(((*name).to_owned(), (*value).to_owned()));
                 }
                 ("search", [forward, start, end, pattern], _) => {
                     kept.search = Some((unescape(pattern), on(forward), on(start), on(end)));

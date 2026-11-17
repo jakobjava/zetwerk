@@ -704,7 +704,7 @@ mod tests {
         let quads = [quad(0.0), quad(16.0), quad(0.0)];
         gpu.set_paper(&Paper {
             tone: Tone::Night,
-            quads: vec![0..2],
+            quads: std::iter::once(0..2).collect(),
             pages: vec![[0.0, 0.0, 40.0, 32.0]],
             pictures: vec![[4.0, 4.0, 4.0, 4.0]],
         });

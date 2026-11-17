@@ -1093,7 +1093,7 @@ impl Viewer {
         }
         self.inserts.clone_from(&options.inserts);
         self.set_language(&options.language);
-        self.comfort_configured(&options.comfort);
+        self.comfort_configured(options.comfort);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
             self.ui = ui.clamp(UI_SMALLEST, UI_LARGEST);
             self.scale = self.display * self.ui;
@@ -1394,10 +1394,10 @@ impl Viewer {
     /// `:ui`: says how large the interface is; with a number, makes it
     /// that many times its usual size (or that many percent of it); with
     /// `+` or `-`, a step larger or smaller. Returns whether `command`
-    /// was that.
+    /// was that, or one of how the pages are looked at (see `comfort`).
     fn ui_command(&mut self, command: &str) -> bool {
         let Some(wanted) = command.strip_prefix("ui") else {
-            return false;
+            return self.comfort_command(command);
         };
         if !(wanted.is_empty() || wanted.starts_with([' ', '+', '-'])) {
             return false;
@@ -2128,7 +2128,6 @@ impl Viewer {
         let modified = !unwritten.is_empty();
         if self.file_command(command)
             || self.ui_command(command)
-            || self.comfort_command(command)
             || self.settings_command(command)
             || self.language_command(command)
             || self.notes_command(command)
