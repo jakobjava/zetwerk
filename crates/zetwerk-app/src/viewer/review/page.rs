@@ -341,6 +341,10 @@ impl Viewer {
     /// the manager, where it is up. Called before the other panels of
     /// reviewing, while it is still known whether the change was set in
     /// place.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the slip: what it says, where it goes, its edge"
+    )]
     pub(in super::super) fn review_slip(
         &mut self,
         scene: &mut Scene,
@@ -431,6 +435,13 @@ impl Viewer {
             let shift = step * card as f64;
             solid(scene, has, LENS_EDGE, (x + shift, y - shift, width, height));
         }
+        let edge = scale.round().max(1.0);
+        solid(
+            scene,
+            has,
+            LENS_EDGE,
+            (x - edge, y - edge, width + 2.0 * edge, height + 2.0 * edge),
+        );
         scene.quads.push(Quad {
             texture: image.id,
             x: x as f32,

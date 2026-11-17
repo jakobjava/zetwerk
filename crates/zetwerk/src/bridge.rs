@@ -1336,7 +1336,10 @@ mod tests {
         let listed = bridge.proposals().unwrap();
         assert_eq!(
             listed["proposals"],
-            json!([{ "id": id, "line": 6, "old_str": "lazy", "new_str": "busy", "stale": false }])
+            json!([{
+                "id": id, "line": 6, "old_str": "lazy", "new_str": "busy", "stale": false,
+                "suggestion": 1,
+            }])
         );
         assert_eq!(bridge.state().unwrap().proposals, 1);
         assert_eq!(

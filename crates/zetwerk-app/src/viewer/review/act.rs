@@ -76,7 +76,7 @@ impl Viewer {
                 | "always!"
                 | "rewrite"
                 | "alternatives"
-                | "later"
+                | "aside"
                 | "request"
                 | "brief"
                 | "proposal"
@@ -112,7 +112,7 @@ impl Viewer {
             ("always" | "always!", words) => self.add_instruction(words, name == "always!"),
             ("rewrite", _) => self.rewrite_here(),
             ("alternatives", words) => self.ask_alternatives(words),
-            ("later", _) => self.later_here(),
+            ("aside", _) => self.later_here(),
             ("request", _) => self.begin_review_request(),
             ("brief", rest) => self.brief_command(rest),
             ("proposal", "next" | "previous") if self.has_suggestions() => {

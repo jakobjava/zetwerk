@@ -2352,7 +2352,7 @@ impl Engine {
         let command = match c {
             'A' => "rewrite",
             'p' => "alternatives",
-            'z' => "later",
+            'z' => "aside",
             'R' => "review",
             '!' => "always",
             _ => "request",

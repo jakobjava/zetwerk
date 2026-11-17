@@ -5048,21 +5048,24 @@ mod tests {
             .map(|proposal| &now[proposal.range.clone()])
             .collect();
         assert_eq!(ranges, ["lazy dog", "end"]);
+        // Undone, the accepted one waits again.
         press(&mut viewer, "u");
         assert_eq!(viewer.text(), Some(text));
+        assert_eq!(viewer.proposals().len(), 3);
 
         // Typing in the text of one makes it stale: it can only go.
         press(&mut viewer, "/dog<CR>x");
-        assert!(viewer.proposals()[0].stale && !viewer.proposals()[1].stale);
+        let stale: Vec<bool> = viewer.proposals().iter().map(|p| p.stale).collect();
+        assert_eq!(stale, [false, true, false]);
         press(&mut viewer, "0]p");
         assert!(panel(&mut viewer));
         press(&mut viewer, "ga");
         assert!(viewer.text().unwrap().contains("lazy og"), "not made");
-        assert_eq!(viewer.proposals().len(), 2);
+        assert_eq!(viewer.proposals().len(), 3);
         // Undoing the typing makes it good again.
         press(&mut viewer, "u");
-        assert!(!viewer.proposals()[0].stale);
-        press(&mut viewer, "gg]pgr");
+        assert!(!viewer.proposals()[1].stale);
+        press(&mut viewer, "gg0]pgrgg0]pgr");
         assert_eq!(viewer.proposals().len(), 1);
         press(&mut viewer, ":accept all<CR>");
         assert_eq!(

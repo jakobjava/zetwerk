@@ -492,7 +492,7 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("proposal flip"),
     ),
     (
-        "suggestion of an agent: rewrite it, answer it, other wordings, put aside",
+        "suggestion: rewrite, answer, other wordings, put aside",
         "gA  gq  gp  gz",
         Does::Tells,
     ),
@@ -517,7 +517,7 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("request"),
     ),
     (
-        "instruction to agents, for good: of what you said, or off the selection",
+        "instruction to agents, for good (what you said, or the selection)",
         "g!  :always",
         Does::Run("always"),
     ),
