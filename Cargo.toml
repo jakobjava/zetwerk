@@ -57,6 +57,16 @@ rayon = "1.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Must be the version Typst links, so that `FontInstance::rusty()` is usable.
 rustybuzz = "0.20.1"
+# The compositor's clipboard, through the crates winit's Wayland support
+# brings in already (see `zetwerk-app`'s `clipboard`).
+wayland-client = "0.31.15"
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+# Pasted images: their size, and made smaller. The version and the
+# formats Typst reads images with.
+# The cells of a table copied from a web page: the version harper reads
+# HTML with.
+html5ever = "0.40.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

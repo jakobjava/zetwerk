@@ -1800,6 +1800,17 @@ impl Engine {
                     Key::Char('n') if !press.ctrl => "notes",
                     // And to what the page shows as nothing.
                     Key::Char('i') if !press.ctrl => "invisible",
+                    // And to shape the table the cursor is in: a row, a
+                    // column more below or right (`]`), above or left
+                    // (`[`); this one moved; this one taken out; the
+                    // first row the header or not; the table copied.
+                    Key::Char(c @ ('r' | 'c' | 'R' | 'C' | 'x' | 'X' | 'h' | 'y'))
+                        if !press.ctrl =>
+                    {
+                        let command = follow::table_key(c, forward);
+                        self.effects.push(Effect::Command(command.to_owned()));
+                        return;
+                    }
                     _ => return self.fail(),
                 };
                 let way = if forward { "next" } else { "previous" };

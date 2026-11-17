@@ -278,6 +278,7 @@ impl ApplicationHandler<Event> for App {
             return;
         };
         match event {
+            Event::Wake if session.viewer.paste_progress() => session.after_keys(),
             Event::Wake => {}
             Event::FilesChanged(paths) => session.files_changed(&paths),
             Event::Request(Request::Quit) => event_loop.exit(),
@@ -372,6 +373,7 @@ impl ApplicationHandler<Event> for App {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
+        crate::clipboard::keep_after_exit();
         if let Some(session) = &mut self.session {
             session.viewer.sync();
         }
@@ -484,6 +486,7 @@ impl Session {
         };
         session.viewer.export_in_background(wake(proxy));
         session.viewer.report_in_background(wake(proxy));
+        session.viewer.paste_in_background(wake(proxy));
         session.watch_dependencies();
         switch::welcome(&mut session.viewer, options, false);
         session.scheduler.request(Urgency::Now, Instant::now());
