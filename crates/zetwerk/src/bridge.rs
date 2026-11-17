@@ -1039,6 +1039,7 @@ mod tests {
             talk: zetwerk_app::viewer::Talk::default(),
             report: zetwerk_app::viewer::report::Settings::default(),
             authors: zetwerk_app::viewer::authors::Settings::default(),
+            settings: zetwerk_app::settings::Stored::default(),
         }
     }
 

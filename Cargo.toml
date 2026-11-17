@@ -52,6 +52,8 @@ notify = "8.2"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
+# Writes changes into the settings file as it was written.
+toml_edit = "0.25"
 rayon = "1.10"
 # The time of day, for the clock of a talk (Typst links it already).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

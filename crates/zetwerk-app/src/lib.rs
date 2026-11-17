@@ -15,6 +15,7 @@ pub mod power;
 pub mod reading;
 pub mod ref_text;
 pub mod sections;
+pub mod settings;
 pub mod style_text;
 pub mod table_text;
 pub mod typst_text;

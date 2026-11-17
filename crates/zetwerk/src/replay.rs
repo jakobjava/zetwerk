@@ -94,6 +94,11 @@ pub fn run(args: &Args, report: &Path) -> Result<(), String> {
         review: config.review.settings(),
         talk: config.present.talk(),
         authors: config.authors.settings(),
+        settings: recorded
+            .config
+            .as_deref()
+            .map(|text| config::stored_of(text, &config))
+            .unwrap_or_default(),
         report: Settings {
             keys: DEFAULT_KEYS,
             config: recorded.config.clone(),
@@ -247,7 +252,10 @@ mod tests {
         let keys = |text: &str| config::parse(text).map(|config| config.report.keys);
         assert_eq!(keys("[report]\nkeys = 0\n"), Ok(Some(0)));
         assert_eq!(keys(""), Ok(None));
-        assert!(keys("[report]\nkeep = 3\n").is_err());
+        // What is not understood is left out, and said.
+        let odd = config::parse("[report]\nkeep = 3\n");
+        assert_eq!(odd.as_ref().map(|config| config.report.keys), Ok(None));
+        assert!(odd.is_ok_and(|config| config.ignored.len() == 1));
         assert!(built().contains("(commit "));
     }
 }

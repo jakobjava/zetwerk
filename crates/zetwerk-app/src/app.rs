@@ -72,6 +72,9 @@ pub struct Options {
     pub report: viewer::report::Settings,
     /// What the user has to say about showing who wrote what.
     pub authors: viewer::authors::Settings,
+    /// What the settings file says of the options, and how to keep
+    /// what is changed (see [`crate::settings`]).
+    pub settings: crate::settings::Stored,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.

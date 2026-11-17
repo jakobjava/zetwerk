@@ -60,11 +60,11 @@ const MANY_WORDS: usize = 30;
 pub(super) struct Find {
     /// Whether matches are shown at all (`:hlsearch`), and whether what
     /// keys took is (`:feedback`).
-    highlight: bool,
-    feedback: bool,
+    pub(super) highlight: bool,
+    pub(super) feedback: bool,
     /// Whether the matches of the last search are shown: from a search
     /// on, until `:noh` or Escape.
-    shown: bool,
+    pub(super) shown: bool,
     /// How many searches the engine of which file had made when last
     /// asked.
     searches: Option<(FileId, u64)>,

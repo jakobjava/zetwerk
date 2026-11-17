@@ -29,6 +29,7 @@ mod local;
 mod manager;
 mod margin;
 pub mod notes;
+pub(crate) mod options;
 mod pages;
 mod palette;
 mod paste;
@@ -41,6 +42,7 @@ mod registers;
 pub mod report;
 pub mod review;
 mod saving;
+mod set;
 mod shape;
 mod slides;
 mod sources;
@@ -994,6 +996,8 @@ pub struct Viewer {
     present: present::Present,
     /// What happened lately, for a report (see [`report`]).
     report: report::Recorder,
+    /// The user's settings (see [`set`]).
+    settings: set::Settings,
     pub stats: Stats,
     /// Who wrote what (see `authors`).
     authors: authors::Authors,
@@ -1113,6 +1117,7 @@ impl Viewer {
             pages: pages::Pages::default(),
             present: present::Present::default(),
             report: report::Recorder::default(),
+            settings: set::Settings::default(),
             stats: Stats::default(),
             authors: authors::Authors::default(),
         };
@@ -1173,6 +1178,7 @@ impl Viewer {
                  gD for how it looks, g? for all there is to do",
             );
         }
+        self.configure_settings(&options.settings, options.complaint.is_some());
         if let Some(complaint) = &options.complaint {
             self.alert(complaint.clone());
         }
@@ -1488,10 +1494,9 @@ impl Viewer {
         };
         self.set_ui_scale(ui);
         self.notice(format!(
-            "interface at {:.0} %  (:ui + and :ui - change it; to keep it, \
-             ui_scale = {:.2} under [view] in config.toml)",
-            self.ui * 100.0,
-            self.ui
+            "interface at {:.0} %  (:ui + and :ui - change it; it is kept as \
+             ui_scale under [view])",
+            self.ui * 100.0
         ));
         true
     }
@@ -1839,7 +1844,11 @@ impl Viewer {
         }
         self.message = None;
         let press = self.shift_enter(press);
-        if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
+        if self.stop_key(press)
+            || self.set_key(press)
+            || self.confirm_key(press)
+            || self.cell_block_key(press)
+        {
             return;
         }
         if self.present_key(press) {
@@ -1948,6 +1957,7 @@ impl Viewer {
                 columns: self.source_size.0,
             },
         };
+        editor.set_rules(self.settings.rules());
         let typed = editor.key(press, &shown);
         let typing = editor.mode() == editor::Mode::Insert;
         // A paragraph is one line of the source and may fill pages: the
@@ -2204,12 +2214,14 @@ impl Viewer {
 
     #[allow(clippy::too_many_lines, reason = "a line for every command")]
     fn execute(&mut self, command: &str) {
+        self.settings_before(command);
         if self.start_command(command) {
             return;
         }
         let unwritten = self.unwritten();
         let modified = !unwritten.is_empty();
         if self.file_command(command)
+            || self.set_command(command)
             || self.ui_command(command)
             || self.settings_command(command)
             || self.language_command(command)
@@ -2429,6 +2441,7 @@ impl Viewer {
         self.review_panels(&mut scene, has);
         self.hints(&mut scene, has);
         self.assist_panels(&mut scene, has);
+        self.settings_panel(&mut scene, has);
         self.margin_panel(&mut scene, has);
         self.refused_panel(&mut scene, has);
         scene
@@ -3363,6 +3376,7 @@ mod tests {
     mod present;
     mod report;
     mod review;
+    mod settings;
     mod speed;
     mod typing;
     mod typist;

@@ -75,8 +75,8 @@ const WARNING: &str = "#b57614";
 #[derive(Default)]
 pub(super) struct Margin {
     /// Whether the tags, and the complaints, are left out.
-    hide_tags: bool,
-    hide_errors: bool,
+    pub(super) hide_tags: bool,
+    pub(super) hide_errors: bool,
     /// The pages the marks are of.
     basis: Option<Basis>,
     /// The page a part was put into since (see `local`), as it is shown.

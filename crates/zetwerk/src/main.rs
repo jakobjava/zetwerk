@@ -2,6 +2,7 @@
 
 mod bridge;
 mod config;
+mod config_write;
 mod replay;
 
 use std::ffi::OsString;
@@ -73,6 +74,17 @@ Settings are read from ~/.config/zetwerk/config.toml:
   [keys]
   timeoutlen = 1000       how long, in ms, the first keys of a mapping
                           wait for the rest
+  [aids]
+  preset = \"quiet\"        what the page shows besides itself: quiet (what
+                          is wrong, what is asked for), \"writing\" (and
+                          spelling, word endings, tags), \"everything\"
+  numbers = \"normal\"      and each aid by itself; :set in the window
+                          lists every option, and what you change there
+                          is written here (only what is not usual)
+  [typing]
+  tab_words = false       Tab takes the faint rest of a word (Ctrl-Y does)
+  dollar = true           $ begins an equation in running text
+  tidy = true             equations are tidied as they are typed
 
 A file that another file includes is opened as part of that document:
 the whole document is shown, the file is what is edited.
@@ -178,7 +190,7 @@ fn begin_if_new(path: &Path) -> Result<(), String> {
 /// the settings say.
 fn options(
     args: &Args,
-    config: &config::Config,
+    (config, settings): (&config::Config, &zetwerk_app::settings::Stored),
     path: PathBuf,
     font_set: FontSet,
     complaint: Option<String>,
@@ -206,6 +218,7 @@ fn options(
         talk: config.present.talk(),
         report: replay::report_settings(config),
         authors: config.authors.settings(),
+        settings: settings.clone(),
     })
 }
 
@@ -255,8 +268,10 @@ fn run() -> Result<(), String> {
     let paced = args.paced;
     let script = (!args.keys.is_empty() || args.screenshot.is_some())
         .then(|| (args.keys.clone(), args.screenshot.clone()));
-    let (config, complaint) = config::load();
-    let options = options(&args, &config, input, font_set, complaint)?;
+    let (config, settings, complaint) = config::load();
+    let mut options = options(&args, (&config, &settings), input, font_set, complaint)?;
+    // Only a window tells what changed since the last start.
+    options.settings.window = true;
     // Kept until the window closes; dropping it stops the server.
     let mut server = None;
     app::run(options, |handle| {
@@ -432,7 +447,7 @@ fn mcp(args: &Args) -> Result<(), String> {
     }
     // Standard output is the agent's line from here on: complaints go to
     // standard error.
-    let (config, complaint) = config::load();
+    let (config, settings, complaint) = config::load();
     if let Some(complaint) = &complaint {
         eprintln!("{complaint}");
     }
@@ -441,7 +456,7 @@ fn mcp(args: &Args) -> Result<(), String> {
     } else {
         FontSet::EmbeddedAndSystem
     };
-    let options = options(args, &config, path, font_set, None)?;
+    let options = options(args, (&config, &settings), path, font_set, None)?;
     match headless::spawn(&options) {
         Ok((handle, thread)) => {
             // There is no window to save in: the agent may, unless the

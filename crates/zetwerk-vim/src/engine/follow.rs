@@ -130,6 +130,7 @@ const Z: &[(&str, &str)] = &[
         "p",
         "the suggestion: as it would be, its other wordings, as it is",
     ),
+    ("a", "aids on the page: quiet, writing, everything"),
 ];
 
 /// The keys after `Z`.
@@ -257,6 +258,24 @@ const PLAY: &[(&str, &str)] = &[
     ("@", "play the last played again"),
     (":", "the last command line again"),
 ];
+
+/// What can follow `prefix` (`g`, `z`, `Z`, `]` or `[`) whatever is under
+/// way, as the tables above say: for a host to say what a mapping of the
+/// user's hides.
+#[must_use]
+pub fn keys_after(prefix: char) -> Vec<(String, &'static str)> {
+    match prefix {
+        'g' => G
+            .iter()
+            .map(|(keys, does, _)| ((*keys).to_owned(), *does))
+            .collect(),
+        'z' => listed(Z),
+        'Z' => listed(SHIFT_Z),
+        ']' => listed(FORWARD),
+        '[' => listed(BACKWARD),
+        _ => Vec::new(),
+    }
+}
 
 /// What the engine waits for, and what can come next.
 #[derive(Debug, Clone, PartialEq, Eq)]
