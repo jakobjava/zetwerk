@@ -178,6 +178,7 @@ impl Session {
         // It finishes what it is doing before it ends; nobody waits.
         std::thread::spawn(move || drop(old));
         viewer.wake_for_language(wake());
+        self.viewer.leaving();
         self.viewer.sync();
         self.viewer = viewer;
         self.viewer.export_in_background(wake());

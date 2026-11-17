@@ -14,6 +14,10 @@
 //! layout = "split"    # or "source", "page": what the window shows
 //! slides = false      # one page at a time, whole
 //! ui_scale = 1.0      # how large everything that is not a page is
+//! restore = true      # open a document where it was left
+//! colours = "day"     # or "night", "sepia", "auto": the pages on screen
+//! typewriter = false  # keep the line typed in the middle of the window
+//! focus = "off"       # or "paragraph", "sentence": the rest faint
 //!
 //! [power]
 //! mode = "auto"       # or "saver", "performance"
@@ -49,7 +53,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use zetwerk_app::power::PowerMode;
 use zetwerk_app::viewer::agent::AgentEdits;
-use zetwerk_app::viewer::{Keymap, Panes};
+use zetwerk_app::viewer::{Keymap, Panes, comfort};
 
 #[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +114,55 @@ pub struct View {
     pub slides: bool,
     /// How many times its usual size the interface is.
     pub ui_scale: Option<f64>,
+    /// Whether a document is opened where it was left (default: yes).
+    pub restore: Option<bool>,
+    /// How the pages are coloured on screen.
+    pub colours: Option<Colours>,
+    #[serde(default)]
+    pub typewriter: bool,
+    pub focus: Option<Focus>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Colours {
+    Day,
+    Night,
+    Sepia,
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Focus {
+    Off,
+    Paragraph,
+    Sentence,
+}
+
+impl View {
+    /// What the viewer takes of typewriter, focus, colours and finding
+    /// the place left; `fresh` where the command line says not to find
+    /// it this time.
+    #[must_use]
+    pub fn comfort(&self, fresh: bool) -> comfort::Settings {
+        comfort::Settings {
+            restore: self.restore.unwrap_or(true),
+            fresh,
+            colours: match self.colours {
+                None | Some(Colours::Day) => comfort::Colours::Day,
+                Some(Colours::Night) => comfort::Colours::Night,
+                Some(Colours::Sepia) => comfort::Colours::Sepia,
+                Some(Colours::Auto) => comfort::Colours::Auto,
+            },
+            typewriter: self.typewriter,
+            focus: match self.focus {
+                None | Some(Focus::Off) => None,
+                Some(Focus::Paragraph) => Some(comfort::FocusBy::Paragraph),
+                Some(Focus::Sentence) => Some(comfort::FocusBy::Sentence),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -365,6 +418,15 @@ mod tests {
                 .is_some_and(|ui| (ui - 1.5).abs() < 1e-9)
         );
         assert_eq!(config.power.mode, Some(Mode::Saver));
+        let view = parse("[view]\nrestore = false\ncolours = \"sepia\"\nfocus = \"sentence\"\n")
+            .unwrap_or_default()
+            .view;
+        let settings = view.comfort(false);
+        assert!(!settings.restore && !settings.typewriter);
+        assert_eq!(settings.colours, comfort::Colours::Sepia);
+        assert_eq!(settings.focus, Some(comfort::FocusBy::Sentence));
+        assert!(Config::default().view.comfort(true).restore);
+        assert!(parse("[view]\ncolours = \"purple\"\n").is_err());
         assert_eq!(config.keys.keymap().1, None);
         assert!(parse("[keys.normal]\n\"gx\" = 3\n").is_err());
         // Several keys in insert mode too, as Vim's `inoremap jk <Esc>`;

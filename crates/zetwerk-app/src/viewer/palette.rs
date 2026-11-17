@@ -547,6 +547,36 @@ const ALL: &[(&str, &str, Does)] = &[
         ":ghost",
         Does::Run("ghost"),
     ),
+    (
+        "typewriter: the line typed stays at its height: on or off",
+        "zT  :typewriter",
+        Does::Run("typewriter"),
+    ),
+    (
+        "focus: all but this paragraph faint (:focus sentence): on or off",
+        "zf  :focus",
+        Does::Run("focus"),
+    ),
+    (
+        "zen: nothing but the text, no status line: on or off",
+        "ze  :zen",
+        Does::Run("zen"),
+    ),
+    (
+        "night: the pages light on dark (not in exports): on or off",
+        "zn  :night",
+        Does::Run("night"),
+    ),
+    (
+        "sepia: the pages on warm paper: on or off",
+        ":sepia",
+        Does::Run("sepia"),
+    ),
+    (
+        "colours of the pages: day, night, sepia, or auto (desktop, hour)",
+        ":colours",
+        Does::Ask("colours "),
+    ),
 ];
 
 /// The keys of each entry of the list of all there is to do, and the

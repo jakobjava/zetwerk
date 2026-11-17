@@ -10,6 +10,9 @@ use std::fmt;
 
 use bytemuck::{Pod, Zeroable};
 
+mod tone;
+pub use tone::{Paper, Tone};
+
 /// Identifies an image the compositor holds. Equal ids mean equal pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TextureId(pub u128);
@@ -63,9 +66,54 @@ fn vertex(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut {
 @group(0) @binding(0) var image: texture_2d<f32>;
 @group(0) @binding(1) var image_sampler: sampler;
 
+// How the pages are coloured (see `tone`): a map of straight colours,
+// then how many pages and pictures, whether to map, what pictures are
+// multiplied by; then where the pages and the pictures are.
+struct Tone {
+    red: vec4f,
+    green: vec4f,
+    blue: vec4f,
+    add: vec4f,
+    counts: vec4f,
+    pages: array<vec4f, 16>,
+    pictures: array<vec4f, 16>,
+}
+
+@group(1) @binding(0) var<uniform> tone: Tone;
+
+fn inside(at: vec2f, rect: vec4f) -> bool {
+    return at.x >= rect.x && at.y >= rect.y && at.x < rect.x + rect.z && at.y < rect.y + rect.w;
+}
+
 @fragment
 fn fragment(in: VertexOut) -> @location(0) vec4f {
-    return textureSample(image, image_sampler, in.uv);
+    let colour = textureSample(image, image_sampler, in.uv);
+    if tone.counts.z < 0.5 || colour.a <= 0.0 {
+        return colour;
+    }
+    let at = in.position.xy;
+    var on_page = false;
+    for (var i = 0u; i < u32(tone.counts.x); i++) {
+        if inside(at, tone.pages[i]) {
+            on_page = true;
+            break;
+        }
+    }
+    if !on_page {
+        return colour;
+    }
+    for (var i = 0u; i < u32(tone.counts.y); i++) {
+        if inside(at, tone.pictures[i]) {
+            return vec4f(colour.rgb * tone.counts.w, colour.a);
+        }
+    }
+    let straight = colour.rgb / colour.a;
+    let mapped = vec3f(
+        dot(tone.red.xyz, straight),
+        dot(tone.green.xyz, straight),
+        dot(tone.blue.xyz, straight),
+    ) + tone.add.xyz;
+    return vec4f(clamp(mapped, vec3f(0.0), vec3f(1.0)) * colour.a, colour.a);
 }
 ";
 
@@ -94,6 +142,13 @@ pub struct Gpu {
     textures: HashMap<TextureId, Entry>,
     texture_bytes: u64,
     frame: u64,
+    /// How the pages are coloured, as last asked; the uniform the shader
+    /// reads it from; and what is bound for quads that take the tone and
+    /// for all others.
+    paper: Paper,
+    tone: wgpu::Buffer,
+    toned: wgpu::BindGroup,
+    plain: wgpu::BindGroup,
 }
 
 impl Gpu {
@@ -138,9 +193,10 @@ impl Gpu {
                 },
             ],
         });
+        let (tone_layout, tone, toned, plain) = tone_bindings(&device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("quad"),
-            bind_group_layouts: &[Some(&bind_layout)],
+            bind_group_layouts: &[Some(&bind_layout), Some(&tone_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -192,7 +248,23 @@ impl Gpu {
             textures: HashMap::new(),
             texture_bytes: 0,
             frame: 0,
+            paper: Paper::default(),
+            tone,
+            toned,
+            plain,
         })
+    }
+
+    /// Colours the pages of the frames to come as `paper` says (see
+    /// [`Paper`]).
+    pub fn set_paper(&mut self, paper: &Paper) {
+        if *paper == self.paper {
+            return;
+        }
+        let uniform = tone::uniform(Some(paper));
+        self.queue
+            .write_buffer(&self.tone, 0, bytemuck::cast_slice(&uniform));
+        paper.clone_into(&mut self.paper);
     }
 
     #[must_use]
@@ -288,7 +360,7 @@ impl Gpu {
         let (width, height) = (size.0.max(1) as f32, size.1.max(1) as f32);
         let mut vertices = Vec::with_capacity(quads.len() * 6);
         let mut draws = Vec::with_capacity(quads.len());
-        for quad in quads {
+        for (index, quad) in quads.iter().enumerate() {
             let Some(entry) = self.textures.get_mut(&quad.texture) else {
                 continue;
             };
@@ -310,7 +382,7 @@ impl Gpu {
                 corner(left, bottom, 0.0, 1.0),
                 corner(right, bottom, 1.0, 1.0),
             ]);
-            draws.push((quad.texture, first..first + 6));
+            draws.push((quad.texture, first..first + 6, self.paper.tones(index)));
         }
 
         let vertex_buffer = (!vertices.is_empty()).then(|| {
@@ -347,9 +419,11 @@ impl Gpu {
             if let Some(buffer) = &vertex_buffer {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
-                for (texture, range) in draws {
+                for (texture, range, toned) in draws {
                     if let Some(entry) = self.textures.get(&texture) {
                         pass.set_bind_group(0, &entry.bind_group, &[]);
+                        let tone = if toned { &self.toned } else { &self.plain };
+                        pass.set_bind_group(1, tone, &[]);
                         pass.draw(range, 0..1);
                     }
                 }
@@ -469,6 +543,54 @@ impl Gpu {
     }
 }
 
+/// The layout of the uniform that says how pages are coloured, the
+/// buffer it is in, and what is bound for quads on pages and for others:
+/// the latter is a uniform that maps nothing.
+fn tone_bindings(
+    device: &wgpu::Device,
+) -> (
+    wgpu::BindGroupLayout,
+    wgpu::Buffer,
+    wgpu::BindGroup,
+    wgpu::BindGroup,
+) {
+    use wgpu::util::DeviceExt as _;
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("tone"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let buffer = |label, contents: &[f32]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(contents),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        })
+    };
+    let nothing = tone::uniform(None);
+    let (toned, plain) = (buffer("tone", &nothing), buffer("no tone", &nothing));
+    let group = |buffer: &wgpu::Buffer| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        })
+    };
+    let (toned_group, plain_group) = (group(&toned), group(&plain));
+    (layout, toned, toned_group, plain_group)
+}
+
 /// Finds a graphics adapter, preferring the one that uses least power: the
 /// compositor only places a handful of rectangles.
 pub fn adapter(
@@ -560,6 +682,55 @@ mod tests {
         // Half white over red, then over black.
         assert_eq!(pixel(&pixels, 64, 35, 25), [255, 128, 128, 255]);
         assert_eq!(pixel(&pixels, 64, 50, 25), [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn pages_take_their_tone_where_they_are_and_pictures_keep_theirs() {
+        let Some(mut gpu) = headless() else {
+            eprintln!("no graphics adapter; skipping");
+            return;
+        };
+        let white = TextureId(1);
+        gpu.upload(white, 1, 1, &[255; 4]);
+        let quad = |x: f32| Quad {
+            texture: white,
+            x,
+            y: 0.0,
+            width: 32.0,
+            height: 32.0,
+        };
+        // The page is where the first quad is, and half of the second
+        // reaches out of it; the third is the interface, over the page.
+        let quads = [quad(0.0), quad(16.0), quad(0.0)];
+        gpu.set_paper(&Paper {
+            tone: Tone::Night,
+            quads: vec![0..2],
+            pages: vec![[0.0, 0.0, 40.0, 32.0]],
+            pictures: vec![[4.0, 4.0, 4.0, 4.0]],
+        });
+        let pixels = gpu
+            .capture((64, 32), &quads[..2])
+            .unwrap_or_else(|err| panic!("{err}"));
+        let night = Tone::Night.apply([255; 4]);
+        let toned = pixel(&pixels, 64, 20, 20);
+        let near = toned.iter().zip(night).all(|(a, b)| a.abs_diff(b) <= 2);
+        assert!(near, "on the page: {toned:?}, not {night:?}");
+        assert_eq!(pixel(&pixels, 64, 44, 20), [255; 4], "beside it");
+        let picture = pixel(&pixels, 64, 5, 5);
+        assert!(
+            picture[0] > 200 && picture[0] < 230,
+            "a picture: {picture:?}"
+        );
+        let pixels = gpu
+            .capture((64, 32), &quads)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(pixel(&pixels, 64, 20, 20), [255; 4], "the interface");
+        // By day, nothing.
+        gpu.set_paper(&Paper::default());
+        let pixels = gpu
+            .capture((64, 32), &quads[..1])
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(pixel(&pixels, 64, 20, 20), [255; 4]);
     }
 
     #[test]

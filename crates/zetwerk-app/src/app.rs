@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use typst_layout::PagedDocument;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -29,6 +29,7 @@ use crate::watch::FileWatcher;
 
 mod refusal;
 mod switch;
+mod wheel;
 
 /// How the window should be opened.
 pub struct Options {
@@ -63,6 +64,9 @@ pub struct Options {
     pub language: zetwerk_language::Settings,
     /// Where the user's own starters for new documents are.
     pub templates: Option<PathBuf>,
+    /// Typewriter, focus, the colours of the pages, and whether the
+    /// place the document was left at is found again.
+    pub comfort: viewer::comfort::Settings,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -244,6 +248,7 @@ impl ApplicationHandler<Event> for App {
             // Away from the window is a good moment to make sure. A
             // button let go there may never be heard of.
             WindowEvent::Focused(false) => {
+                session.viewer.leaving();
                 session.viewer.sync();
                 session.viewer.pointer_released();
             }
@@ -286,6 +291,7 @@ impl ApplicationHandler<Event> for App {
             return;
         };
         let now = Instant::now();
+        session.viewer.keep_place_if_due(now);
         // A pointer held beyond the text while it selects moves the view
         // along, and keys that wait for another are explained once they
         // pause; nothing else here goes by the clock.
@@ -348,6 +354,7 @@ impl ApplicationHandler<Event> for App {
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
         if let Some(session) = &mut self.session {
+            session.viewer.leaving();
             session.viewer.sync();
         }
     }
@@ -433,6 +440,11 @@ impl Session {
             options,
         )?;
         let mut viewer = viewer;
+        viewer.desktop_theme(
+            window
+                .theme()
+                .map(|theme| theme == winit::window::Theme::Dark),
+        );
         viewer.wake_for_language(wake(proxy));
         viewer.wake_for_review(wake(proxy));
         let mut session = Self {
@@ -517,11 +529,9 @@ impl Session {
                 self.after_keys();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                let shown = self.viewer.where_shown();
                 let line = 60.0 * self.window.scale_factor();
-                let (dx, dy) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (f64::from(x) * line, f64::from(y) * line),
-                    MouseScrollDelta::PixelDelta(position) => (position.x, position.y),
-                };
+                let (dx, dy) = wheel::delta(delta, line, self.modifiers.shift_key());
                 if self.modifiers.control_key() {
                     self.viewer.zoom_at(1.1_f64.powf(dy / line), self.cursor);
                 } else {
@@ -529,9 +539,24 @@ impl Session {
                     // down, which is the view moving up.
                     self.viewer.scroll(-dx, -dy);
                 }
+                // The end of a swipe, or a page that cannot go further:
+                // nothing to draw.
+                if self.viewer.where_shown() == shown {
+                    return;
+                }
             }
+            // Only where winit reports pinches (not on Wayland, where
+            // Ctrl and two fingers zoom instead: see `wheel`).
             WindowEvent::PinchGesture { delta, .. } => {
-                self.viewer.zoom_at(1.0 + delta, self.cursor);
+                let shown = self.viewer.where_shown();
+                self.viewer.zoom_at(wheel::pinch(delta), self.cursor);
+                if self.viewer.where_shown() == shown {
+                    return;
+                }
+            }
+            WindowEvent::ThemeChanged(theme) => {
+                self.viewer
+                    .desktop_theme(Some(theme == winit::window::Theme::Dark));
             }
             _ => return,
         }
@@ -658,6 +683,7 @@ impl Session {
             && scene.wanted.is_empty()
             && self.rasterizer.is_idle();
         self.rasterizer.request(scene.wanted);
+        self.gpu.set_paper(&scene.paper);
         self.present(&scene.quads);
 
         let stats = &mut self.viewer.stats;

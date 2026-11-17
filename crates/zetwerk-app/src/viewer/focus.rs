@@ -57,7 +57,7 @@ const ABOVE: &[&str] = &["numerator", "exponent", "upper", "upper limit", "index
 /// What the aids of this module keep between frames.
 pub(super) struct Focus {
     /// Whether they are drawn (`:hints`).
-    on: bool,
+    pub(super) on: bool,
     /// What was found, and for which text, cursor and pages.
     found: Option<(Key, Found)>,
 }

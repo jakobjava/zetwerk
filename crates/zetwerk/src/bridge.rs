@@ -868,6 +868,7 @@ mod tests {
             inserts: Vec::new(),
             language: zetwerk_language::Settings::default(),
             templates: None,
+            comfort: zetwerk_app::viewer::comfort::Settings::default(),
         }
     }
 

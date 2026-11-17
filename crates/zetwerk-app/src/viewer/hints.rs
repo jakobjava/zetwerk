@@ -91,8 +91,8 @@ const WORD_REST: usize = 2;
 
 /// Whether each of the aids is shown, and where they are.
 pub(super) struct Hints {
-    next_keys: bool,
-    ghost: bool,
+    pub(super) next_keys: bool,
+    pub(super) ghost: bool,
     /// The list of what can follow the keys typed.
     list: List,
     /// The rest of what is being typed.

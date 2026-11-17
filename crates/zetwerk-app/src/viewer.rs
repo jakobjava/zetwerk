@@ -11,6 +11,7 @@ mod aids;
 mod assist;
 mod buffers;
 mod cells;
+pub mod comfort;
 pub mod export;
 mod figures;
 mod find;
@@ -26,6 +27,7 @@ mod manager;
 mod margin;
 pub mod notes;
 mod palette;
+mod place;
 mod pointer;
 pub mod refer;
 mod refused;
@@ -494,6 +496,8 @@ pub struct Scene {
     pub quads: Vec<Quad>,
     /// Page tiles that are visible but not rasterized, most important first.
     pub wanted: Vec<Tile>,
+    /// What of it is paper, and how that is coloured (see `comfort`).
+    pub paper: crate::gpu::Paper,
 }
 
 /// The tiles last drawn completely for a page, kept as a stand-in while new
@@ -927,6 +931,10 @@ pub struct Viewer {
     find: find::Find,
     /// What the window waits for (see [`waiting`]).
     waiting: waiting::Waiting,
+    /// Typewriter, focus, zen, night (see [`comfort`]), and where the
+    /// document was left (see [`place`]).
+    comfort: comfort::Comfort,
+    place: place::Place,
     pub stats: Stats,
 }
 
@@ -1039,6 +1047,8 @@ impl Viewer {
             start: start::Start::default(),
             find: find::Find::default(),
             waiting: waiting::Waiting::default(),
+            comfort: comfort::Comfort::default(),
+            place: place::Place::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1083,6 +1093,7 @@ impl Viewer {
         }
         self.inserts.clone_from(&options.inserts);
         self.set_language(&options.language);
+        self.comfort_configured(&options.comfort);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
             self.ui = ui.clamp(UI_SMALLEST, UI_LARGEST);
             self.scale = self.display * self.ui;
@@ -1357,11 +1368,13 @@ impl Viewer {
     /// The window changed size or moved to a display with another scale.
     pub fn resize(&mut self, window: (u32, u32), scale: f64) {
         self.window = (window.0.max(1), window.1.max(1));
+        let before = self.display;
         self.display = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
             1.0
         };
+        self.keep_size_on_screen(before);
         self.scale = self.display * self.ui;
         self.arrange();
     }
@@ -1488,6 +1501,9 @@ impl Viewer {
     /// `below` to its bottom.
     fn follow_cursor_by(&mut self, above: f64, below: f64) {
         if self.shown_panes() == Panes::Source || self.follows_step() {
+            return;
+        }
+        if self.typewriter_follows() {
             return;
         }
         let (Some(change), Some(editor), Some(document), Some(world)) = (
@@ -1652,6 +1668,7 @@ impl Viewer {
         }
         self.margin_compiled(&output.world);
         self.refused_compiled(&output.world);
+        self.place_compiled();
     }
 
     /// The user turned the wheel or dragged on the touchpad, by this many
@@ -1713,6 +1730,9 @@ impl Viewer {
     }
 
     fn status_height(&self) -> u32 {
+        if self.status_hidden() {
+            return 0;
+        }
         (STATUS_HEIGHT * self.scale).round() as u32
     }
 
@@ -1747,6 +1767,7 @@ impl Viewer {
     /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
         self.message = None;
+        self.place.touched = true;
         let press = self.shift_enter(press);
         if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
             return;
@@ -2107,6 +2128,7 @@ impl Viewer {
         let modified = !unwritten.is_empty();
         if self.file_command(command)
             || self.ui_command(command)
+            || self.comfort_command(command)
             || self.settings_command(command)
             || self.language_command(command)
             || self.notes_command(command)
@@ -2347,6 +2369,7 @@ impl Viewer {
             };
             let origin = (f64::from(left) + visible.x as f64, visible.y as f64);
             let size = (f64::from(page_box.width), f64::from(page_box.height));
+            let paper = scene.quads.len();
             solid(scene, has, PAPER, (origin.0, origin.1, size.0, size.1));
 
             let wanted = tiles_in(&mut self.planned, visible.index, visible.region, || {
@@ -2384,6 +2407,7 @@ impl Viewer {
                 let tiles = wanted.iter().map(|tile| (tile.key, tile.region)).collect();
                 self.shown.insert(visible.index, Shown { zoom, tiles });
             }
+            self.focus_veils(scene, has, visible.index, origin, page);
             self.line_numbers(scene, has, visible.index, origin);
             self.step_marks(scene, has, visible.index, origin);
             self.language_page(scene, has, visible.index, origin);
@@ -2394,6 +2418,7 @@ impl Viewer {
             self.focus_marks(scene, has, visible.index, origin);
             // Last: the labels lie over all else.
             self.jump_labels(scene, has, visible.index, origin);
+            self.paper_page(scene, paper, page, visible.index, origin);
         }
     }
 
@@ -2940,6 +2965,9 @@ impl Viewer {
         };
         let markup = chrome::status_markup(&status, f64::from(self.window.0) / self.scale);
         let y = f64::from(self.window.1) - f64::from(self.status_height());
+        let Some(y) = self.zen_status(y, command.is_some() || self.message.is_some()) else {
+            return;
+        };
         self.panel(scene, has, &markup, |_| (0.0, y));
     }
 
@@ -3228,6 +3256,7 @@ mod tests {
     use super::*;
     use crate::keys;
 
+    mod comfort;
     mod cursor;
     mod equations;
     mod errors;
