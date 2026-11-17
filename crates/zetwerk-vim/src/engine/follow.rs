@@ -63,12 +63,6 @@ const G: &[(&str, &str, When)] = &[
     ("D", "how the document looks", When::Idle),
     ("B", "the bibliography", When::Idle),
     ("F", "figures and tables", When::Idle),
-    ("H", "table: the first row its header, or not", When::Idle),
-    (
-        "Y",
-        "table: copy it as cells, for a spreadsheet",
-        When::Idle,
-    ),
     ("s", "the page, the source, or both", When::Idle),
     ("?", "all there is to do", When::Idle),
     ("w", "jump to a label in view", When::Unpending),
@@ -132,6 +126,8 @@ const BACKWARD: &[(&str, &str)] = &[
         "x X",
         "table: this row, this column out (back to the one before)",
     ),
+    ("h", "table: the header a row like the others"),
+    ("y", "table: copy it as cells, for a spreadsheet"),
 ];
 
 /// The command a key after `]` (`forward`) or `[` shapes a table with,
