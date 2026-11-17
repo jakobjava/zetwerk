@@ -2158,8 +2158,7 @@ impl Viewer {
             "page next" => self.step_page(true),
             "page previous" => self.step_page(false),
             "describe" => self.describe(),
-            history if self.history_command(history) => {}
-            authors if self.authors_command(authors) => {}
+            history if self.history_command(history) || self.authors_command(history) => {}
             find if self.find_command(find) => {}
             "definition" => self.goto_definition(),
             "outline" => self.pick(false),

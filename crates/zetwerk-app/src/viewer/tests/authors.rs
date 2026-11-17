@@ -145,7 +145,7 @@ fn the_page_is_tinted_by_who_wrote_it_and_the_status_line_tells_the_story() {
     compile(&mut viewer);
     press(&mut viewer, "gA");
     let scene = viewer.scene(&|_| false);
-    assert!(!scene.quads.is_empty());
+    assert_ne!(scene.quads.len(), 0);
     let tinted = &viewer.authors.tinted;
     let cells: usize = tinted.values().map(|(_, cells)| cells.len()).sum();
     assert!(cells > 0, "the agent's words are tinted");
@@ -171,7 +171,7 @@ fn shares_a_statement_and_the_attribution_as_a_file() {
         .unwrap();
     press(&mut viewer, ":authors<CR>");
     let scene = viewer.scene(&|_| false);
-    assert!(!scene.quads.is_empty());
+    assert_ne!(scene.quads.len(), 0);
     let value = viewer.authorship(Some((1, 5))).unwrap();
     let agent = value["shares"]["characters_percent"]["agent, as written"]
         .as_f64()
@@ -213,7 +213,10 @@ fn shares_a_statement_and_the_attribution_as_a_file() {
         "{:?}",
         kinds_of(&other, "More from the agent.")
     );
-    assert!(all(&other, "More", Kind::Unknown), "it was in the file before");
+    assert!(
+        all(&other, "More", Kind::Unknown),
+        "it was in the file before"
+    );
     // What changed since is unknown.
     assert!(kinds_of(&other, "Mine was").contains(&Kind::Unknown));
     press(&mut other, "u");

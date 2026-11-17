@@ -2215,6 +2215,7 @@ impl Engine {
         self.motion_key(motion, host);
     }
 
+    #[allow(clippy::too_many_lines, reason = "one arm for each key after g")]
     fn g_key(&mut self, press: KeyPress, host: &mut impl Host) {
         let Key::Char(c) = press.key else {
             return self.reset_pending();

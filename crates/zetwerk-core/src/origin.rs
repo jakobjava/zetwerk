@@ -590,13 +590,11 @@ impl Attribution {
 
     /// The number of `credit`, made if there is none yet.
     fn number(&mut self, credit: &Credit) -> CreditId {
-        match self.credits.iter().position(|known| known == credit) {
-            Some(at) => at as CreditId,
-            None => {
-                self.credits.push(credit.clone());
-                (self.credits.len() - 1) as CreditId
-            }
+        if let Some(at) = self.credits.iter().position(|known| known == credit) {
+            return at as CreditId;
         }
+        self.credits.push(credit.clone());
+        (self.credits.len() - 1) as CreditId
     }
 
     /// The credit for an edit by `origin` now.
@@ -1344,6 +1342,11 @@ fn aligned(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
 
 /// The pairs of places of a longest common sequence of `a` and `b`, if
 /// they have one within [`MAX_DIFFERENCES`] of each other.
+#[allow(
+    clippy::many_single_char_names,
+    clippy::cast_possible_wrap,
+    reason = "the names of Myers' paper; counts of words are far below isize::MAX"
+)]
 fn myers(a: &[&str], b: &[&str]) -> Option<Vec<(usize, usize)>> {
     let (n, m) = (a.len() as isize, b.len() as isize);
     if n == 0 || m == 0 {
@@ -1787,6 +1790,6 @@ mod tests {
         let mut read = bytes.as_slice();
         assert_eq!(take_credit(&mut read), Some(credit));
         assert_eq!(take_marks(&mut read), Some(marks));
-        assert!(read.is_empty());
+        assert_eq!(read, &[] as &[u8]);
     }
 }

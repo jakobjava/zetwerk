@@ -378,7 +378,7 @@ pub fn sentence_at(text: &str, at: usize) -> Range<usize> {
 #[must_use]
 pub fn day_of(when: u64) -> (i64, u32, u32) {
     // Howard Hinnant's civil-from-days.
-    let days = (when / 86_400) as i64 + 719_468;
+    let days = i64::try_from(when / 86_400).unwrap_or(0) + 719_468;
     let era = days.div_euclid(146_097);
     let of_era = days.rem_euclid(146_097);
     let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
@@ -440,6 +440,10 @@ pub fn who(credit: &Credit) -> String {
 /// The story of the text `range` of `text` in one sentence: who wrote
 /// it, who changed it since, and when.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "a part of the sentence for each origin"
+)]
 pub fn story(text: &str, range: Range<usize>, origins: &Attribution, now: u64) -> String {
     let mut marks = Marks::new(origins);
     // Per kind: the earliest and the latest credit, and the words.
@@ -664,9 +668,11 @@ fn origin_of(fields: &[&str]) -> Option<Origin> {
 ///
 /// ```text
 /// # zetwerk authorship 1
-/// credit	1	2026-11-15T10:31:05Z	agent	Claude Code	2.1	3f2a…
-/// text	1	-	The cat sat on the mat.\n
+/// credit | 1 | 2026-11-15T10:31:05Z | agent | Claude Code | 2.1 | 3f2a…
+/// text | 1 | - | The cat sat on the mat.\n
 /// ```
+///
+/// (the fields are parted by tabs, shown here as `|`)
 #[must_use]
 pub fn export(name: &str, text: &str, origins: &Attribution) -> String {
     let mut out = format!(

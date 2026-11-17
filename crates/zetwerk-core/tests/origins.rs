@@ -503,13 +503,12 @@ fn what_a_key_costs_on_a_long_text() {
     let len = session.doc().text().len();
     let started = std::time::Instant::now();
     let keys = 2000;
-    let mut place = len / 2;
     for key in 0..keys {
+        let place = len / 2 + key as usize;
         session
             .doc()
             .edit(&[Replace::insert(place, "x")], key > 0)
             .unwrap();
-        place += 1;
     }
     let per_key = started.elapsed().as_secs_f64() * 1e6 / f64::from(keys);
     println!(

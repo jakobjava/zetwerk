@@ -613,7 +613,7 @@ impl Editor {
     /// Makes register `name` hold `text`: whole lines if it ends with a
     /// line break. See [`Engine::set_register`].
     pub fn set_register(&mut self, name: char, text: &str) {
-        self.credits.from_outside(text);
+        self.credits.came_from_outside(text);
         self.engine.set_register(name, text);
     }
 

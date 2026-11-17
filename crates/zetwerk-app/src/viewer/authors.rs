@@ -102,6 +102,18 @@ const DAY: u64 = 86_400;
 /// how it is tinted.
 type TintKey = (usize, u64, Tint, bool);
 
+/// The cells of a page that are tinted, in points of the page, and
+/// their colours.
+type Cells = Vec<(Rect, [u8; 4])>;
+
+/// How the agents' share moved over the history: by state on the line
+/// of the history, how many steps in, the share as written and as
+/// edited by the author since.
+type Moved = Vec<(usize, f64, f64)>;
+
+/// The shares of a revision of the text, and how they moved.
+type Shared = (u64, Counted, Moved);
+
 /// What is known of who wrote what, beside the text.
 #[derive(Debug, Default)]
 pub(super) struct Authors {
@@ -115,14 +127,14 @@ pub(super) struct Authors {
     proposed: HashMap<u64, Agent>,
     /// The tint of each page in view: cells in points of the page and
     /// their colours.
-    pub(super) tinted: HashMap<usize, (TintKey, Vec<(Rect, [u8; 4])>)>,
+    pub(super) tinted: HashMap<usize, (TintKey, Cells)>,
     /// The colours on the pages tinted last, and what they stand for.
     legend: Vec<([u8; 4], String)>,
     /// The story of the sentence under the cursor, for the revision and
     /// the sentence it is of.
     story: Option<((u64, Range<usize>), String)>,
     /// The shares, for the revision they are of; and how they moved.
-    counted: Option<(u64, Counted, Vec<(usize, f64, f64)>)>,
+    counted: Option<Shared>,
 }
 
 /// A colour for an agent, the same each time for the same name.
@@ -320,6 +332,10 @@ impl Viewer {
 
     /// Tints page `index` (whose top-left corner is at `origin`) by who
     /// wrote its text.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "worked out and drawn in one, as the other marks on a page are"
+    )]
     pub(super) fn authors_page(
         &mut self,
         scene: &mut Scene,
@@ -403,7 +419,7 @@ impl Viewer {
                 hide_unknown: self.authors.hide_unknown,
                 now: now(),
             };
-            let mut cells: Vec<(Rect, [u8; 4])> = Vec::new();
+            let mut cells: Cells = Vec::new();
             let mut legend: Vec<([u8; 4], String)> = Vec::new();
             for (rect, range, one) in ranges {
                 let Some((colour, name)) = paint.colour(&range, one) else {
@@ -485,7 +501,7 @@ impl Viewer {
 
     /// The shares of the document, counted anew where the text changed
     /// and is not being typed into; and how they moved over its history.
-    fn shares(&mut self) -> Option<&(u64, Counted, Vec<(usize, f64, f64)>)> {
+    fn shares(&mut self) -> Option<&Shared> {
         let editor = self.editor.as_ref()?;
         let typing = editor.mode() == crate::editor::Mode::Insert;
         let stale = self
@@ -502,6 +518,7 @@ impl Viewer {
     }
 
     /// The panel of the shares, as markup.
+    #[allow(clippy::too_many_lines, reason = "a part of the panel after the other")]
     fn shares_markup(&mut self) -> String {
         let Some((_, counted, moved)) = self.shares().cloned() else {
             return "#set page(width: auto, height: auto, margin: 8pt, fill: rgb(\"#282828\"))\n\
@@ -669,6 +686,10 @@ impl Viewer {
 
     /// The statement, as Markdown.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a part of the statement after the other"
+    )]
     pub fn statement(&mut self) -> Option<String> {
         let notes = self.notes_listed(true).len();
         let proposals = self.authors.proposed.len();
@@ -981,7 +1002,7 @@ fn round(value: f64) -> f64 {
 /// of the source's characters moved over the line of the history the
 /// text is on: up to 24 states, from the first to the current, each with
 /// its number of steps from the first.
-fn moved(editor: &crate::editor::Editor) -> Vec<(usize, f64, f64)> {
+fn moved(editor: &crate::editor::Editor) -> Moved {
     let history = editor.history();
     let line: Vec<_> = {
         let mut line = Vec::new();

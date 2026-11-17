@@ -761,6 +761,35 @@ struct Found {
     origins: Attribution,
 }
 
+impl Found {
+    /// Folds the old steps of a history grown long: see
+    /// [`Document::thin`].
+    fn thin_if_long(&mut self) {
+        if self.history.len() > THIN_BEYOND {
+            let (history, map) = thin_history(&self.history, THIN_KEEPS, &self.saves);
+            self.origins = self.origins.thinned(&self.history, &map);
+            self.saves = renumber(&self.saves, &map);
+            self.saved = self
+                .saved
+                .and_then(|state| map.get(usize::try_from(state).ok()?).copied()?);
+            self.history = history;
+        }
+    }
+
+    /// The history of a file opened for the first time, holding `file`:
+    /// none, and its text of no known origin.
+    fn first(file: Option<FileContents>, hash: Option<Hash>) -> Self {
+        let text = file.map(|file| file.text).unwrap_or_default();
+        Self {
+            history: History::new(),
+            origins: Attribution::first_seen(text.len()),
+            text,
+            saved: hash.map(|_| ROOT),
+            saves: Vec::new(),
+        }
+    }
+}
+
 /// What a journal means for the file: the outcome, the history to carry
 /// on with if there is one, and what else is to be said.
 struct Reconciled {
@@ -1086,25 +1115,8 @@ impl<B: Buffer> Document<B> {
         let reconciled = reconcile(&journal_path, file.as_ref()).map_err(io(&journal_path))?;
         let opened = reconciled.opened;
         remarks.extend(reconciled.remark);
-        let mut found = reconciled.found.unwrap_or_else(|| {
-            let text = file.map(|file| file.text).unwrap_or_default();
-            Found {
-                history: History::new(),
-                origins: Attribution::first_seen(text.len()),
-                text,
-                saved: file_hash.map(|_| ROOT),
-                saves: Vec::new(),
-            }
-        });
-        if found.history.len() > THIN_BEYOND {
-            let (history, map) = thin_history(&found.history, THIN_KEEPS, &found.saves);
-            found.origins = found.origins.thinned(&found.history, &map);
-            found.saves = renumber(&found.saves, &map);
-            found.saved = found
-                .saved
-                .and_then(|state| map.get(usize::try_from(state).ok()?).copied()?);
-            found.history = history;
-        }
+        let mut found = (reconciled.found).unwrap_or_else(|| Found::first(file, file_hash));
+        found.thin_if_long();
         remove_own_leftovers(&path, file_hash, &found);
         let saved_record = found.saved.zip(file_hash);
         if let Some(save) = saved_record {

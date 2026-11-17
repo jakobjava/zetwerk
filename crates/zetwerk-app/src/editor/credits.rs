@@ -146,7 +146,7 @@ impl Credits {
 
     /// Notes that `text` came into a register from outside the editor:
     /// pasted, unless it is text taken here.
-    pub(crate) fn from_outside(&mut self, text: &str) {
+    pub(crate) fn came_from_outside(&mut self, text: &str) {
         if text.is_empty() || self.taken.iter().any(|(known, _)| known == text) {
             return;
         }
