@@ -88,6 +88,11 @@ const G: &[(&str, &str, When)] = &[
     ("s", "the page, the source, or both", When::Idle),
     ("?", "all there is to do", When::Idle),
     ("w", "jump to a label in view", When::Unpending),
+    (
+        "!",
+        "something is wrong: write a report of it",
+        When::Unpending,
+    ),
     ("x", "show the equation as it is written", When::Idle),
     (
         "n q",

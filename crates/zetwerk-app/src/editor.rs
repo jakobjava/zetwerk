@@ -567,6 +567,12 @@ impl Editor {
         &self.engine
     }
 
+    /// Takes back what the Vim of a text remembered (see
+    /// [`Engine::recall`]), as a replay begins.
+    pub fn recall(&mut self, memory: &str) {
+        self.engine.recall(memory);
+    }
+
     /// What the text is read as on a page (see [`crate::reading`]).
     #[must_use]
     pub fn reading(&self) -> Arc<Reading> {

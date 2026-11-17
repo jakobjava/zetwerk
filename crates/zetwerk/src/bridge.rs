@@ -84,6 +84,7 @@ impl Bridge {
         self.ask(
             |reply| {
                 let task: Task = Box::new(move |viewer| {
+                    viewer.agent_called(std::any::type_name_of_val(&task));
                     let _ = reply.send(task(viewer));
                 });
                 Request::Do(task)
@@ -119,6 +120,7 @@ impl Bridge {
         self.ask(
             |reply| {
                 let task: Task = Box::new(move |viewer| {
+                    viewer.agent_called(std::any::type_name_of_val(&task));
                     let _ = reply.send(task(viewer));
                 });
                 Request::WhenCompiled(task)
@@ -1018,6 +1020,7 @@ mod tests {
             templates: None,
             review: zetwerk_app::viewer::review::Settings::default(),
             talk: zetwerk_app::viewer::Talk::default(),
+            report: zetwerk_app::viewer::report::Settings::default(),
         }
     }
 

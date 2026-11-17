@@ -232,6 +232,9 @@ impl Viewer {
 
     /// A key was pressed: it, or what the user's mappings make of it.
     pub fn key(&mut self, press: KeyPress) {
+        if self.report_key(press) {
+            return;
+        }
         let plain = self.keymap.is_empty()
             || self.is_picking()
             || self.is_reviewing()
@@ -253,6 +256,7 @@ impl Viewer {
             self.note_typed();
         }
         self.hints_keyed();
+        self.report_keyed();
     }
 
     /// Notes what keys typed while a mapping may be begun were typed into,

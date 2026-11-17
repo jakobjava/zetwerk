@@ -68,6 +68,8 @@ pub struct Options {
     pub review: viewer::review::Settings,
     /// What the user has to say about giving talks.
     pub talk: viewer::Talk,
+    /// What is kept for a report of what happened (see `viewer::report`).
+    pub report: viewer::report::Settings,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.
@@ -326,6 +328,7 @@ impl ApplicationHandler<Event> for App {
             session.window.request_redraw();
         }
         if session.scheduler.take_due(now) {
+            session.viewer.report_began();
             let (revision, world) = session.viewer.snapshot();
             session.compiler.compile(revision, world);
         }
@@ -478,6 +481,7 @@ impl Session {
             waiting: Vec::new(),
         };
         session.viewer.export_in_background(wake(proxy));
+        session.viewer.report_in_background(wake(proxy));
         session.watch_dependencies();
         switch::welcome(&mut session.viewer, options, false);
         session.scheduler.request(Urgency::Now, Instant::now());
@@ -687,6 +691,8 @@ impl Session {
         present::draw_second(self, &mut scene.wanted);
         self.rasterizer.request(scene.wanted);
         self.present(&scene.quads);
+        self.viewer
+            .report_frame(&mut self.gpu, &self.config, &scene.quads);
 
         let stats = &mut self.viewer.stats;
         stats.frames += 1;

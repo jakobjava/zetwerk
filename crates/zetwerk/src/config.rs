@@ -52,6 +52,9 @@
 //! "jk" = "<Esc>"
 //! [keys]
 //! timeoutlen = 1000  # how long the first keys of a mapping wait, in ms
+//!
+//! [report]
+//! keys = 500         # keys kept for a report (Ctrl-G, :report); 0 keeps none
 //! ```
 
 use std::collections::BTreeMap;
@@ -82,6 +85,16 @@ pub struct Config {
     /// The user's own things to put in.
     #[serde(default)]
     pub insert: Vec<Insert>,
+    #[serde(default)]
+    pub report: Report,
+}
+
+/// What is kept for a report of what happened (`g!`, Ctrl-G, `:report`).
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Report {
+    /// How many keys are kept; 0 keeps none. 500 unless this says.
+    pub keys: Option<usize>,
 }
 
 /// Something the user wants in the menu of things to put into running
@@ -402,7 +415,14 @@ pub fn load() -> (Config, Option<String>) {
     }
 }
 
-fn parse(text: &str) -> Result<Config, String> {
+/// The settings file as it is, if there is one: what a report says was
+/// in force.
+pub fn text() -> Option<String> {
+    std::fs::read_to_string(path()?).ok()
+}
+
+/// Reads settings from `text`, as a report gives them back.
+pub fn parse(text: &str) -> Result<Config, String> {
     // The first line of the message says what is wrong; the rest draws it.
     toml::from_str(text).map_err(|err| {
         let message = err.message().to_owned();

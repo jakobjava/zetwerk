@@ -36,6 +36,7 @@ mod present_scene;
 pub mod refer;
 mod refused;
 mod registers;
+pub mod report;
 pub mod review;
 mod saving;
 mod slides;
@@ -986,6 +987,8 @@ pub struct Viewer {
     pages: pages::Pages,
     /// The talk being given, and what is known of the deck (see [`present`]).
     present: present::Present,
+    /// What happened lately, for a report (see [`report`]).
+    report: report::Recorder,
     pub stats: Stats,
 }
 
@@ -1101,6 +1104,7 @@ impl Viewer {
             waiting: waiting::Waiting::default(),
             pages: pages::Pages::default(),
             present: present::Present::default(),
+            report: report::Recorder::default(),
             stats: Stats::default(),
         };
         viewer.resize(window, scale);
@@ -1145,6 +1149,7 @@ impl Viewer {
         }
         self.inserts.clone_from(&options.inserts);
         self.set_talk(options.talk.clone());
+        self.report_configured(&options.report, options.font_set);
         self.set_language(&options.language);
         self.set_review(options.review);
         if let Some(ui) = options.ui_scale.filter(|ui| ui.is_finite()) {
@@ -1483,6 +1488,7 @@ impl Viewer {
 
     /// A file changed on disk. Returns whether a compile is needed.
     pub fn file_changed(&mut self, path: &Path) -> bool {
+        self.report_disk(path);
         if self.is_edited(path) {
             return self.edited_file_changed();
         }
@@ -1624,6 +1630,7 @@ impl Viewer {
 
     /// A compile finished.
     pub fn compiled(&mut self, output: CompileOutput) {
+        self.report_compiled(&output);
         if self
             .compiled_revision
             .is_some_and(|newest| output.revision < newest)
@@ -1815,6 +1822,7 @@ impl Viewer {
     /// on again to where Ctrl-O came back from. On the command line it
     /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
+        self.report_reached(press);
         self.message = None;
         let press = self.shift_enter(press);
         if self.stop_key(press) || self.confirm_key(press) || self.cell_block_key(press) {
@@ -2196,6 +2204,7 @@ impl Viewer {
             || self.vim_command(command)
             || self.present_command(command)
             || self.slide_command(command)
+            || self.report_command(command)
         {
             return;
         }
@@ -3332,6 +3341,7 @@ mod tests {
     mod panels;
     mod parts;
     mod present;
+    mod report;
     mod review;
     mod speed;
     mod typing;

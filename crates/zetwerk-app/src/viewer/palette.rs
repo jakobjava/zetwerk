@@ -633,6 +633,16 @@ const ALL: &[(&str, &str, Does)] = &[
     ),
     ("what typing costs", ":perf", Does::Run("perf")),
     (
+        "something is wrong: a report of what just happened, kept here",
+        ":report [a few words]  g!  Ctrl-G",
+        Does::Ask("report "),
+    ),
+    (
+        "the reports written, to delete them",
+        ":reports",
+        Does::Run("reports"),
+    ),
+    (
         "typeset what changes by itself, at once: on or off",
         ":parts",
         Does::Run("parts"),

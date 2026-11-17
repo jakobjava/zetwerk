@@ -2,6 +2,7 @@
 
 mod bridge;
 mod config;
+mod replay;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -103,6 +104,9 @@ Options for developing zetwerk itself:
       --screenshot <path> Then save the window as a PNG and quit
       --paced             Press the keys one by one, each once the one
                           before has been typeset, as somebody typing
+      --replay <report>   Play a report (g!, Ctrl-G, :report) again in a
+                          copy of its document, with its pauses, and say
+                          whether the text came out as it did
   zetwerk call <tool> [json-arguments] [-o <path>]
                           Call a tool of the open window, as an agent
                           would; images are written to <path>";
@@ -145,6 +149,8 @@ struct Args {
     /// Whether the keys of the script wait for each other's effect.
     paced: bool,
     main: Option<PathBuf>,
+    /// A report to play again.
+    replay: Option<PathBuf>,
 }
 
 /// Makes sure there is a file at `path` to open: one that does not
@@ -198,6 +204,7 @@ fn options(
         templates: config::templates(),
         review: config.review.settings(),
         talk: config.present.talk(),
+        report: replay::report_settings(config),
     })
 }
 
@@ -221,6 +228,9 @@ fn run() -> Result<(), String> {
         println!("{USAGE}");
         return Ok(());
     };
+    if let Some(report) = &args.replay {
+        return replay::run(&args, report);
+    }
     match args.command {
         Command::Mcp => return mcp(&args),
         Command::Call => return call(&args),
@@ -326,6 +336,7 @@ fn parse(mut parser: lexopt::Parser) -> Result<Option<Args>, String> {
             Long("screenshot") => args.screenshot = Some(parser.value().map_err(fail)?.into()),
             Long("paced") => args.paced = true,
             Long("main") => args.main = Some(parser.value().map_err(fail)?.into()),
+            Long("replay") => args.replay = Some(parser.value().map_err(fail)?.into()),
             Value(value) if args.command == Command::Open && args.values.is_empty() => {
                 match value.to_str() {
                     Some("render") => args.command = Command::Render,

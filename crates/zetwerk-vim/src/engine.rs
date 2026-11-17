@@ -13,6 +13,7 @@ use crate::took::Took;
 
 mod block;
 mod follow;
+mod memory;
 mod more;
 mod read;
 mod shown;
