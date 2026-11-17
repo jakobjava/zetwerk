@@ -62,7 +62,7 @@
 //!   step before began), `typeset`
 //!   (Typst typesets the text as it is), `refused` (it does not), `why`
 //!   (the panel of `:why` is up), `jumping` (the labels of `gw` are
-//!   up), `exported <ending>` (the document was
+//!   up), `settings` (the panel of `:set` is up), `exported <ending>` (the document was
 //!   written out as that). `\n` in a text is a line break.
 //!
 //! The cursor begins on the title: the first heading.
@@ -149,6 +149,7 @@ pub(super) enum Check {
     Refused,
     Why,
     Jumping,
+    Settings,
     Exported(String),
 }
 
@@ -201,6 +202,7 @@ impl Check {
             "refused" => Self::Refused,
             "why" => Self::Why,
             "jumping" => Self::Jumping,
+            "settings" => Self::Settings,
             "exported" => Self::Exported(argument),
             _ => return Err(format!("no such check: {line}")),
         };
@@ -813,6 +815,7 @@ impl Viewer {
             }
             Check::Why => self.refused_up(),
             Check::Jumping => self.is_jumping(),
+            Check::Settings => self.is_setting(),
             Check::Exported(ending) => editor.path().with_extension(ending).is_file(),
         }
     }
