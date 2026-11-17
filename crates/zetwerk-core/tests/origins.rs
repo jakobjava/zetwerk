@@ -20,7 +20,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proptest::prelude::*;
-use proptest::sample::Index;
 use zetwerk_core::{Agent, By, Credited, Document, Kind, Opened, Origin, Replace, StateId};
 
 /// The origins edits are made by.
@@ -38,6 +37,21 @@ fn origin(who: u8) -> Origin {
         4 => Origin::Pasted,
         _ => Origin::Zetwerk("a tidy-up".to_owned()),
     }
+}
+
+/// A place in a list of any length, as `proptest::sample::Index` is, but
+/// one a test can write down.
+#[derive(Debug, Clone, Copy)]
+struct Index(usize);
+
+impl Index {
+    fn index(self, size: usize) -> usize {
+        ((size as u128 * self.0 as u128) >> usize::BITS) as usize
+    }
+}
+
+fn index() -> impl Strategy<Value = Index> {
+    any::<usize>().prop_map(Index)
 }
 
 #[derive(Debug, Clone)]
@@ -66,16 +80,16 @@ fn text() -> impl Strategy<Value = String> {
 
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
-        12 => (any::<Index>(), 0..4_usize, text(), any::<bool>(), any::<u8>())
+        12 => (index(), 0..4_usize, text(), any::<bool>(), any::<u8>())
             .prop_map(|(at, len, text, join, who)| Op::Edit { at, len, text, join, who }),
         4 => Just(Op::Undo),
         3 => Just(Op::Redo),
-        2 => any::<Index>().prop_map(Op::Goto),
+        2 => index().prop_map(Op::Goto),
         2 => Just(Op::Save),
         1 => Just(Op::Reload),
         1 => text().prop_map(Op::ExternalWrite),
         2 => Just(Op::Crash),
-        1 => any::<Index>().prop_map(Op::TornCrash),
+        1 => index().prop_map(Op::TornCrash),
         1 => (0..6_usize).prop_map(Op::Thin),
     ]
 }
@@ -290,11 +304,24 @@ impl Session {
     /// what comes back has whatever attribution it had, as far as it
     /// came back; what does not is forgotten.
     fn torn(&mut self, cut: Index) {
+        let appended = self.appended();
+        self.torn_at(cut.index(appended + 1));
+    }
+
+    /// How many bytes were appended to the journal since it was last
+    /// written whole.
+    fn appended(&self) -> usize {
+        std::fs::metadata(self.journal())
+            .map_or(0, |meta| meta.len() as usize)
+            .saturating_sub(self.compacted)
+    }
+
+    /// As [`Session::torn`], `cut` bytes of what was appended kept.
+    fn torn_at(&mut self, cut: usize) {
         self.document = None;
         let journal = self.journal();
         let mut bytes = std::fs::read(&journal).unwrap();
-        let appended = bytes.len().saturating_sub(self.compacted);
-        bytes.truncate(self.compacted + cut.index(appended + 1));
+        bytes.truncate(self.compacted + cut);
         std::fs::write(&journal, &bytes).unwrap();
         let (document, _) = self.open();
         self.document = Some(document);
@@ -308,9 +335,11 @@ impl Session {
             let text = self.doc().text().to_owned();
             let credits = credits_of(self.doc());
             assert_eq!(credits.len(), text.len());
-            // A state the journal kept has the credits it had; one the
+            // A state the journal kept has the credits it had. One the
             // tear lost, whose text the file still had, came back from
-            // there: from outside.
+            // there: made from outside on what the journal still had, so
+            // what is unchanged keeps the credits it had there (as a
+            // reload does), and only what differs is from outside.
             if let Some((was, Some(known))) = self.states.get(state as usize)
                 && *was == text
                 && *known != credits
@@ -318,8 +347,13 @@ impl Session {
                 for credit in &credits {
                     assert!(
                         known.contains(credit)
-                            || matches!(credit.0, Origin::Outside | Origin::Unknown),
-                        "{credit:?} after a torn journal"
+                            || matches!(credit.0, Origin::Outside | Origin::Unknown)
+                            || self.states.iter().any(|(_, earlier)| {
+                                earlier
+                                    .as_ref()
+                                    .is_some_and(|earlier| earlier.contains(credit))
+                            }),
+                        "{credit:?} after a torn journal, in state {state}"
                     );
                 }
             }
@@ -393,6 +427,52 @@ proptest! {
         }
         session.finish();
     }
+}
+
+/// Found by the property above (shrinking did not make it smaller).
+#[test]
+fn a_journal_torn_after_thinning_and_a_reload_keeps_the_credits() {
+    let edit = |at: usize, len: usize, text: &str, join: bool, who: u8| Op::Edit {
+        at: Index(at),
+        len,
+        text: text.to_owned(),
+        join,
+        who,
+    };
+    let ops = vec![
+        edit(1_772_220_509_173_992_490, 2, "a\n", false, 228),
+        edit(12_474_476_973_200_381_487, 0, "é", false, 95),
+        edit(4_861_046_410_066_696_186, 1, "\nb ", true, 196),
+        Op::Undo,
+        Op::Crash,
+        edit(16_457_741_024_356_015_075, 2, "b\nééb", false, 148),
+        Op::Goto(Index(3_183_613_960_617_413_387)),
+        edit(9_097_938_876_569_886_560, 2, "é", false, 127),
+        Op::Save,
+        Op::Thin(1),
+        Op::Undo,
+        Op::Save,
+        Op::Redo,
+        Op::Goto(Index(4_978_849_722_382_169_286)),
+        Op::Redo,
+        edit(1_666_559_089_877_734_644, 3, "\n  é\n", true, 209),
+        edit(3_222_045_563_838_744_435, 2, "\nb ", true, 134),
+        edit(14_233_461_027_875_061_158, 0, "\nb ", false, 166),
+        edit(6_426_233_525_176_502_367, 3, " b\nb", true, 201),
+        Op::Goto(Index(8_553_365_817_175_221_044)),
+        Op::Undo,
+        Op::ExternalWrite("\nb\né ".to_owned()),
+        Op::Reload,
+        edit(10_552_685_980_059_647_330, 2, "éaa\n\n", false, 108),
+        edit(3_553_409_794_745_213_218, 3, "", false, 124),
+        edit(1_978_494_229_444_479_524, 2, "", false, 169),
+        Op::TornCrash(Index(10_369_457_656_408_705_370)),
+    ];
+    let mut session = Session::new("");
+    for op in ops {
+        session.apply(op);
+    }
+    session.finish();
 }
 
 /// Text an agent wrote and the author then changed a word of: that word
