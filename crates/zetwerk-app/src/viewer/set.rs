@@ -65,6 +65,10 @@ pub(super) const QUIETER: &str =
     "the page is quieter now: :set aids=everything brings all aids back (:set lists all)";
 
 /// What the viewer keeps of the settings.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent options, not states of one thing"
+)]
 pub(super) struct Settings {
     /// The set of aids that decides those the user said nothing of.
     pub(super) preset: Preset,
@@ -1063,6 +1067,7 @@ impl Viewer {
     }
 
     /// A key for the panel of settings. Returns whether it was.
+    #[allow(clippy::too_many_lines, reason = "a line or two for every key")]
     pub(super) fn set_key(&mut self, press: KeyPress) -> bool {
         if !self.is_setting() {
             return false;
@@ -1359,18 +1364,15 @@ impl Viewer {
                         continue;
                     };
                     let path: Vec<String> = name.split('.').map(str::to_owned).collect();
-                    match said {
-                        Some(said) => {
-                            edits.push(Edit {
-                                path,
-                                value: opt.written(&said),
-                            });
-                            self.settings.explicit.insert(opt.name, said);
-                        }
-                        None => {
-                            edits.push(Edit { path, value: None });
-                            self.settings.explicit.remove(opt.name);
-                        }
+                    if let Some(said) = said {
+                        edits.push(Edit {
+                            path,
+                            value: opt.written(&said),
+                        });
+                        self.settings.explicit.insert(opt.name, said);
+                    } else {
+                        edits.push(Edit { path, value: None });
+                        self.settings.explicit.remove(opt.name);
                     }
                     if name != "aids.preset" && (opt.get)(self) != value {
                         (opt.set)(self, &value);
@@ -1414,6 +1416,7 @@ impl Viewer {
     }
 
     /// The markup of the panel of settings.
+    #[allow(clippy::too_many_lines, reason = "a few lines for every kind of row")]
     pub(super) fn settings_markup(&self) -> String {
         let rows = self.setting_rows();
         let Some(panel) = &self.settings.panel else {
@@ -1437,9 +1440,10 @@ impl Viewer {
             )
         };
         if first > 0 {
-            cells.push_str(&format!(
-                "  grid.cell(colspan: 3, text(fill: rgb(\"{DIM}\"), \"…\")),\n"
-            ));
+            let _ = writeln!(
+                cells,
+                "  grid.cell(colspan: 3, text(fill: rgb(\"{DIM}\"), \"…\")),"
+            );
         }
         for (at, row) in rows.iter().enumerate().skip(first).take(ROWS) {
             let chosen = at == panel.chosen;
@@ -1496,9 +1500,10 @@ impl Viewer {
             }
         }
         if first + ROWS < rows.len() {
-            cells.push_str(&format!(
-                "  grid.cell(colspan: 3, text(fill: rgb(\"{DIM}\"), \"…\")),\n"
-            ));
+            let _ = writeln!(
+                cells,
+                "  grid.cell(colspan: 3, text(fill: rgb(\"{DIM}\"), \"…\")),"
+            );
         }
         let title = match (&panel.query, panel.typing) {
             (query, true) => format!("settings  /{query}\u{2588}"),

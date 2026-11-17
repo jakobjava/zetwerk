@@ -55,6 +55,7 @@ fn value(viewer: &Viewer, name: &str) -> Value {
 
 /// What was written last of `name` (`aids.numbers`): `Some(None)` where
 /// it was taken out.
+#[allow(clippy::option_option, reason = "taken out is not never written")]
 fn last_written(edits: &Mutex<Vec<Edit>>, name: &str) -> Option<Option<Written>> {
     let path: Vec<String> = name.split('.').map(str::to_owned).collect();
     let edits = edits.lock().unwrap();
@@ -349,7 +350,7 @@ fn a_key_of_ones_own_is_made_by_pressing_it() {
     assert!(said(&viewer).contains("words"), "{}", said(&viewer));
     // Listed, and taken away with `x`.
     press(&mut viewer, ":set<CR>/:count<CR>x");
-    assert!(viewer.settings.normal.is_empty());
+    assert_eq!(viewer.settings.normal.len(), 0);
     assert_eq!(
         edits.lock().unwrap().last().map(|edit| edit.value.clone()),
         Some(None)
