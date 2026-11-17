@@ -94,6 +94,11 @@ pub fn run(args: &Args, report: &Path) -> Result<(), String> {
         review: config.review.settings(),
         talk: config.present.talk(),
         authors: config.authors.settings(),
+        // The copy played in is no repository of the user's.
+        changes: zetwerk_app::viewer::ChangeOptions {
+            git: false,
+            ..config.changes.options()
+        },
         settings: recorded
             .config
             .as_deref()

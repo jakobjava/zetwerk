@@ -575,4 +575,37 @@ pub(crate) const TABLE: &[Opt] = &[
         |v, value| v.settings.hold("report.keys", value.clone()),
     )
     .next_start(),
+    opt(
+        "changes.bars",
+        Group::Page,
+        Kind::Switch,
+        ON,
+        "a bar beside the lines that changed since the version compared with \
+         (:changes off for now)",
+        |v| held(v, "changes.bars"),
+        |v, value| v.settings.hold("changes.bars", value.clone()),
+    )
+    .next_start()
+    .session(&["changes"]),
+    opt(
+        "changes.since",
+        Group::Page,
+        Kind::Text,
+        Usual::Is("saved"),
+        "what the text is compared with: saved, opened, or a revision of git \
+         (:changes since for now)",
+        |v| held(v, "changes.since"),
+        |v, value| v.settings.hold("changes.since", value.clone()),
+    )
+    .next_start(),
+    opt(
+        "changes.git",
+        Group::Page,
+        Kind::Switch,
+        ON,
+        "git is asked for the branch and the file's commits",
+        |v| held(v, "changes.git"),
+        |v, value| v.settings.hold("changes.git", value.clone()),
+    )
+    .next_start(),
 ];

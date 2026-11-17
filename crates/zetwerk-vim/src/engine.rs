@@ -1811,6 +1811,9 @@ impl Engine {
                         self.effects.push(Effect::Command(command.to_owned()));
                         return;
                     }
+                    // And to what changed since a version (as in Vim's diff
+                    // mode).
+                    Key::Char('v') if !press.ctrl => "changes",
                     _ => return self.fail(),
                 };
                 let way = if forward { "next" } else { "previous" };
@@ -1830,6 +1833,8 @@ impl Engine {
                     // Nor Vim's `za` (pages have no folds): the next set
                     // of the host's aids over the page.
                     Key::Char('a') => Some("set aids=next"),
+                    // And a change shown as it was.
+                    Key::Char('c') => Some("changes flip"),
                     _ => None,
                 };
                 if let Some(command) = spelling {

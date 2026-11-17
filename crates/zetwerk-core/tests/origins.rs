@@ -116,6 +116,10 @@ struct Session {
     document: Option<Document<String>>,
     /// By state: its text and its attribution as last seen.
     states: Vec<(String, Option<Credits>)>,
+    /// Every credit any state has been seen with: a step joined into a
+    /// state changes what it has, and a torn journal may give back what
+    /// it had before.
+    ever: Credits,
     file: Option<String>,
     /// How long the journal was when it was last written anew: a crash
     /// can only cut off what was added to it since (it is written anew
@@ -137,6 +141,7 @@ impl Session {
             root,
             document: None,
             states: Vec::new(),
+            ever: Vec::new(),
             file: Some(initial.to_owned()),
             compacted: 0,
         };
@@ -145,6 +150,7 @@ impl Session {
         // What was in the file before is of no known origin.
         let credits = credits_of(&document);
         assert!(credits.iter().all(|(by, _)| *by == Origin::Unknown));
+        session.seen(&credits);
         session.states.push((initial.to_owned(), Some(credits)));
         session.document = Some(document);
         session
@@ -213,6 +219,15 @@ impl Session {
         self.check();
     }
 
+    /// Notes `credits` as seen.
+    fn seen(&mut self, credits: &Credits) {
+        for credit in credits {
+            if !self.ever.contains(credit) {
+                self.ever.push(credit.clone());
+            }
+        }
+    }
+
     fn edit(&mut self, at: Index, len: usize, new: &str, join: bool, origin: &Origin) {
         let before = self.doc().text().to_owned();
         let old_credits = credits_of(self.doc());
@@ -254,8 +269,10 @@ impl Session {
         let state = self.state();
         if self.doc().history().len() > states {
             assert_eq!(state, self.states.len());
+            self.seen(&credits);
             self.states.push((text, Some(credits)));
         } else {
+            self.seen(&credits);
             self.states[state] = (text, Some(credits));
         }
     }
@@ -274,6 +291,7 @@ impl Session {
             for credit in &credits {
                 assert!(credit.0 == Origin::Outside || old.contains(credit));
             }
+            self.seen(&credits);
             self.states.push((text, Some(credits)));
         }
     }
@@ -296,6 +314,7 @@ impl Session {
                         known.as_ref().is_some_and(|known| known.contains(credit))
                     })
             }));
+            self.seen(&credits);
             self.states.push((text, Some(credits)));
         }
     }
@@ -348,15 +367,12 @@ impl Session {
                     assert!(
                         known.contains(credit)
                             || matches!(credit.0, Origin::Outside | Origin::Unknown)
-                            || self.states.iter().any(|(_, earlier)| {
-                                earlier
-                                    .as_ref()
-                                    .is_some_and(|earlier| earlier.contains(credit))
-                            }),
+                            || self.ever.contains(credit),
                         "{credit:?} after a torn journal, in state {state}"
                     );
                 }
             }
+            self.seen(&credits);
             states.push((text, Some(credits)));
         }
         self.doc().goto(current).unwrap();
@@ -470,6 +486,35 @@ fn a_journal_torn_after_thinning_and_a_reload_keeps_the_credits() {
     ];
     let mut session = Session::new("");
     for op in ops {
+        session.apply(op);
+    }
+    session.finish();
+}
+
+/// Found by the property above: an agent's line, the history thinned
+/// to nothing, a joined step on it, and the journal torn where the
+/// thinning left it.
+#[test]
+fn a_journal_torn_after_thinning_keeps_the_credits_of_the_text_kept() {
+    let mut session = Session::new("é\n\n");
+    for op in [
+        Op::Edit {
+            at: Index(4_611_686_018_427_387_904),
+            len: 2,
+            text: "\n".to_owned(),
+            join: false,
+            who: 7,
+        },
+        Op::Thin(0),
+        Op::Edit {
+            at: Index(6_148_914_691_236_517_206),
+            len: 1,
+            text: "\n".to_owned(),
+            join: true,
+            who: 2,
+        },
+        Op::TornCrash(Index(0)),
+    ] {
         session.apply(op);
     }
     session.finish();

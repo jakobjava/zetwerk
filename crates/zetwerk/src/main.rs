@@ -219,6 +219,7 @@ fn options(
         report: replay::report_settings(config),
         authors: config.authors.settings(),
         settings: settings.clone(),
+        changes: config.changes.options(),
     })
 }
 

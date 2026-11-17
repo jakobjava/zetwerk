@@ -887,6 +887,13 @@ impl Editor {
         self.document.is_modified()
     }
 
+    /// The state of the history the file holds; see
+    /// [`Document::saved_state`].
+    #[must_use]
+    pub fn saved_state(&self) -> Option<StateId> {
+        self.document.saved_state()
+    }
+
     /// When the unsaved changes brought back from the journal on opening
     /// were last made, until the text is saved or loaded; see
     /// [`Document::restored`].

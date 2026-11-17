@@ -1040,6 +1040,10 @@ mod tests {
             report: zetwerk_app::viewer::report::Settings::default(),
             authors: zetwerk_app::viewer::authors::Settings::default(),
             settings: zetwerk_app::settings::Stored::default(),
+            changes: zetwerk_app::viewer::ChangeOptions {
+                git: false,
+                ..zetwerk_app::viewer::ChangeOptions::default()
+            },
         }
     }
 

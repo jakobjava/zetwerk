@@ -131,6 +131,7 @@ const Z: &[(&str, &str)] = &[
         "the suggestion: as it would be, its other wordings, as it is",
     ),
     ("a", "aids on the page: quiet, writing, everything"),
+    ("c", "the change here: as it was, as it is"),
 ];
 
 /// The keys after `Z`.
@@ -149,6 +150,7 @@ const FORWARD: &[(&str, &str)] = &[
     ("x X", "table: this row, this column out (on to the next)"),
     ("h", "table: the first row its header"),
     ("y", "table: copy it as cells, for a spreadsheet"),
+    ("v", "to the next change since the version compared with"),
 ];
 const BACKWARD: &[(&str, &str)] = &[
     ("[", "to the page before"),
@@ -165,6 +167,7 @@ const BACKWARD: &[(&str, &str)] = &[
     ),
     ("h", "table: the header a row like the others"),
     ("y", "table: copy it as cells, for a spreadsheet"),
+    ("v", "to the change before"),
 ];
 
 /// The command a key after `]` (`forward`) or `[` shapes a table with,
