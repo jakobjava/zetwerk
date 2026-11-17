@@ -29,12 +29,11 @@ empty places come, shown as boxes; type `1`, `Tab`, `2`, then `Esc`.]
 
 Half of it:
 
-#task[Take the $z$ away: put the cursor on it and press `x`. Its square
-stays, and a box where the $z$ was: an empty place, waiting.]
+#task[Take the 2 of the fraction away: put the cursor on it and press `x`.
+A box stays where it was: an empty place, waiting.]
 
-#task[The cursor stands at the empty place: `i` and a `c` fill it, and
-`Esc` ends typing. (`Tab` goes from one empty place of a fraction, a root
-or a square root to the next, as in the fraction above.)]
+#task[The cursor stands at the empty place: `i` and a `4` fill it, and
+`Esc` ends typing.]
 
 #task[`#` while typing puts things in, an equation by itself among them.
 Go to the last line, `o`, then `#equation` and `Enter`, then type
@@ -57,15 +56,16 @@ hint: A, space, $, ff, Tab, 1, Tab, 2, Esc
 done: has frac(1, 2)
 done: mode normal
 
-step: take the z away with x
-keys: /\=z^2<CR>x
-hint: put the cursor on the z, then x
-done: has y^2 = ^2$
+step: take the 2 of the fraction away with x
+keys: /\=2)<CR>x
+hint: put the cursor on the 2 under the line, then x
+done: lacks frac(1, 2)
+done: has frac(1,
 
 step: fill the empty place
-keys: ic<Esc>
-hint: i, c, Esc (the cursor stands at the empty place)
-done: has = c^2$
+keys: i4<Esc>
+hint: i, 4, Esc (the cursor stands at the empty place)
+done: has frac(1, 4)
 done: mode normal
 
 step: an equation by itself from the # list
