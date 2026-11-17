@@ -93,6 +93,7 @@ pub fn run(args: &Args, report: &Path) -> Result<(), String> {
         templates: None,
         review: config.review.settings(),
         talk: config.present.talk(),
+        authors: config.authors.settings(),
         report: Settings {
             keys: DEFAULT_KEYS,
             config: recorded.config.clone(),

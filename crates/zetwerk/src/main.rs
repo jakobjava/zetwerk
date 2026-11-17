@@ -205,6 +205,7 @@ fn options(
         review: config.review.settings(),
         talk: config.present.talk(),
         report: replay::report_settings(config),
+        authors: config.authors.settings(),
     })
 }
 

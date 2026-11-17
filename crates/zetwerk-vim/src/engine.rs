@@ -51,6 +51,10 @@ pub trait Host {
     /// afterwards, that the step changed.
     fn redo(&mut self) -> Option<Range<usize>>;
 
+    /// The next edit that puts `text` in puts in what a register holds:
+    /// for a host that keeps where text came from.
+    fn putting(&mut self, _text: &str) {}
+
     /// Where the cursor comes to when it goes `rows` rows down (up, if
     /// negative) from byte `from` on what the host shows: the rows of a
     /// wrapped line, or the lines of a typeset page. `across` is how far
@@ -2245,6 +2249,7 @@ impl Engine {
         self.motion_key(motion, host);
     }
 
+    #[allow(clippy::too_many_lines, reason = "one arm for each key after g")]
     fn g_key(&mut self, press: KeyPress, host: &mut impl Host) {
         let Key::Char(c) = press.key else {
             return self.reset_pending();
@@ -3553,6 +3558,7 @@ impl Engine {
             return self.fail();
         };
         let inserted = register.text.repeat(count);
+        host.putting(&register.text);
         if register.linewise {
             // An empty text is one empty line without its line break.
             if host.text().is_empty() {
@@ -3687,6 +3693,7 @@ impl Engine {
             self.edit(host, piece.clone(), "");
         }
         let first = pieces.first().cloned().unwrap_or(start..start);
+        host.putting(&register.text);
         self.edit(host, first, &inserted);
         self.took = Some(Took::Put(start..start + inserted.len()));
         if keep {
@@ -4401,6 +4408,7 @@ impl Engine {
             let Some(held) = held.map(|register| register.text.clone()) else {
                 return Some(false);
             };
+            host.putting(&held);
             self.insert_text(&held, host);
             return Some(true);
         }
@@ -5114,6 +5122,8 @@ fn host_command(c: char) -> Option<&'static str> {
         // Nor Vim's `gh` (which selects): the steps of the undo history,
         // to look at and to go back to.
         'h' => "history",
+        // Who wrote the text, tinted on the page.
+        'H' => "authors view",
         _ => return None,
     })
 }

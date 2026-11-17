@@ -516,6 +516,7 @@ fn sound(viewer: &Viewer, settled: bool) -> Result<(), String> {
     if cursor > text.len() || !text.is_char_boundary(cursor) {
         return Err(format!("the cursor is at {cursor}, off the text"));
     }
+    super::authors::covers(editor)?;
     if let Some(selection) = editor.selection()
         && (selection.end > text.len()
             || !text.is_char_boundary(selection.start)

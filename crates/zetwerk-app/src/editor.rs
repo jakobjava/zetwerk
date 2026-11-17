@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use typst::syntax::{FileId, Source};
 use zetwerk_core::{
-    Buffer, DiskError, DiskStatus, Document, History, OpenError, Opened, Replace, StateId,
+    Buffer, By, DiskError, DiskStatus, Document, History, OpenError, Opened, Replace, StateId,
 };
 use zetwerk_vim::{Edit, Effect, Engine, Host, Place, Reading, Seek, Shown as ShownLine};
 
@@ -20,6 +20,7 @@ use crate::keys::{Key, KeyPress};
 
 pub use zetwerk_vim::Mode;
 
+mod credits;
 mod mark;
 pub use mark::Mark;
 
@@ -56,6 +57,8 @@ pub struct Editor {
     stepped: Option<(u64, Vec<Range<usize>>)>,
     /// What the text is read as, for searching it on the page.
     read: crate::reading::Cache,
+    /// Who the edits are by.
+    credits: credits::Credits,
 }
 
 /// Something that shows the text in rows other than the source pane's:
@@ -121,6 +124,7 @@ impl Editor {
             top: 0,
             stepped: None,
             read: crate::reading::Cache::default(),
+            credits: credits::Credits::default(),
         };
         Ok((editor, opened))
     }
@@ -157,9 +161,11 @@ impl Editor {
             shown_revision: before,
             read: &self.read,
             on_page: matches!(shown, Shown::Pages(_)),
+            credits: &mut self.credits,
         };
         let length = host.document.text().len();
         let effects = self.engine.key(press, &mut host);
+        self.credits.after_key(self.engine.took(), &self.document);
         self.stepped = self.stepped_since(history);
         if self.failure.is_some() {
             // The engine believes in an edit that was not made. The text is
@@ -257,7 +263,11 @@ impl Editor {
             }
             replaces.push(Replace::new(name, spelled.as_str()));
         }
-        if let Err(err) = self.document.edit(&replaces, true) {
+        if let Err(err) = self.document.edit_by(
+            &replaces,
+            true,
+            &By::Origin(&credits::by_zetwerk("spelled out a product in an equation")),
+        ) {
             self.failure = Some(err.to_string());
             return;
         }
@@ -301,7 +311,11 @@ impl Editor {
                 }
                 replaces.push(Replace::new(script, ""));
             }
-            if let Err(err) = self.document.edit(&replaces, true) {
+            if let Err(err) = self.document.edit_by(
+                &replaces,
+                true,
+                &By::Origin(&credits::by_zetwerk("tidied an equation")),
+            ) {
                 self.failure = Some(err.to_string());
                 return;
             }
@@ -343,7 +357,13 @@ impl Editor {
         if replaces.is_empty() {
             return;
         }
-        if let Err(err) = self.document.edit(&replaces, true) {
+        if let Err(err) = self.document.edit_by(
+            &replaces,
+            true,
+            &By::Origin(&credits::by_zetwerk(
+                "set apart what was put in an equation",
+            )),
+        ) {
             self.failure = Some(err.to_string());
             return;
         }
@@ -385,7 +405,11 @@ impl Editor {
         if replaces.is_empty() {
             return;
         }
-        if let Err(err) = self.document.edit(&replaces, true) {
+        if let Err(err) = self.document.edit_by(
+            &replaces,
+            true,
+            &By::Origin(&credits::by_zetwerk("cleared empty text in an equation")),
+        ) {
             self.failure = Some(err.to_string());
             return;
         }
@@ -477,7 +501,11 @@ impl Editor {
         if range.is_empty() || (typing && !in_line) {
             return;
         }
-        if let Err(err) = self.document.edit(&[Replace::new(range, "")], true) {
+        if let Err(err) = self.document.edit_by(
+            &[Replace::new(range, "")],
+            true,
+            &By::Origin(&credits::by_zetwerk("cleared an empty equation")),
+        ) {
             self.failure = Some(err.to_string());
             return;
         }
@@ -488,7 +516,7 @@ impl Editor {
     /// replaces a range of bytes by a text, the ranges referring to the
     /// text as the edits before them left it. All of them are one undo
     /// step. Nothing is changed if one of them cannot be made.
-    pub fn replace(&mut self, edits: &[(Range<usize>, &str)]) -> Result<(), String> {
+    fn replace_now(&mut self, edits: &[(Range<usize>, &str)]) -> Result<(), String> {
         // Tried on a copy of the ranges first: the engine has no way to
         // say no.
         let mut length = self.text().len();
@@ -518,6 +546,7 @@ impl Editor {
             shown_revision: before,
             read: &self.read,
             on_page: false,
+            credits: &mut self.credits,
         };
         self.engine.replace(&mut host, edits);
         match self.failure.take() {
@@ -559,6 +588,7 @@ impl Editor {
     /// repeats.
     pub fn share(&mut self, other: &Self) {
         self.engine.share(&other.engine);
+        self.credits.share(&other.credits);
     }
 
     /// The Vim that edits the text, to ask what it did.
@@ -589,6 +619,7 @@ impl Editor {
     /// Makes register `name` hold `text`: whole lines if it ends with a
     /// line break. See [`Engine::set_register`].
     pub fn set_register(&mut self, name: char, text: &str) {
+        self.credits.came_from_outside(text);
         self.engine.set_register(name, text);
     }
 
@@ -729,6 +760,7 @@ impl Editor {
             shown_revision,
             read: &self.read,
             on_page: false,
+            credits: &mut self.credits,
         };
         ask(&mut self.engine, &host)
     }
@@ -1019,6 +1051,7 @@ impl Editor {
             shown_revision,
             read: &self.read,
             on_page: false,
+            credits: &mut self.credits,
         };
         for key in keys.chain([press]) {
             self.engine.key(key, &mut host);
@@ -1072,6 +1105,8 @@ struct DocumentHost<'a> {
     read: &'a crate::reading::Cache,
     /// Whether the edits are made by keys on a page, not by an agent.
     on_page: bool,
+    /// Who the edits are by.
+    credits: &'a mut credits::Credits,
 }
 
 /// How often what a deletion left in an equation is cleared away: what
@@ -1111,9 +1146,13 @@ impl Host for DocumentHost<'_> {
                 .map(|part| Replace::new(part, ""))
                 .collect();
         }
-        if let Err(err) = self.document.edit(&replaces, join) {
+        if let Err(err) = self.credits.edit(self.document, &replaces, join) {
             *self.failure = Some(err.to_string());
         }
+    }
+
+    fn putting(&mut self, text: &str) {
+        self.credits.putting(text);
     }
 
     fn undo(&mut self) -> Option<Range<usize>> {

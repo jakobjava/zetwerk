@@ -9,7 +9,6 @@
 //! one suggestion per thing, say why in one sentence, use the
 //! categories, come back for the answers.
 
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -24,33 +23,12 @@ use rmcp::{RoleServer, tool, tool_router};
 
 use crate::server::{Server, blocking, failure};
 
-/// Who calls a tool: the name the agent's client gave as it connected,
-/// and the session (one connection).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Caller {
-    pub name: String,
-    pub session: String,
-}
+pub use crate::caller::Caller;
 
-thread_local! {
-    /// The caller of the tool being answered on this thread.
-    static CALLER: RefCell<Option<Caller>> = const { RefCell::new(None) };
-}
-
-/// Who calls the tool being answered on this thread: for the older tools
-/// (`edit_source` with `mode: propose`), whose suggestions are this
-/// caller's.
-#[must_use]
-pub fn caller() -> Option<Caller> {
-    CALLER.with(|caller| caller.borrow().clone())
-}
-
-/// Runs `call` with `caller` as the caller of this thread.
+/// Runs `call` with `caller` as the caller of this thread (see
+/// [`crate::caller`]).
 pub(crate) fn with_caller<T>(caller: Caller, call: impl FnOnce() -> T) -> T {
-    CALLER.with(|kept| *kept.borrow_mut() = Some(caller));
-    let answer = call();
-    CALLER.with(|kept| *kept.borrow_mut() = None);
-    answer
+    crate::caller::on_thread(Some(caller), call)
 }
 
 /// One connection of an agent.
@@ -90,6 +68,11 @@ impl Connection {
                 .get()
                 .cloned()
                 .unwrap_or_else(|| "agent".to_owned()),
+            // The version the client gave, where the call is answered for
+            // it (see `crate::caller::scope`).
+            version: crate::caller::current()
+                .map(|caller| caller.version)
+                .unwrap_or_default(),
             session: self.session.clone(),
         }
     }

@@ -409,6 +409,7 @@ impl Viewer {
             for range in ranges {
                 id = self.next_proposal;
                 self.next_proposal += 1;
+                self.noted_proposal(id);
                 self.proposals.push(Proposal {
                     id,
                     file: self.file_id(),
@@ -442,10 +443,11 @@ impl Viewer {
         // before the last one have each become `new`.
         let before_last: usize = ranges.iter().rev().skip(1).map(Range::len).sum();
         let changed = first.start..last.start + ranges.len() * new.len() - before_last;
+        let origin = self.agent_origin();
         self.editor
             .as_mut()
             .ok_or(NOT_EDITING)?
-            .replace(&edits)
+            .replace_by(&edits, &origin)
             .map_err(|why| format!("not changed: {why}"))?;
         self.text_changed(Edited::Agent);
         let text = self.text().ok_or(NOT_EDITING)?;
@@ -579,10 +581,11 @@ impl Viewer {
                 continue;
             }
             let proposal = self.proposals.remove(at);
+            let origin = self.accepted_origin(proposal.id);
             let Some(editor) = &mut self.editor else {
                 break;
             };
-            match editor.replace(&[(proposal.range.clone(), proposal.new.as_str())]) {
+            match editor.replace_by(&[(proposal.range.clone(), proposal.new.as_str())], &origin) {
                 Ok(()) => {
                     editor.set_cursor(proposal.range.start);
                     made += 1;

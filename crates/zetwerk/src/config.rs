@@ -28,6 +28,9 @@
 //! [present]
 //! clock = false       # the time shows in a corner of the slides from the start (t)
 //! duration = "20min"  # how long a talk is to take, unless :present says otherwise
+//! [authors]
+//! view = "off"        # or "origin", "age", "unread": how pages are tinted
+//! hide_unknown = false # leave text of unknown origin untinted
 //!
 //! [language]
 //! spelling = true     # words no dictionary knows are marked on the page
@@ -79,6 +82,8 @@ pub struct Config {
     #[serde(default)]
     pub present: Present,
     #[serde(default)]
+    pub authors: Authors,
+    #[serde(default)]
     pub language: Checking,
     #[serde(default)]
     pub keys: Keys,
@@ -89,7 +94,7 @@ pub struct Config {
     pub report: Report,
 }
 
-/// What is kept for a report of what happened (`g!`, Ctrl-G, `:report`).
+/// What is kept for a report of what happened (Ctrl-G, `:report`).
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Report {
@@ -222,6 +227,42 @@ impl Present {
                 .duration
                 .as_deref()
                 .and_then(zetwerk_app::viewer::present_duration),
+        }
+    }
+}
+
+/// How who wrote what is shown (see `zetwerk_app::viewer::authors`).
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Authors {
+    /// How the pages are tinted when the window opens.
+    pub view: Option<AuthorsView>,
+    /// Whether text of unknown origin is left untinted.
+    #[serde(default)]
+    pub hide_unknown: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorsView {
+    Off,
+    Origin,
+    Age,
+    Unread,
+}
+
+impl Authors {
+    #[must_use]
+    pub fn settings(&self) -> zetwerk_app::viewer::authors::Settings {
+        use zetwerk_app::viewer::authors::Tint;
+        zetwerk_app::viewer::authors::Settings {
+            view: match self.view {
+                None | Some(AuthorsView::Off) => None,
+                Some(AuthorsView::Origin) => Some(Tint::Origin),
+                Some(AuthorsView::Age) => Some(Tint::Age),
+                Some(AuthorsView::Unread) => Some(Tint::Unread),
+            },
+            hide_unknown: self.hide_unknown,
         }
     }
 }

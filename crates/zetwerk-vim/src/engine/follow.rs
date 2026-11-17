@@ -70,12 +70,18 @@ const G: &[(&str, &str, When)] = &[
         When::Idle,
     ),
     ("R", "all suggestions of agents, to review", When::Idle),
+    ("H", "who wrote what, tinted on the page", When::Idle),
     (
         "! Q",
         "an instruction to agents, a review asked of them",
         When::Unpending,
     ),
     ("h", "the history of the text", When::Idle),
+    (
+        "A H",
+        "who wrote it, on the page; the step that put it here",
+        When::Idle,
+    ),
     ("D", "how the document looks", When::Idle),
     ("B", "the bibliography", When::Idle),
     ("F", "figures and tables", When::Idle),

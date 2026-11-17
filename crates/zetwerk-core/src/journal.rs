@@ -9,6 +9,11 @@
 //! length, the payload's CRC-32, and the payload. A record that is cut short
 //! or fails its checksum ends the journal: it and everything after it never
 //! happened, which is exactly what a crash in the middle of a write means.
+//!
+//! Where the text came from (see [`crate::origin`]) is kept in records of
+//! its own: credits, the marks of a step (just before the step, written
+//! with it at once) and the marks of a snapshot's text (just after it).
+//! A journal written before there were such records reads as before.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -18,6 +23,7 @@ use std::time::{Instant, SystemTime};
 use crate::change::Change;
 use crate::disk::{self, Hash};
 use crate::history::StateId;
+use crate::origin::{self, ChangeMarks, Credit, CreditId, Run};
 
 const MAGIC: &[u8; 8] = b"ZWJOURN1";
 
@@ -47,6 +53,21 @@ pub enum Record {
     Prefer { state: StateId, child: StateId },
     /// The file on disk holds state `state`; `hash` is of the file's bytes.
     Saved { state: StateId, hash: Hash },
+    /// Credit number `id` is `credit`.
+    Credit { id: CreditId, credit: Credit },
+    /// The marks of the changes of the record that follows, which makes
+    /// or extends state `state`.
+    Marks {
+        state: StateId,
+        marks: Vec<ChangeMarks>,
+    },
+    /// The marks of the text of the snapshot before, of state `state`,
+    /// and the credits they name.
+    Map {
+        state: StateId,
+        credits: Vec<(CreditId, Credit)>,
+        runs: Vec<Run>,
+    },
 }
 
 impl Record {
@@ -89,6 +110,26 @@ impl Record {
                 put_u64(&mut payload, *state);
                 payload.extend_from_slice(hash);
             }
+            Self::Credit { id, credit } => {
+                payload.push(7);
+                payload.extend_from_slice(&id.to_le_bytes());
+                origin::put_credit(&mut payload, credit);
+            }
+            Self::Marks { state, marks } => {
+                payload.push(8);
+                put_u64(&mut payload, *state);
+                origin::put_marks(&mut payload, marks);
+            }
+            Self::Map {
+                state,
+                credits,
+                runs,
+            } => {
+                payload.push(9);
+                put_u64(&mut payload, *state);
+                origin::put_credits(&mut payload, credits);
+                origin::put_runs(&mut payload, runs);
+            }
         }
         let mut framed = Vec::with_capacity(payload.len() + 8);
         framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -123,6 +164,19 @@ impl Record {
             6 => Self::Saved {
                 state: reader.u64()?,
                 hash: reader.take(32)?.try_into().ok()?,
+            },
+            7 => Self::Credit {
+                id: u32::from_le_bytes(reader.take(4)?.try_into().ok()?),
+                credit: origin::take_credit(&mut reader.0)?,
+            },
+            8 => Self::Marks {
+                state: reader.u64()?,
+                marks: origin::take_marks(&mut reader.0)?,
+            },
+            9 => Self::Map {
+                state: reader.u64()?,
+                credits: origin::take_credits(&mut reader.0)?,
+                runs: origin::take_runs(&mut reader.0)?,
             },
             _ => return None,
         };
@@ -322,6 +376,24 @@ impl Journal {
         let bytes = record.encode();
         // One write call per record: a record is either written or not,
         // as far as other readers of the file and a killed process go.
+        if let Err(err) = self.file.write_all(&bytes) {
+            self.broken = self.file.set_len(self.len).is_err();
+            return Err(err);
+        }
+        self.len += bytes.len() as u64;
+        self.unsynced_since.get_or_insert_with(Instant::now);
+        Ok(())
+    }
+
+    /// Writes `records` at the end of the journal in one write, as
+    /// [`Journal::append`] writes one: they are all written or none.
+    pub fn append_all(&mut self, records: &[Record]) -> io::Result<()> {
+        if self.broken {
+            return Err(io::Error::other(
+                "the journal could not be put right after a failed write",
+            ));
+        }
+        let bytes: Vec<u8> = records.iter().flat_map(Record::encode).collect();
         if let Err(err) = self.file.write_all(&bytes) {
             self.broken = self.file.set_len(self.len).is_err();
             return Err(err);

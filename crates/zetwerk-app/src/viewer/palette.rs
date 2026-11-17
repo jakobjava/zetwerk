@@ -175,6 +175,41 @@ const ALL: &[(&str, &str, Does)] = &[
         "gh",
         Does::Run("history"),
     ),
+    (
+        "who wrote what: the page by origin",
+        "gH",
+        Does::Run("authors view"),
+    ),
+    (
+        "the step that put the text here, in the history",
+        ":authors step",
+        Does::Run("authors step"),
+    ),
+    (
+        "who wrote what: the shares of the document",
+        ":authors",
+        Does::Run("authors"),
+    ),
+    (
+        "the page by how old its text is",
+        ":authors age",
+        Does::Run("authors age"),
+    ),
+    (
+        "agents' text you have not taken in",
+        ":authors unread",
+        Does::Run("authors unread"),
+    ),
+    (
+        "write the authorship statement beside the document",
+        ":authors statement",
+        Does::Run("authors statement"),
+    ),
+    (
+        "write, read the attribution as a file beside the document",
+        ":authors export  :authors import",
+        Does::Run("authors export"),
+    ),
     ("save", ":w", Does::Run("w")),
     ("save everything and leave", ":x", Does::Run("x")),
     ("leave", ":q", Does::Run("q")),

@@ -9,6 +9,7 @@
 //! This crate knows the editor only through the [`Editor`] trait, so it does
 //! not depend on windows or GPUs and can serve a headless editor later.
 
+mod caller;
 mod client;
 mod review;
 mod server;
@@ -18,8 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+pub use caller::{Caller, caller};
 pub use client::{Output, call};
-pub use review::{Caller, NewSuggestion, Revision, Suggest, caller};
+pub use review::{NewSuggestion, Revision, Suggest};
 pub use server::{Running, Tools, serve, serve_stdio};
 pub use socket::{find_socket, find_socket_of, proxy_stdio, socket_of, socket_path};
 
@@ -198,6 +200,14 @@ pub trait Editor: Send + Sync + 'static {
     ) -> Result<serde_json::Value, String> {
         let _ = (since, timeout, cancelled);
         Err(NO_REVIEW.to_owned())
+    }
+
+    /// Who wrote the document: its shares by origin, as a whole and per
+    /// section, and for lines `from..=to` (if given) the stretches of
+    /// the text with who wrote them and when.
+    fn authorship(&self, lines: Option<(usize, usize)>) -> Result<serde_json::Value, String> {
+        let _ = lines;
+        Err("not offered here".to_owned())
     }
 }
 

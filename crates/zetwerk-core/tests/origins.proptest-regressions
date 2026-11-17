@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5ce8e5287cd5b9417ab2a11740290ea0747ab616569bc73ed272c04845e68851 # shrinks to initial = "", ops = [Edit { at: Index(0), len: 0, text: "", join: false, who: 0 }, Edit { at: Index(0), len: 0, text: "", join: false, who: 0 }, Edit { at: Index(0), len: 0, text: "", join: false, who: 0 }, Edit { at: Index(0), len: 0, text: " ", join: false, who: 0 }, Edit { at: Index(0), len: 0, text: "", join: true, who: 0 }, Undo, Undo, ExternalWrite("é "), Reload, Edit { at: Index(0), len: 0, text: "", join: false, who: 0 }, TornCrash(Index(9321754671914560084))]

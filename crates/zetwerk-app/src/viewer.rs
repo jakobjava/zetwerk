@@ -9,6 +9,7 @@ mod again;
 pub mod agent;
 mod aids;
 mod assist;
+pub mod authors;
 mod buffers;
 mod cells;
 mod deck;
@@ -990,6 +991,8 @@ pub struct Viewer {
     /// What happened lately, for a report (see [`report`]).
     report: report::Recorder,
     pub stats: Stats,
+    /// Who wrote what (see `authors`).
+    authors: authors::Authors,
 }
 
 impl Viewer {
@@ -1106,6 +1109,7 @@ impl Viewer {
             present: present::Present::default(),
             report: report::Recorder::default(),
             stats: Stats::default(),
+            authors: authors::Authors::default(),
         };
         viewer.resize(window, scale);
         Some(viewer)
@@ -1141,6 +1145,7 @@ impl Viewer {
         self.agent_edits = options.agent_edits;
         self.state_dir = Some(options.state_dir.clone());
         self.keymap = options.keys.clone();
+        self.authors.configure(&options.authors);
         // The page is where a document is worked on; the source is there
         // for whoever wants to see it (`gs`).
         self.panes = options.layout.unwrap_or(Panes::Page);
@@ -2246,7 +2251,7 @@ impl Viewer {
             "page next" => self.step_page(true),
             "page previous" => self.step_page(false),
             "describe" => self.describe(),
-            history if self.history_command(history) => {}
+            history if self.history_command(history) || self.authors_command(history) => {}
             find if self.find_command(find) => {}
             "definition" => self.goto_definition(),
             "outline" => self.pick(false),
@@ -2410,6 +2415,7 @@ impl Viewer {
             self.performance(&mut scene, has);
         }
         self.proposal_panel(&mut scene, has);
+        self.authors_panels(&mut scene, has);
         self.review_panels(&mut scene, has);
         self.hints(&mut scene, has);
         self.assist_panels(&mut scene, has);
@@ -2482,6 +2488,7 @@ impl Viewer {
                 self.shown.insert(visible.index, Shown { zoom, tiles });
             }
             self.line_numbers(scene, has, visible.index, origin);
+            self.authors_page(scene, has, visible.index, origin);
             self.step_marks(scene, has, visible.index, origin);
             self.language_page(scene, has, visible.index, origin);
             self.find_marks(scene, has, visible.index, origin);
@@ -2974,6 +2981,7 @@ impl Viewer {
             .as_ref()
             .is_some_and(|editing| editing.modified);
         let name = self.file_label(modified);
+        let name = self.authors_status().unwrap_or(name);
         let problem = self
             .problems
             .first()
@@ -3327,6 +3335,7 @@ mod tests {
     use super::*;
     use crate::keys;
 
+    mod authors;
     mod cursor;
     mod equations;
     mod errors;

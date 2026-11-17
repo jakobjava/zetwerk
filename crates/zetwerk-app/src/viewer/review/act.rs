@@ -332,13 +332,15 @@ impl Viewer {
             .rev()
             .map(|(_, _, range, new)| (range.clone(), new.as_str()))
             .collect();
-        let Some(editor) = &mut self.editor else {
-            return Vec::new();
-        };
-        if let Err(why) = editor.replace(&edits) {
+        // The text is the agent's, accepted (see `authors`); of a batch,
+        // credited to the agent of the first.
+        if let Err(why) = self.replace_accepted(chosen[0].1, &edits) {
             self.alert(format!("not changed: {why}"));
             return Vec::new();
         }
+        let Some(editor) = &mut self.editor else {
+            return Vec::new();
+        };
         let first = chosen[0].2.start;
         editor.set_cursor(first);
         let now = editor.text().to_owned();

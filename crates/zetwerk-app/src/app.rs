@@ -70,6 +70,8 @@ pub struct Options {
     pub talk: viewer::Talk,
     /// What is kept for a report of what happened (see `viewer::report`).
     pub report: viewer::report::Settings,
+    /// What the user has to say about showing who wrote what.
+    pub authors: viewer::authors::Settings,
 }
 
 /// How long a change may wait before the journal is forced onto the disk.

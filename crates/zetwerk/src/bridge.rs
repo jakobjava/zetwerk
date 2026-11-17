@@ -40,6 +40,16 @@ type Shown = (Option<PathBuf>, Option<PathBuf>);
 
 /// Why a request that waited is not answered: the user went to another
 /// document meanwhile.
+/// The agent whose request this thread answers, as it introduced
+/// itself to the MCP server.
+fn caller() -> Option<zetwerk_app::viewer::authors::Agent> {
+    zetwerk_mcp::caller().map(|caller| zetwerk_app::viewer::authors::Agent {
+        name: caller.name,
+        version: caller.version,
+        session: caller.session,
+    })
+}
+
 const SWITCHED: &str = "the window shows another document now: what you asked of the one it \
                         showed was not done; see get_state for what it shows";
 
@@ -389,10 +399,11 @@ impl Editor for Bridge {
             reason,
         } = change;
         let agent = agent_of(None);
+        let author = caller();
         let moving = matches!(what, ChangeKind::MoveSection { .. });
         let (outcome, made_ids, shown, suggestions) = self.now(move |viewer| {
             let first = viewer.next_proposal_id();
-            let outcome = made(viewer, what, expected, propose);
+            let outcome = viewer.as_agent(author, |viewer| made(viewer, what, expected, propose));
             if let (Ok(Outcome::Proposed { .. }), Some(reason)) = (&outcome, &reason) {
                 viewer.explain_proposals(first, reason);
             }
@@ -843,13 +854,15 @@ impl Editor for Bridge {
     fn answer_note(&self, answer: NoteAnswer) -> Result<Value, String> {
         let id = answer.id;
         let agent = agent_of(None);
+        let author = caller();
         let (proposal, suggestion) = self.now(move |viewer| {
             let change = answer
                 .change
                 .as_ref()
                 .map(|(old, new)| (old.as_str(), new.as_str()));
-            let proposal =
-                viewer.agent_answer_note(answer.id, &answer.text, change, answer.expected_revision);
+            let proposal = viewer.as_agent(author, |viewer| {
+                viewer.agent_answer_note(answer.id, &answer.text, change, answer.expected_revision)
+            });
             let made = viewer.adopt_proposals(Some(&agent), None, None);
             proposal.map(|proposal| (proposal, made.first().map(|(_, id)| *id)))
         })??;
@@ -944,6 +957,10 @@ impl Editor for Bridge {
         }
         self.now(move |viewer| viewer.review_news(since))
     }
+
+    fn authorship(&self, lines: Option<(usize, usize)>) -> Result<Value, String> {
+        self.now(move |viewer| viewer.authorship(lines))?
+    }
 }
 
 /// A window capture as a PNG file.
@@ -1021,6 +1038,7 @@ mod tests {
             review: zetwerk_app::viewer::review::Settings::default(),
             talk: zetwerk_app::viewer::Talk::default(),
             report: zetwerk_app::viewer::report::Settings::default(),
+            authors: zetwerk_app::viewer::authors::Settings::default(),
         }
     }
 
@@ -1938,6 +1956,7 @@ mod tests {
         let claude = Caller {
             name: "claude-code".to_owned(),
             session: "s7".to_owned(),
+            ..Caller::default()
         };
         let batch = vec![
             NewSuggestion {
