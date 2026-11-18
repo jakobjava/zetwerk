@@ -14,6 +14,7 @@ mod buffers;
 mod cells;
 mod changes;
 pub mod comfort;
+mod compose;
 mod deck;
 pub mod export;
 mod far;
@@ -88,6 +89,7 @@ use zetwerk_vim::{Effect, Seek, Shown as ShownLine};
 
 use self::agent::{AgentEdits, Mark, Proposal};
 pub use self::changes::{ChangeOptions, Since};
+pub use self::compose::Typing;
 pub use self::keymap::Keymap;
 pub use self::language::{Check, Issue, Report};
 pub use self::present::{Talk, parse_duration as present_duration};
@@ -903,6 +905,8 @@ pub struct Viewer {
     mapping: keymap::Waiting,
     /// What Vim's keys that the window carries out keep (see `vim`).
     vim: vim::Vim,
+    /// What is being composed and is not yet typed (see [`compose`]).
+    compose: compose::Compose,
     /// The revision that document was compiled from. Differs from
     /// `compiled_revision` while the newest text has errors.
     document_revision: Option<u64>,
@@ -1080,6 +1084,7 @@ impl Viewer {
             typed: Vec::new(),
             mapping: keymap::Waiting::default(),
             vim: vim::Vim::default(),
+            compose: compose::Compose::default(),
             document_revision: None,
             predicted: None,
             changed: None,
@@ -1887,6 +1892,9 @@ impl Viewer {
         self.message = None;
         self.place.touched = true;
         let press = self.shift_enter(press);
+        let Some(press) = self.compose_key(press) else {
+            return;
+        };
         if self.stop_key(press)
             || self.set_key(press)
             || self.confirm_key(press)
@@ -2083,6 +2091,10 @@ impl Viewer {
     /// last compile is plain text typed into one line of a paragraph.
     /// Returns whether the pages show the current text afterwards.
     fn predict(&mut self) -> bool {
+        // Text typed at once is worked out once, at its last key.
+        if self.compose.burst {
+            return false;
+        }
         if let Some(old) = self.predicted.take() {
             self.planned.retain(|(index, _, _), _| *index != old.index);
         }
@@ -2296,6 +2308,7 @@ impl Viewer {
             || self.report_command(command)
             || self.paste_command(command)
             || self.changes_command(command)
+            || self.compose_command(command)
         {
             return;
         }
@@ -2498,6 +2511,7 @@ impl Viewer {
         // Drawn after the pages: a page zoomed wider than its pane must
         // not reach over the source.
         self.source_pane(&mut scene, has);
+        self.composed_overlays(&mut scene, has);
         self.status_line(&mut scene, has);
         if self.performance_panel {
             self.performance(&mut scene, has);
@@ -3068,8 +3082,12 @@ impl Viewer {
         };
         let typed = editing.and_then(|editing| Some((editing.prompt, editing.command.as_ref()?)));
         let command = match (&self.mode, typed) {
-            (_, Some((prompt, text))) => Some(format!("{prompt}{text}\u{2588}")),
-            (Mode::Command(text), None) => Some(format!(":{text}\u{2588}")),
+            (_, Some((prompt, text))) => {
+                Some(format!("{prompt}{text}{}\u{2588}", self.composed_inline()))
+            }
+            (Mode::Command(text), None) => {
+                Some(format!(":{text}{}\u{2588}", self.composed_inline()))
+            }
             _ => None,
         };
         let modified = state
@@ -3439,6 +3457,7 @@ mod tests {
     mod authors;
     mod changes;
     mod comfort;
+    mod compose;
     mod cursor;
     mod equations;
     mod errors;

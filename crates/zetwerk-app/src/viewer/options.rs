@@ -290,6 +290,26 @@ pub(crate) const TABLE: &[Opt] = &[
     )
     .names(&["tm"]),
     opt(
+        "keys.by_position",
+        Group::Keys,
+        Kind::Switch,
+        ON,
+        "on a Russian or Greek layout, a letter typed in normal mode is the \
+         US key in its place (\u{43e} on the key of j is j); Latin letters never",
+        |v| Value::Switch(v.keymap.typing.by_position),
+        |v, value| v.keymap.typing.by_position = value.is_on(),
+    ),
+    opt(
+        "keys.input_method_in_normal",
+        Group::Keys,
+        Kind::Switch,
+        OFF,
+        "let an input method (fcitx, ibus) work in normal mode too, where \
+         what it commits is keys; usually only while text is typed",
+        |v| Value::Switch(v.keymap.typing.input_method_in_normal),
+        |v, value| v.keymap.typing.input_method_in_normal = value.is_on(),
+    ),
+    opt(
         "ai.edit_mode",
         Group::Agents,
         Kind::Choice(&["live", "propose"]),

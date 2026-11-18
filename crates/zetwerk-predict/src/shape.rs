@@ -81,3 +81,23 @@ pub fn reproduces(glyphs: &[Glyph], shaped: &[Shaped]) -> bool {
             .zip(glyphs)
             .all(|(ours, theirs)| ours.id == theirs.id && ours.range == theirs.range())
 }
+
+/// Whether `text` has characters that shaping left to right with default
+/// settings does not set as Typst does: of a script written right to left
+/// (Hebrew, Arabic, Syriac, Thaana, N'Ko and the forms of their
+/// presentation), or the marks that change the direction of text.
+pub fn is_complex(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(
+            c,
+            '\u{590}'..='\u{8ff}'
+                | '\u{200e}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{fb1d}'..='\u{fdff}'
+                | '\u{fe70}'..='\u{fefc}'
+                | '\u{10800}'..='\u{10fff}'
+                | '\u{1e800}'..='\u{1efff}'
+        )
+    })
+}

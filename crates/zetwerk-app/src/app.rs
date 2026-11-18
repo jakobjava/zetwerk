@@ -27,6 +27,7 @@ use crate::viewer::agent::AgentEdits;
 use crate::viewer::{self, Edited, State, Viewer};
 use crate::watch::FileWatcher;
 
+pub(crate) mod ime;
 mod present;
 mod refusal;
 mod switch;
@@ -233,6 +234,8 @@ struct Session {
     last_edit: Option<Instant>,
     /// Requests waiting for the window to settle.
     waiting: Vec<Request>,
+    /// What the input method was told last.
+    ime: ime::Ime,
 }
 
 impl ApplicationHandler<Event> for App {
@@ -277,6 +280,7 @@ impl ApplicationHandler<Event> for App {
                 session.viewer.leaving();
                 session.viewer.sync();
                 session.viewer.pointer_released();
+                session.viewer.end_composition(false);
             }
             WindowEvent::RedrawRequested => session.redraw(),
             other => session.window_event(other),
@@ -469,13 +473,12 @@ impl Session {
         })
         .ok();
 
-        let viewer = document.viewer(
+        let mut viewer = document.viewer(
             Arc::clone(&env),
             (size.width, size.height),
             window.scale_factor(),
             options,
         )?;
-        let mut viewer = viewer;
         viewer.desktop_theme(
             window
                 .theme()
@@ -505,6 +508,7 @@ impl Session {
             debounce: budget.debounce,
             last_edit: None,
             waiting: Vec::new(),
+            ime: ime::Ime::default(),
         };
         session.viewer.export_in_background(wake(proxy));
         session.viewer.packages_in_background(wake(proxy));
@@ -546,18 +550,11 @@ impl Session {
                 self.after_keys();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let ctrl = self.modifiers.control_key();
-                let Some(key) = translate(&event.logical_key, event.text.as_deref(), ctrl) else {
-                    return;
-                };
-                let key = shifted(key, self.modifiers.shift_key());
-                let alt = alt_held(
-                    event.text.as_deref(),
-                    ctrl,
-                    self.modifiers.alt_key(),
-                    cfg!(target_os = "macos"),
-                );
-                self.viewer.key(KeyPress { key, ctrl, alt });
+                ime::keyboard(&mut self.viewer, &ime::Pressed::of(&event, self.modifiers));
+                self.after_keys();
+            }
+            WindowEvent::Ime(event) => {
+                ime::event(&mut self.viewer, event);
                 self.after_keys();
             }
             WindowEvent::MouseInput {
@@ -566,6 +563,8 @@ impl Session {
                 ..
             } => {
                 if state == ElementState::Pressed {
+                    // A click ends what an input method composes.
+                    self.viewer.end_composition(true);
                     let shift = self.modifiers.shift_key();
                     self.viewer
                         .pointer_pressed(self.cursor, shift, Instant::now());
@@ -748,6 +747,8 @@ impl Session {
             stats.latency_ms = input_at.elapsed().as_secs_f64() * 1000.0;
         }
         self.answer_waiting(settled, &scene.quads);
+        // Where the cursor is now drawn, the input method's list goes.
+        self.sync_input_method();
     }
 
     fn present(&mut self, quads: &[Quad]) {

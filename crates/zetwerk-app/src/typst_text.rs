@@ -757,6 +757,20 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         Ground::Math if c == '"' && !text[at..].starts_with('"') => {
             return Some((at..at, "\"\"".to_owned(), 1));
         }
+        // A letter of a script equations have no symbols of (a Chinese
+        // character) is text there, in quotes: two of them unquoted would
+        // be read as a name. Right behind such text, it goes into it.
+        Ground::Math if crate::scripts::is_text_in_math(c) => {
+            let text_behind = behind.is_some_and(|leaf| {
+                let quoted = text.get(leaf.range()).unwrap_or_default();
+                leaf.kind() == SyntaxKind::Str && quoted.len() >= 2 && quoted.ends_with('"')
+            });
+            return Some(if text_behind {
+                (at - 1..at, format!("{c}\""), c.len_utf8() + 1)
+            } else {
+                (at..at, format!("\"{c}\""), c.len_utf8() + 2)
+            });
+        }
         Ground::Math | Ground::Code => return None,
     }
     let escaped = || plain(format!("\\{c}"));

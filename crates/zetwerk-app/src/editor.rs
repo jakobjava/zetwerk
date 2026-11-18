@@ -1386,13 +1386,15 @@ impl Host for DocumentHost<'_> {
             return None;
         }
         match pages.stop(at, seek) {
-            Ok(stop) => stop,
+            // Whole characters: a page that has no glyph for an emoji with
+            // its skin tone shows each part by itself.
+            Ok(stop) => stop.map(|stop| zetwerk_vim::Text(self.document.text()).whole(stop)),
             // Text typed since the pages were made: it will show as it
             // was typed, character by character.
             Err(Unseen) if matches!(seek, Seek::At | Seek::After | Seek::Before) => {
                 let text = self.document.text();
-                let c = text.get(at..)?.chars().next().filter(|c| *c != '\n')?;
-                Some(at..at + c.len_utf8())
+                text.get(at..)?.chars().next().filter(|c| *c != '\n')?;
+                Some(at..zetwerk_vim::Text(text).next(at))
             }
             Err(Unseen) => None,
         }

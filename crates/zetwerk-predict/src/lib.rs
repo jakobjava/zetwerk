@@ -142,6 +142,11 @@ pub fn predict(frame: &Frame, map: &PageMap, edit: Replacement) -> Result<Predic
         Some((pos, FrameItem::Text(item))) => (*pos, item),
         _ => return Err(Decline::Inconsistent),
     };
+    // Text that runs right to left, or is set by rules of its script that
+    // shaping left to right does not know, is for Typst to set.
+    if shape::is_complex(edit.text) || shape::is_complex(&item.text) {
+        return Err(Decline::UnknownShaping);
+    }
     // Where in the item's own text the edit begins and ends.
     let within = |spot: Spot| {
         let glyph = item.glyphs.get(spot.glyph)?;

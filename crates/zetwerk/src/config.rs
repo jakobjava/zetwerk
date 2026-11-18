@@ -72,6 +72,9 @@
 //! "jk" = "<Esc>"
 //! [keys]
 //! timeoutlen = 1000  # how long the first keys of a mapping wait, in ms
+//! by_position = true # on a Russian or Greek layout, normal mode's keys
+//!                    # are the US keys in their places (`о` is `j`)
+//! input_method_in_normal = false  # let fcitx, ibus work in normal mode
 //!
 //! [report]
 //! keys = 500         # keys kept for a report (Ctrl-G, :report); 0 keeps none
@@ -94,7 +97,7 @@ use serde::Deserialize;
 use zetwerk_app::power::PowerMode;
 use zetwerk_app::settings::{Stored, Value, Written, table};
 use zetwerk_app::viewer::agent::AgentEdits;
-use zetwerk_app::viewer::{Keymap, Panes, comfort};
+use zetwerk_app::viewer::{Keymap, Panes, Typing, comfort};
 
 #[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -492,6 +495,13 @@ pub struct Keys {
     /// How long, in milliseconds, keys that may begin a mapping wait for
     /// the next: Vim's `timeoutlen`.
     pub timeoutlen: Option<u64>,
+    /// Whether a key that types a letter of another script than the Latin
+    /// is, in normal mode, the US key in its place; it is unless this
+    /// says no.
+    pub by_position: Option<bool>,
+    /// Whether an input method may work in normal mode too; it may not
+    /// unless this says so.
+    pub input_method_in_normal: Option<bool>,
 }
 
 impl Keys {
@@ -505,6 +515,13 @@ impl Keys {
                 .collect()
         }
         let (keymap, complaint) = Keymap::parse(pairs(&self.normal), pairs(&self.insert));
+        let usual = Typing::default();
+        let keymap = keymap.with_typing(Typing {
+            by_position: self.by_position.unwrap_or(usual.by_position),
+            input_method_in_normal: self
+                .input_method_in_normal
+                .unwrap_or(usual.input_method_in_normal),
+        });
         match self.timeoutlen {
             Some(millis) => (keymap.with_timeout(millis), complaint),
             None => (keymap, complaint),
@@ -915,6 +932,14 @@ colour = 1
         let jk = jk.unwrap_or_default();
         assert_eq!(jk.keys.keymap().1, None);
         assert_eq!(jk.keys.timeoutlen, Some(300));
+        // How keys type: by their places on other scripts' layouts, and
+        // input methods only where text is typed, unless said otherwise.
+        let typing = parse("[keys]\nby_position = false\ninput_method_in_normal = true\n");
+        let typing = typing.unwrap_or_default();
+        assert_eq!(
+            (typing.keys.by_position, typing.keys.input_method_in_normal),
+            (Some(false), Some(true))
+        );
         let odd = parse("[keys.insert]\n\"\" = \"<Esc>\"\n").unwrap_or_default();
         assert!(odd.keys.keymap().1.is_some());
         assert_eq!(

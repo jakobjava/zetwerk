@@ -1347,7 +1347,12 @@ impl Viewer {
             normal.iter().map(|(a, b)| (a.as_str(), b.as_str())),
             typing.iter().map(|(a, b)| (a.as_str(), b.as_str())),
         );
-        self.set_keymap(keymap.with_timeout(self.settings.timeout));
+        let typing = self.keymap.typing;
+        self.set_keymap(
+            keymap
+                .with_timeout(self.settings.timeout)
+                .with_typing(typing),
+        );
         let mode = if insert { "insert" } else { "normal" };
         let edit = Edit {
             path: vec!["keys".to_owned(), mode.to_owned(), keys.to_owned()],
