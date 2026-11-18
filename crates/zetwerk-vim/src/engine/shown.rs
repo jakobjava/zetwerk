@@ -20,7 +20,7 @@ use super::{
 };
 use crate::keys::{Key, KeyPress};
 use crate::motion::{self, Kind};
-use crate::object::Object;
+use crate::object::{self, Object};
 use crate::text::Text;
 use crate::took::Took;
 
@@ -764,7 +764,9 @@ impl Engine {
     /// shows in two (see [`Host::cuts`]): the places shown in it, each
     /// run of them that can go together as one, in the order of the
     /// text. So `3x` from before an equation into it takes what is shown,
-    /// and the dollar sign between stays. `None` where all of it may go.
+    /// and the dollar sign between stays. Where more goes with all of it
+    /// than it is (see [`Host::pieces`]), what goes. `None` where all of
+    /// it may go, and nothing else.
     pub(super) fn shown_parts(
         &self,
         operator: Operator,
@@ -780,7 +782,15 @@ impl Engine {
             return None;
         }
         if !host.cuts(range.clone()) {
-            return None;
+            // What goes along with it, although it is not in it (the `#`
+            // before a call taken whole, see [`Host::pieces`]): from
+            // where that begins, so that the cursor goes there.
+            let pieces = host.pieces(range.clone(), "")?;
+            let along = pieces
+                .first()
+                .is_some_and(|first| first.start < range.start)
+                || pieces.last().is_some_and(|last| last.end > range.end);
+            return along.then_some(pieces);
         }
         Some(Self::parts_within(host, &range))
     }
@@ -831,7 +841,20 @@ impl Engine {
                 _ => false,
             };
         let begun = self.pending.operator.is_some() || self.pending.awaiting != Awaiting::Nothing;
-        if !self.rows_first || !changes || self.mode != Mode::Normal || begun {
+        if !self.rows_first || self.mode != Mode::Normal || begun {
+            return;
+        }
+        // Typing before a thing shown as one goes in before all it is
+        // written with (see [`Host::front`]), not behind the `#` of its
+        // call: `i` on a footnote's mark typed into its name.
+        if press.key == Key::Char('i')
+            && !press.ctrl
+            && let Some(stop) = host.stop(self.cursor, Seek::At)
+        {
+            self.cursor = host.front(stop);
+            return;
+        }
+        if !changes {
             return;
         }
         if host.stop(self.cursor, Seek::At).is_some() {
@@ -902,8 +925,33 @@ impl Engine {
             }
         } else {
             to = start;
+            // Not into another part of the page that is typed into by
+            // itself: back to where the cell or the footnote begins.
+            // Beyond that it took the cell before, and the name of the
+            // table where it began.
+            if host.parted(to..self.cursor) {
+                to = self.cursor;
+                while to > start {
+                    let Some(stop) = host.stop(text.prev(to), Seek::Before) else {
+                        break;
+                    };
+                    let past = stop.start >= to || stop.end > self.cursor || stop.start < start;
+                    if past || host.parted(stop.start..self.cursor) {
+                        break;
+                    }
+                    to = stop.start;
+                }
+                if to >= self.cursor {
+                    return Some(false);
+                }
+            }
         }
         let to = self.stop_at_insert_start(host.text(), to);
+        if to >= self.cursor && word && host.stop(self.cursor, Seek::Before).is_some() {
+            // Nothing shown before the cursor in its line: only marks
+            // (that of a heading, of an item), which stay.
+            return Some(false);
+        }
         if to >= self.cursor || host.stop(to, Seek::After).is_none() {
             return None;
         }
@@ -923,6 +971,46 @@ impl Engine {
         Some(true)
     }
 
+    /// Whether the text object of brackets or quotes that `name` asks
+    /// for around byte `at` (the `count`-th) has brackets the host
+    /// shows, where it shows pages: those of running text do, those of
+    /// code do not (the parentheses of a call, the brackets around a
+    /// cell of a table, the quotation marks of a string). An object of
+    /// such is refused there: `ci(` in a cell took all of the table's
+    /// arguments, `da(` on a box its parentheses. All other objects, and
+    /// where the host shows the text as it is: `true`.
+    pub(super) fn shown_pair(&self, name: char, at: usize, count: usize, host: &impl Host) -> bool {
+        if !self.rows_first {
+            return true;
+        }
+        let text = Text(host.text());
+        let marks = match name {
+            '(' | ')' | 'b' => object::bracket(text, at, '(', ')', true, count),
+            '[' | ']' => object::bracket(text, at, '[', ']', true, count),
+            '{' | '}' | 'B' => object::bracket(text, at, '{', '}', true, count),
+            '<' | '>' => object::bracket(text, at, '<', '>', true, count),
+            '"' | '\'' | '`' => object::quote(text, at, name, false, 1)
+                .map(|inside| (text.prev(inside.start), inside.end, true)),
+            _ => return true,
+        };
+        let shown = |at: usize| host.stop(at, Seek::At).is_some_and(|stop| stop.start == at);
+        marks.is_none_or(|(open, close, _)| shown(open) && shown(close))
+    }
+
+    /// Leaving a selection of the lines the host shows with no operator
+    /// (Escape, `V` again): the cursor goes back to where it was before
+    /// it was put at the end of its line, as Vim's stays where it is.
+    /// Else `V<Esc>x` took the last character of the paragraph.
+    pub(super) fn leave_line_select(&mut self) {
+        let put = self.line_cursor.take();
+        if let Some((was, put)) = put
+            && self.line_select
+            && put == self.cursor
+        {
+            self.cursor = was;
+        }
+    }
+
     /// Whether the host refuses what `operator` would take of `object`
     /// (`parts` of it, where only those go): see [`Host::refuses`]. Then
     /// the command fails and nothing changes.
@@ -934,7 +1022,9 @@ impl Engine {
         host: &mut impl Host,
     ) -> bool {
         let deletes = matches!(operator, Operator::Delete | Operator::Change);
-        if !self.rows_first || !deletes || object.linewise || object.start >= object.end {
+        // Whole lines too: `Vd` on a block of raw text took its first
+        // lines and left the rest unclosed.
+        if !self.rows_first || !deletes || object.start >= object.end {
             return false;
         }
         let whole = object.start..object.end;

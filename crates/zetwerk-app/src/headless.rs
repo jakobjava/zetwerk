@@ -33,7 +33,7 @@ pub enum OpenError {
 /// them sends [`Request::Quit`].
 pub fn spawn(options: &Options) -> Result<(Handle, JoinHandle<()>), OpenError> {
     let other = |message: String| OpenError::Other(message);
-    let env = Environment::new(options.font_set);
+    let env = Environment::with_packages(options.font_set, options.packages.dirs.clone());
     let (project, editor, opened) = open_document(&env, options)?;
     let viewer = Viewer::new(env, project, WINDOW, 1.0)
         .ok_or_else(|| other("no usable fonts were found".to_owned()))?
@@ -141,6 +141,7 @@ fn compile(viewer: &mut Viewer) {
     if viewer.is_compiled() {
         return;
     }
+    viewer.report_began();
     let (revision, world) = viewer.snapshot();
     let started = Instant::now();
     let compiled = zetwerk_typst::compile(&world);

@@ -7,6 +7,7 @@ mod figure;
 mod ide;
 pub mod local;
 mod locate;
+pub mod packages;
 mod pagemap;
 mod service;
 mod world;

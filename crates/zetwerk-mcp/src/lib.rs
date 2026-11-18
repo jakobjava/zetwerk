@@ -9,13 +9,19 @@
 //! This crate knows the editor only through the [`Editor`] trait, so it does
 //! not depend on windows or GPUs and can serve a headless editor later.
 
+mod caller;
 mod client;
+mod review;
 mod server;
 mod socket;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
+pub use caller::{Caller, caller};
 pub use client::{Output, call};
+pub use review::{NewSuggestion, Revision, Suggest};
 pub use server::{Running, Tools, serve, serve_stdio};
 pub use socket::{find_socket, find_socket_of, proxy_stdio, socket_of, socket_path};
 
@@ -108,6 +114,12 @@ pub trait Editor: Send + Sync + 'static {
     /// that stand in none.
     fn figures(&self) -> Result<serde_json::Value, String>;
 
+    /// The Typst packages the document imports and those on the
+    /// machine; nothing is fetched.
+    fn packages(&self) -> Result<serde_json::Value, String> {
+        Err("packages are not known here".to_owned())
+    }
+
     /// What is wrong with the spelling and the grammar of the text.
     fn check_language(&self) -> Result<serde_json::Value, String>;
 
@@ -124,7 +136,89 @@ pub trait Editor: Send + Sync + 'static {
 
     /// Marks note `id` resolved.
     fn resolve_note(&self, id: u64) -> Result<serde_json::Value, String>;
+
+    /// Makes the suggestions of `suggest`, as `caller` asks: each is
+    /// answered (see `zetwerk_app::viewer::review`).
+    fn suggest(&self, caller: &Caller, suggest: Suggest) -> Result<serde_json::Value, String> {
+        let _ = (caller, suggest);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// The suggestions in `states` (all where none are named), of the
+    /// agent named `by` only where it is given, changed since step
+    /// `since`; with the reviews asked for and the brief.
+    fn suggestions(
+        &self,
+        states: &[String],
+        by: Option<&str>,
+        since: Option<u64>,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (states, by, since);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// A new version of a suggestion, other wordings, or a line to the
+    /// author about it.
+    fn revise_suggestion(
+        &self,
+        caller: &Caller,
+        revision: Revision,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (caller, revision);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// Takes back the suggestions `ids`: all, or none where one cannot be.
+    fn withdraw_suggestions(
+        &self,
+        caller: &Caller,
+        ids: &[u64],
+    ) -> Result<serde_json::Value, String> {
+        let _ = (caller, ids);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// The author's standing instructions to agents.
+    fn brief(&self) -> Result<serde_json::Value, String> {
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// The brief as lines of words, for the instructions an agent is
+    /// given as it connects; `None` where there is none.
+    fn brief_text(&self) -> Option<String> {
+        None
+    }
+
+    /// What `get_state` says of reviewing: how many suggestions wait,
+    /// requests, the brief.
+    fn review_summary(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Waits until the author did something with suggestions, reviews
+    /// or the brief since step `since` (by default: since now), at most
+    /// `timeout` or until `cancelled`; then what it was.
+    fn wait_for_review(
+        &self,
+        since: Option<u64>,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (since, timeout, cancelled);
+        Err(NO_REVIEW.to_owned())
+    }
+
+    /// Who wrote the document: its shares by origin, as a whole and per
+    /// section, and for lines `from..=to` (if given) the stretches of
+    /// the text with who wrote them and when.
+    fn authorship(&self, lines: Option<(usize, usize)>) -> Result<serde_json::Value, String> {
+        let _ = lines;
+        Err("not offered here".to_owned())
+    }
 }
+
+/// What an agent is told by an editor that keeps no review.
+const NO_REVIEW: &str = "this editor keeps no review";
 
 /// A note an agent leaves on the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +277,25 @@ pub enum ChangeKind {
     /// Take the section whose heading is on `line` (counting from 1)
     /// where `direction` says, with all its subsections.
     MoveSection { line: usize, direction: Direction },
+    /// Put pages of a file beside the document into it, each a page of
+    /// its own (see `insert_pages`).
+    InsertPages(PagesWanted),
+}
+
+/// Pages of a file an agent wants put into the document.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PagesWanted {
+    /// The file (a PDF or an image), as a path from the document's
+    /// directory.
+    pub file: String,
+    /// Which pages of a PDF: `2`, `1-3`, `1,4-6`; all where none.
+    pub pages: Option<String>,
+    /// `cursor`, `start`, `end`, `after:<line>` or `before:<line>`.
+    pub place: Option<String>,
+    /// Fit to the document's paper, or as large as it is.
+    pub fit: Option<bool>,
+    /// Counted in the page numbers.
+    pub counted: Option<bool>,
 }
 
 /// Where a section is to go: past the section of its level before it

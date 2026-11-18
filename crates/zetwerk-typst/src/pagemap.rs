@@ -381,6 +381,25 @@ impl PageMap {
         PageLines { lines, stops }
     }
 
+    /// Makes the map one of the text of `file` with bytes `taken` taken
+    /// out and `put` bytes put in their place, where the page is the same
+    /// (a part was put into another page): the bytes behind them move.
+    /// Returns whether it could be: not if a glyph shows any of the bytes
+    /// taken out, or is of a node the bytes were put into, as a heading
+    /// in a table of contents is. The map is then as it was.
+    pub fn shift(&mut self, file: FileId, taken: &Range<usize>, put: usize) -> bool {
+        let origins = || self.glyphs.iter().filter_map(|glyph| glyph.origin.place());
+        if origins().any(|(of, range)| of == file && touches(range, taken)) {
+            return false;
+        }
+        for glyph in &mut self.glyphs {
+            if let Some(range) = glyph.origin.range_mut(file) {
+                *range = moved(range, taken, put);
+            }
+        }
+        true
+    }
+
     /// The cells of the glyphs that show bytes `range` of `file`, joined
     /// where they stand side by side on a line.
     #[must_use]
@@ -397,6 +416,36 @@ impl PageMap {
             join(&mut rects, glyph.rect);
         }
         rects
+    }
+}
+
+/// Whether bytes `range` of a text are, or hold, some of bytes `taken`,
+/// or the place they were taken from: what is shown of them changes
+/// with them.
+fn touches(range: &Range<usize>, taken: &Range<usize>) -> bool {
+    if taken.is_empty() {
+        range.start < taken.start && taken.start < range.end
+    } else {
+        range.start < taken.end && taken.start < range.end
+    }
+}
+
+/// Where bytes `range` of a text are after bytes `taken` of it were
+/// replaced by `put` bytes, if they are none of them: what ends where
+/// bytes were put in stays, what begins there moves.
+fn moved(range: &Range<usize>, taken: &Range<usize>, put: usize) -> Range<usize> {
+    let byte = |then: usize| {
+        if then < taken.start {
+            then
+        } else {
+            then.max(taken.end) - taken.len() + put
+        }
+    };
+    let start = byte(range.start);
+    if range.end <= taken.start && !range.is_empty() {
+        start..range.end
+    } else {
+        start..byte(range.end).max(start)
     }
 }
 
@@ -520,6 +569,27 @@ impl PageLine {
 }
 
 impl PageLines {
+    /// Like [`PageMap::shift`], for the lines of a page.
+    pub fn shift(&mut self, file: FileId, taken: &Range<usize>, put: usize) -> bool {
+        let glyphs = || self.lines.iter().flat_map(|line| &line.glyphs);
+        if glyphs().any(|glyph| glyph.file == file && touches(&(glyph.offset..glyph.end), taken)) {
+            return false;
+        }
+        for glyph in self.lines.iter_mut().flat_map(|line| &mut line.glyphs) {
+            if glyph.file == file {
+                let now = moved(&(glyph.offset..glyph.end), taken, put);
+                (glyph.offset, glyph.end) = (now.start, now.end);
+            }
+        }
+        for stop in &mut self.stops {
+            if stop.file == file {
+                let now = moved(&(stop.start..stop.end), taken, put);
+                (stop.start, stop.end) = (now.start, now.end);
+            }
+        }
+        true
+    }
+
     /// How many lines of the page show text of the file.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -822,6 +892,67 @@ impl PageLines {
             .min_by(|a, b| order(aside(a), aside(b)))
             .map(|glyph| (glyph.file, glyph.offset))
     }
+
+    /// The lines that show some of the bytes `ranges` of `file` (in
+    /// order, apart): each line with the index of the range it shows,
+    /// once for each.
+    #[must_use]
+    pub fn showing(&self, file: FileId, ranges: &[Range<usize>]) -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        for (index, line) in self.lines.iter().enumerate() {
+            for glyph in line.glyphs.iter().filter(|glyph| glyph.file == file) {
+                // From the first range that ends behind where the glyph
+                // begins, those that begin before it ends.
+                let first = ranges.partition_point(|range| range.end <= glyph.offset);
+                let end = glyph.end.max(glyph.offset + 1);
+                let shown = ranges[first..]
+                    .iter()
+                    .take_while(|range| range.start < end)
+                    .count();
+                found.extend((first..first + shown).map(|range| (index, range)));
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+}
+
+impl PageLines {
+    /// The lines of a page that shows no text, only one thing made of
+    /// bytes `range` of `file` (a page put in whole, from a PDF or an
+    /// image): one line across `rect`, with that thing as its one place
+    /// for a cursor. What [`PageMap::lines`] finds of glyphs alone.
+    #[must_use]
+    pub fn of_one(file: FileId, range: Range<usize>, rect: Rect) -> Self {
+        let (left, right) = (rect.min.x.to_pt(), rect.max.x.to_pt());
+        let (top, bottom) = (rect.min.y.to_pt(), rect.max.y.to_pt());
+        let glyph = LineGlyph {
+            left,
+            right,
+            file,
+            offset: range.start,
+            end: range.end,
+            blank: false,
+        };
+        let stop = Stop {
+            line: 0,
+            file,
+            start: range.start,
+            end: range.end,
+            blank: false,
+        };
+        Self {
+            lines: vec![PageLine {
+                top,
+                bottom,
+                left,
+                right,
+                glyphs: vec![glyph],
+            }],
+            stops: vec![stop],
+        }
+    }
 }
 
 fn order(a: f64, b: f64) -> std::cmp::Ordering {
@@ -870,6 +1001,20 @@ impl Origin {
     /// that part is typed at.
     fn is_empty_place(&self) -> bool {
         matches!(self, Self::Math { range, .. } if range.is_empty())
+    }
+
+    /// The bytes of `file` this glyph stands for, to be changed, if it
+    /// stands for any.
+    fn range_mut(&mut self, file: FileId) -> Option<&mut Range<usize>> {
+        match self {
+            Self::Text { file: of, range }
+            | Self::Space { file: of, range }
+            | Self::Math { file: of, range }
+            | Self::Object {
+                file: of, range, ..
+            } if *of == file => Some(range),
+            _ => None,
+        }
     }
 
     /// The bytes of `file` this glyph stands for, if it stands for any.
@@ -1048,6 +1193,9 @@ enum Resolved {
 #[derive(Clone, Copy)]
 enum NodeKind {
     Text,
+    /// A link written as it is (`https://…`): shown as written, letter
+    /// by letter, like text; else as one thing.
+    Link,
     Space,
     Math,
     Object(SyntaxKind),
@@ -1154,9 +1302,19 @@ impl Builder<'_> {
                 range: node,
                 kind,
             },
-            NodeKind::Text => {
+            NodeKind::Text | NodeKind::Link => {
+                let whole = Origin::Object {
+                    file,
+                    range: node.clone(),
+                    kind: SyntaxKind::Link,
+                };
+                let link = matches!(kind, NodeKind::Link);
                 let Some(shown) = shown else {
-                    return Origin::Atomic(Atomic::Transformed);
+                    return if link {
+                        whole
+                    } else {
+                        Origin::Atomic(Atomic::Transformed)
+                    };
                 };
                 // The glyph is only editable if the source really holds, at
                 // the position Typst reports, the text the glyph displays.
@@ -1165,6 +1323,8 @@ impl Builder<'_> {
                 let range = start..start + shown.len();
                 if range.end <= node.end && source.text().get(range.clone()) == Some(shown) {
                     Origin::Text { file, range }
+                } else if link {
+                    whole
                 } else {
                     Origin::Atomic(Atomic::Transformed)
                 }
@@ -1190,6 +1350,10 @@ impl Builder<'_> {
             };
             match kind {
                 NodeKind::Object(kind) => origin = Some(Origin::Object { file, range, kind }),
+                NodeKind::Link => {
+                    let kind = SyntaxKind::Link;
+                    origin = Some(Origin::Object { file, range, kind });
+                }
                 NodeKind::Math => origin = Some(Origin::Math { file, range }),
                 NodeKind::Text | NodeKind::Space => continue,
             }
@@ -1222,6 +1386,7 @@ impl Builder<'_> {
             _ if in_equation => NodeKind::Math,
             SyntaxKind::Text => NodeKind::Text,
             SyntaxKind::Space => NodeKind::Space,
+            SyntaxKind::Link => NodeKind::Link,
             // What these put on the page besides their text is a number
             // or a marker; the cursor has no business there.
             other @ (SyntaxKind::Markup

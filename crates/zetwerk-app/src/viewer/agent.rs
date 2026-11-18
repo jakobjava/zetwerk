@@ -204,6 +204,7 @@ impl Viewer {
         self.agent_edits = before.agent_edits;
         self.revision = self.revision.max(before.revision + 1);
         self.next_proposal = self.next_proposal.max(before.next_proposal);
+        self.review_take_over(before);
     }
 
     /// Whether the pages show another state of the text than the one it
@@ -408,6 +409,7 @@ impl Viewer {
             for range in ranges {
                 id = self.next_proposal;
                 self.next_proposal += 1;
+                self.noted_proposal(id);
                 self.proposals.push(Proposal {
                     id,
                     file: self.file_id(),
@@ -441,10 +443,11 @@ impl Viewer {
         // before the last one have each become `new`.
         let before_last: usize = ranges.iter().rev().skip(1).map(Range::len).sum();
         let changed = first.start..last.start + ranges.len() * new.len() - before_last;
+        let origin = self.agent_origin();
         self.editor
             .as_mut()
             .ok_or(NOT_EDITING)?
-            .replace(&edits)
+            .replace_by(&edits, &origin)
             .map_err(|why| format!("not changed: {why}"))?;
         self.text_changed(Edited::Agent);
         let text = self.text().ok_or(NOT_EDITING)?;
@@ -477,12 +480,16 @@ impl Viewer {
         }
         self.predicted_at = None;
         self.edited = Some(edited);
+        if edited == Edited::Agent {
+            self.packages_by_agent();
+        }
         self.sync_proposals();
     }
 
     /// Moves the proposals along with a change of the text; those whose
     /// text was changed are stale from then on.
     pub(super) fn sync_proposals(&mut self) {
+        self.sync_review();
         self.sync_notes();
         if self.proposals.is_empty() {
             self.proposal_text = None;
@@ -529,14 +536,19 @@ impl Viewer {
     pub(super) fn agent_marks(&self) -> Vec<(Range<usize>, Mark)> {
         let mut marks = Vec::new();
         marks.extend(self.agent_mark.clone().map(|range| (range, Mark::Changed)));
-        marks.extend(self.proposals.iter().map(|proposal| {
-            let mark = if proposal.stale {
-                Mark::Stale
-            } else {
-                Mark::Proposed
-            };
-            (proposal.range.clone(), mark)
-        }));
+        let proposals = self.proposals.iter();
+        marks.extend(
+            proposals
+                .filter(|p| !self.review_marks_proposal(p.id))
+                .map(|proposal| {
+                    let mark = if proposal.stale {
+                        Mark::Stale
+                    } else {
+                        Mark::Proposed
+                    };
+                    (proposal.range.clone(), mark)
+                }),
+        );
         marks
     }
 
@@ -572,10 +584,11 @@ impl Viewer {
                 continue;
             }
             let proposal = self.proposals.remove(at);
+            let origin = self.accepted_origin(proposal.id);
             let Some(editor) = &mut self.editor else {
                 break;
             };
-            match editor.replace(&[(proposal.range.clone(), proposal.new.as_str())]) {
+            match editor.replace_by(&[(proposal.range.clone(), proposal.new.as_str())], &origin) {
                 Ok(()) => {
                     editor.set_cursor(proposal.range.start);
                     made += 1;
@@ -752,7 +765,7 @@ impl Viewer {
             &self.document,
             self.document_revision == Some(self.revision) && !self.looks_back(),
         ) {
-            let introspector = document.introspector();
+            let introspector = document.document().introspector();
             let headings = introspector.elements().query(&HeadingElem::ELEM.select());
             for heading in &headings {
                 let position = heading
@@ -809,7 +822,7 @@ impl Viewer {
             .map_err(|_| "the compiled source is gone".to_owned())?;
         let near = self.cursor_page.get();
         let shown = world.shown_at(file, offset);
-        let position = zetwerk_typst::locate(&document, &source, shown, near)
+        let position = zetwerk_typst::locate(document.pages(), &source, shown, near)
             .ok_or("nothing of that place or near it is on a page")?;
         // That is the line; the page map knows the character.
         let exact = document.pages().get(position.page).and_then(|page| {
@@ -881,7 +894,7 @@ impl Viewer {
     pub fn for_export(&self) -> Result<Export, String> {
         let (_, document, world) = self.current_pages()?;
         Ok(Export {
-            document: document.clone(),
+            document: document.document().clone(),
             world: world.clone(),
             main: self.project.main_path().map(std::path::Path::to_owned),
         })
@@ -895,7 +908,7 @@ impl Viewer {
     ) -> Result<
         (
             &super::Editor,
-            &std::sync::Arc<typst_layout::PagedDocument>,
+            &super::local::Pages,
             &std::sync::Arc<zetwerk_typst::ProjectWorld>,
         ),
         String,

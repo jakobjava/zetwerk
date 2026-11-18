@@ -400,6 +400,50 @@ fn the_word_for_an_empty_place_stands_behind_it_where_there_is_room() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// The words drawn for empty places in `text` once `keys` are typed:
+/// what is drawn that is no bar, cursor, selection or veil, right of the
+/// margin.
+fn place_words(text: &str, keys: &str) -> Vec<[i32; 4]> {
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, keys);
+    compile(&mut viewer);
+    let drawn = frame(&mut viewer);
+    let known = ["bar", "cursor", "selection", "focus"];
+    let words = drawn
+        .quads
+        .iter()
+        .filter(|(name, quad)| !known.contains(&name.as_str()) && quad[0] > 130 && quad[3] >= 4)
+        .map(|(_, quad)| *quad)
+        .collect();
+    let _ = std::fs::remove_dir_all(directory);
+    words
+}
+
+#[test]
+fn the_word_for_an_empty_place_with_no_room_is_smaller_where_it_stands() {
+    // Room behind the exponent: the word as it always is.
+    let roomy = place_words(
+        "#set page(width: 360pt, height: 240pt)\n\
+         Some text on the line above the equation, filling the line well \
+         enough to wrap. Let $y^k$\n\nAnd text on the line below it.\n",
+        "gsgs/\\=k<CR>s",
+    );
+    // Text behind it, and lines above and below: smaller, over the text.
+    let tight = place_words(
+        "#set page(width: 360pt, height: 240pt)\n\
+         Some text on the line above the equation, filling the line well \
+         enough to wrap. Let $y^k$ and the words go on behind it, well \
+         past the end of this line and onto the next one as well, and \
+         further still.\n",
+        "gsgs/\\=k<CR>s",
+    );
+    assert_eq!((roomy.len(), tight.len()), (1, 1), "{roomy:?} {tight:?}");
+    assert!(
+        tight[0][3] < roomy[0][3],
+        "with no room the word is smaller: {tight:?} against {roomy:?}"
+    );
+}
+
 /// Prints the frames of `keys` after `setup` on `text`: what each frame
 /// drew that the one before did not, and what it did not draw that the
 /// one before did.

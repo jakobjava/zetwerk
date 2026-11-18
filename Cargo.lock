@@ -7331,6 +7331,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.3+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.5",
 ]
 
@@ -9626,6 +9627,7 @@ dependencies = [
  "serde_json",
  "tiny-skia 0.12.0",
  "toml 1.2.1+spec-1.1.0",
+ "toml_edit 0.25.19+spec-1.1.0",
  "zetwerk-app",
  "zetwerk-language",
  "zetwerk-mcp",
@@ -9638,14 +9640,21 @@ name = "zetwerk-app"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "chrono",
  "hayagriva",
+ "hayro-syntax",
+ "html5ever",
+ "image",
  "notify",
  "pollster",
  "rayon",
  "serde_json",
  "tiny-skia 0.12.0",
+ "toml 1.2.1+spec-1.1.0",
  "typst",
  "typst-layout",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "wgpu 30.0.1",
  "winit",
  "zetwerk-core",
@@ -9739,12 +9748,18 @@ name = "zetwerk-typst"
 version = "0.1.0"
 dependencies = [
  "comemo",
+ "flate2",
+ "native-tls",
  "rayon",
+ "serde_json",
+ "tar",
+ "toml 1.2.1+spec-1.1.0",
  "typst",
  "typst-ide",
  "typst-kit",
  "typst-layout",
  "typst-pdf",
+ "ureq",
 ]
 
 [[package]]

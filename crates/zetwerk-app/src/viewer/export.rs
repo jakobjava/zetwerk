@@ -532,6 +532,9 @@ impl Viewer {
     /// `:pdf`, `:png`, `:svg` and `:figure`, with what was typed behind
     /// them.
     pub(super) fn export_command(&mut self, name: &str, argument: &str) {
+        if name == "pdf" && self.handout_command(argument) {
+            return;
+        }
         let (name, replace) = match name.strip_suffix('!') {
             Some(name) => (name, true),
             None => (name, false),
@@ -613,6 +616,7 @@ impl Viewer {
     /// is. Costs nothing where no export is under way; the window calls
     /// it whenever it was woken.
     pub fn export_progress(&mut self) {
+        self.handout_progress();
         if self.exports.running.is_some() {
             let said = self
                 .exports

@@ -222,6 +222,7 @@ impl Viewer {
         }
         self.file = self.name_of(next.path());
         self.editor = Some(next);
+        self.place_file_opened(waiting.is_none() && at.is_none());
         self.swap_proposals();
         self.completion = None;
         self.tooltip = None;

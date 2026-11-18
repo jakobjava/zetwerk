@@ -50,7 +50,14 @@ fn deleting_on_a_page_never_cuts_markup_in_two() {
         ("ab $x$ e.\n", "x$", "d2h", "a$x$ e.\n"),
         ("ab $x$ e.\n", "x$", "X", "ab$x$ e.\n"),
         ("one *two* three.\n", "one", "dft", "*wo* three.\n"),
-        ("one *two* three.\n", "one", "ctwX<Esc>", "X*wo* three.\n"),
+        // A letter against the first star made it a character (Typst
+        // could not read `X*wo*`): the function says it.
+        (
+            "one *two* three.\n",
+            "one",
+            "ctwX<Esc>",
+            "X#strong[wo] three.\n",
+        ),
         ("one *two* three.\n", "one", "vfwd", "*o* three.\n"),
         ("a $x + y$ b.\n", "a $", "dfx", "$ + y$ b.\n"),
         ("Hello *world* foo.\n", "world", "d2w", "Hello **foo.\n"),
@@ -783,12 +790,13 @@ fn whole_lines_on_a_page_are_lines_the_page_shows() {
 
 #[test]
 fn a_cursor_in_the_middle_of_a_thing_shown_as_one_rests_on_it() {
-    // A search led into a link; `diw` took the blank behind it.
+    // A search led into a link; `diw` took the blank behind it. (A link
+    // is shown letter by letter now: a reference is shown as one.)
     check(&[(
-        "One https://example.com three.\n",
-        "example",
-        "diw",
-        "One ://example.com three.\n",
+        "= H <head>\n\nOne @head three.\n",
+        "ead three",
+        "x",
+        "= H <head>\n\nOne  three.\n",
     )]);
 }
 
