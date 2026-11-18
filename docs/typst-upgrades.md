@@ -40,8 +40,8 @@ work through and not a search.
      the whole; `viewer/tests/errors.rs` (the wording of diagnostics);
      `style_text` and `viewer::start` (every rule and every starter compiles);
    - `zetwerk-predict`: the accuracy suite against true compiles.
-4. Then by eye, in a hidden window (see `/home/jakjava/zetwerk-agents/tools/README.md`
-   on this machine): type in prose and in an equation on the corpus paper and
+4. Then by eye, in a hidden window (see `zetwerk-agents/tools/README.md`
+   beside the repository on this machine): type in prose and in an equation on the corpus paper and
    slides, and compare with a picture from before the upgrade.
 5. Measure: `ZETWERK_SPEED=350 cargo test --release --workspace
    what_keys_and_frames_cost -- --ignored --nocapture` before and after. A new
