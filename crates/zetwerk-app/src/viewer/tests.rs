@@ -11,6 +11,7 @@ use zetwerk_typst::FontSet;
 use super::*;
 use crate::keys;
 
+mod activity;
 mod authors;
 mod changes;
 mod comfort;

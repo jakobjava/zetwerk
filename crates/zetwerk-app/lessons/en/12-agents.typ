@@ -37,7 +37,9 @@ the paragraph the cursor is in (or on what is selected), `gq` a question
 for the agent; both are kept beside the text, not in it, and `:notes`
 lists them. No agent is connected now, so here you only try the keys.
 
-#task[`:agents` says which of the two holds now. Type `:agents`, `Enter`.]
+#task[`:agents` lists the agents that are connected and what each is
+doing, step by step, and pauses them all when you want (`:agents pause`).
+Type `:agents`, `Enter`; `Esc` puts the list away.]
 
 #task[A note on the paragraph below: put the cursor in it, `gn`, type
 "check the date", `Enter`. A tag in the margin shows it.]
@@ -50,10 +52,10 @@ resolve it. Put it up.]
 /* tutor
 title: Working with an AI agent
 
-step: what agents may do, with :agents
-keys: :agents<CR>
+step: what agents are doing, with :agents
+keys: :agents<CR><Esc>
 hint: :agents then Enter
-done: message (:agents 
+done: panel agents
 
 step: a note with gn
 keys: /The harbour was built<CR>gncheck the date<CR>

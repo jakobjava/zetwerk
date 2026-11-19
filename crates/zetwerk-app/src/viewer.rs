@@ -5,6 +5,7 @@
 //! should look like. That keeps the whole behaviour of the program testable
 //! without opening a window.
 
+pub mod activity;
 mod again;
 pub mod agent;
 mod aids;
@@ -1023,6 +1024,8 @@ pub struct Viewer {
     /// The agent the window calls when something is asked of agents
     /// (see [`on_call`]).
     on_call: on_call::OnCall,
+    /// What agents are doing (see [`activity`]).
+    activity: activity::Activity,
     /// What the pages put in whole keep between keys (see [`pages`]).
     pages: pages::Pages,
     /// The talk being given, and what is known of the deck (see [`present`]).
@@ -1159,6 +1162,7 @@ impl Viewer {
             packages: packages::Packages::default(),
             import_offers: import_offer::ImportOffers::default(),
             on_call: on_call::OnCall::default(),
+            activity: activity::Activity::default(),
             pages: pages::Pages::default(),
             present: present::Present::default(),
             report: report::Recorder::default(),
@@ -2336,6 +2340,7 @@ impl Viewer {
         let unwritten = self.unwritten();
         let modified = !unwritten.is_empty();
         if self.file_command(command)
+            || self.activity_command(command)
             || self.set_command(command)
             || self.ui_command(command)
             || self.settings_command(command)
@@ -3189,11 +3194,7 @@ impl Viewer {
             count => format!("{count} proposals ]p  "),
         };
         let notes = self.notes_status();
-        let agent = if self.agent_at_work().is_some() {
-            "agent at work  "
-        } else {
-            ""
-        };
+        let agent = self.agents_status();
         let right = format!(
             "{agent}{proposals}{notes}{progress}{place}{}/{}  {percent:.0}%",
             state.page, state.pages

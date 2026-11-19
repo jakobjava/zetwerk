@@ -767,6 +767,32 @@ impl Viewer {
     /// Puts up a list that came of another: Escape runs `back`, which
     /// leads there again. With `free`, what is typed may be none of the
     /// items: it is handed to that command, put behind it.
+    /// What the list that is up is called, if one is.
+    pub(super) fn picker_title(&self) -> Option<&'static str> {
+        self.picker.as_ref().map(Picker::title)
+    }
+
+    /// Puts `items` in the place of those of the list that is up, as it
+    /// stands: narrowed by what was typed, with the same one chosen where
+    /// it is still there. For a list that follows what it lists.
+    pub(super) fn replace_picker_items(&mut self, items: Vec<(String, Target)>) {
+        let Some(picker) = &mut self.picker else {
+            return;
+        };
+        if items.is_empty() {
+            return;
+        }
+        let chosen = picker.chosen;
+        picker.items = items;
+        picker.offered = false;
+        if picker.query.is_empty() {
+            picker.shown = (0..picker.items.len()).collect();
+            picker.chosen = chosen.min(picker.items.len() - 1);
+        } else {
+            picker.narrow();
+        }
+    }
+
     pub(super) fn open_picker_for(
         &mut self,
         title: &'static str,

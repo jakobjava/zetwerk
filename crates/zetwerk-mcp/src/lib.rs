@@ -25,6 +25,42 @@ pub use review::{NewSuggestion, Revision, Suggest};
 pub use server::{Running, Tools, serve, serve_stdio};
 pub use socket::{find_socket, find_socket_of, proxy_stdio, socket_of, socket_path};
 
+/// What an agent does, as it does it: told to the editor for the writer
+/// to see what each agent is at, step by step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Activity {
+    /// A client connected and said who it is.
+    Connected {
+        session: String,
+        name: String,
+        version: String,
+    },
+    /// A tool call began: the tool, and what its arguments say it is
+    /// about (`line: 12`, `section: "Proof"`), in a line.
+    Began {
+        session: String,
+        tool: String,
+        about: String,
+    },
+    /// It ended, after so many milliseconds; where it failed, why.
+    Ended {
+        session: String,
+        tool: String,
+        millis: u64,
+        error: Option<String>,
+    },
+    /// What the agent says it is doing (`report_progress`), and how many
+    /// of how many are done where it knows.
+    Said {
+        session: String,
+        message: String,
+        done: Option<u32>,
+        total: Option<u32>,
+    },
+    /// The client hung up.
+    Left { session: String },
+}
+
 /// What the server needs from the editor it exposes. Called on worker
 /// threads; implementations block until they have the answer.
 pub trait Editor: Send + Sync + 'static {
@@ -187,6 +223,18 @@ pub trait Editor: Send + Sync + 'static {
     /// given as it connects; `None` where there is none.
     fn brief_text(&self) -> Option<String> {
         None
+    }
+
+    /// Told of what agents do as they do it. Must not wait for the
+    /// editor: it is called on the server's own thread.
+    fn activity(&self, activity: Activity) {
+        let _ = activity;
+    }
+
+    /// Whether the writer has paused agents: the tools that change
+    /// anything are refused until they go on.
+    fn agents_paused(&self) -> bool {
+        false
     }
 
     /// What `get_state` says of reviewing: how many suggestions wait,

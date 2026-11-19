@@ -1,12 +1,14 @@
 //! The server end to end: a real socket, a real client, a stand-in editor.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 use zetwerk_mcp::{
-    Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat, ImageOf, NewNote,
-    NoteAnchor, NoteAnswer, Output, PagesWanted, Place, Selection, Tools, call, serve, socket_of,
+    Activity, Change, ChangeKind, Direction, Editor, EditorState, ImageExport, ImageFormat,
+    ImageOf, NewNote, NoteAnchor, NoteAnswer, Output, PagesWanted, Place, Selection, Tools, call,
+    serve, socket_of,
 };
 
 /// An editor that records the keys it was sent and the changes it was
@@ -19,6 +21,9 @@ struct FakeEditor {
     answers: Mutex<Vec<NoteAnswer>>,
     /// The file it shows, if not `thesis.typ`.
     file: Option<&'static str>,
+    /// What it was told agents did, and whether they are paused.
+    activity: Mutex<Vec<Activity>>,
+    paused: AtomicBool,
 }
 
 const PLAIN: Tools = Tools {
@@ -30,6 +35,17 @@ const PLAIN: Tools = Tools {
 const PNG: &[u8] = b"\x89PNG not really";
 
 impl Editor for FakeEditor {
+    fn activity(&self, activity: Activity) {
+        self.activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(activity);
+    }
+
+    fn agents_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
     fn state(&self) -> Result<EditorState, String> {
         Ok(EditorState {
             file: self.file.unwrap_or("thesis.typ").to_owned(),
@@ -966,4 +982,104 @@ fn prompts_start_a_review_with_the_working_agreement() {
         assert_eq!(resources.resources.len(), 2);
         let _ = client.cancel().await;
     });
+}
+
+#[test]
+fn what_agents_do_is_told_as_they_do_it_and_a_pause_stops_their_changes() {
+    let (_scratch, socket) = socket("activity");
+    let editor = Arc::new(FakeEditor::default());
+    let _server = serve(&socket, Arc::clone(&editor) as Arc<dyn Editor>, PLAIN)
+        .unwrap_or_else(|err| panic!("server starts: {err}"));
+    let told = || {
+        editor
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    };
+
+    call(
+        &socket,
+        "read_source",
+        arguments(&json!({ "from_line": 2, "to_line": 5 })),
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    // Each call: who connected, the call as it began (with what it was
+    // about) and ended, and the hang-up, which is told as it happens.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !told().iter().any(|a| matches!(a, Activity::Left { .. })) {
+        assert!(std::time::Instant::now() < deadline, "{:?}", told());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let events = told();
+    assert!(
+        matches!(&events[0], Activity::Connected { name, .. } if !name.is_empty()),
+        "{events:?}"
+    );
+    let began = events
+        .iter()
+        .find_map(|a| match a {
+            Activity::Began { tool, about, .. } => Some((tool.clone(), about.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert_eq!(began.0, "read_source");
+    assert!(
+        began.1.contains("from_line 2") && began.1.contains("to_line 5"),
+        "{began:?}"
+    );
+    assert!(
+        events.iter().any(
+            |a| matches!(a, Activity::Ended { tool, error: None, .. } if tool == "read_source")
+        ),
+        "{events:?}"
+    );
+
+    // What the agent says it is doing.
+    call(
+        &socket,
+        "report_progress",
+        arguments(&json!({ "message": "reading section 2", "done": 1, "total": 3 })),
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        told().iter().any(|a| matches!(
+            a,
+            Activity::Said { message, done: Some(1), total: Some(3), .. } if message == "reading section 2"
+        )),
+        "{:?}",
+        told()
+    );
+
+    // Paused: what changes is refused, and said why; what reads is not.
+    editor.paused.store(true, Ordering::Relaxed);
+    let refused = call(
+        &socket,
+        "edit_source",
+        arguments(&json!({ "old_str": "a", "new_str": "b" })),
+    );
+    let Err(why) = refused else {
+        panic!("a change while paused: {refused:?}")
+    };
+    assert!(why.contains("paused agents"), "{why}");
+    assert!(
+        editor
+            .changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    );
+    assert!(
+        told().iter().any(|a| matches!(a, Activity::Ended { tool, error: Some(e), .. } if tool == "edit_source" && e.contains("paused"))),
+        "{:?}",
+        told()
+    );
+    call(&socket, "read_source", Map::new()).unwrap_or_else(|err| panic!("reading goes on: {err}"));
+    // And report_progress, which only says.
+    call(
+        &socket,
+        "report_progress",
+        arguments(&json!({ "message": "waiting" })),
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
 }

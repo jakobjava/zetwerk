@@ -379,8 +379,8 @@ waits for nobody.
 - **An agent on call** (built 2026-11-19, viewer/on_call.rs). `[ai] agent
   = "…"`: the writer's own agent command (for Claude Code `claude -p
   --allowedTools mcp__zetwerk`), started by the window when a question is
-  asked (`gq`, `:ask`) or a review (`gQ`), given the task as its last
-  argument and this window's socket in `ZETWERK_SOCKET` (which `zetwerk
+  asked (`gq`, `:ask`) or a review (`gQ`), given the task on its standard
+  input and this window's socket in `ZETWERK_SOCKET` (which `zetwerk
   mcp` goes to first); one at a time, called once more for what was asked
   meanwhile; "agent at work" in the status line; `:agent stop` ends it and
   what it started, `:agent log` says where its output is; nothing runs

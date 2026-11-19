@@ -40,8 +40,7 @@ fn done(viewer: &mut Viewer) {
 
 #[test]
 fn a_question_calls_the_agent_with_its_task_and_this_window() {
-    let (mut viewer, directory) =
-        on_call("printf '%s\\n' \"$ZETWERK_SOCKET\" >> DIR/called; printf '%s\\n'");
+    let (mut viewer, directory) = on_call("printf '%s\\n' \"$ZETWERK_SOCKET\" >> DIR/called; cat");
     press(&mut viewer, ":ask is this sentence right?<CR>");
     assert_eq!(viewer.agent_at_work(), Some("1 question"));
     assert!(
@@ -58,7 +57,7 @@ fn a_question_calls_the_agent_with_its_task_and_this_window() {
     assert_eq!(viewer.agent_at_work(), None);
     let called = std::fs::read_to_string(directory.join("called")).unwrap();
     assert_eq!(called, "/run/zetwerk-test.sock\n");
-    // The task was its last argument: what it printed.
+    // The task came on its standard input: what it printed.
     let log = std::fs::read_to_string(directory.join("state/agent.log")).unwrap();
     assert!(
         log.contains("1 open question (list_notes gives them"),
@@ -104,7 +103,7 @@ fn the_agent_is_stopped_by_the_writer_and_says_why_it_failed() {
     let _ = std::fs::remove_dir_all(directory);
 
     // One that fails says so, with what it wrote last.
-    let (mut viewer, directory) = on_call("echo 'not logged in' >&2; exit 3 #");
+    let (mut viewer, directory) = on_call("echo 'not logged in' >&2; exit 3");
     press(&mut viewer, ":ask a question?<CR>");
     done(&mut viewer);
     let message = viewer.message.as_ref().unwrap();

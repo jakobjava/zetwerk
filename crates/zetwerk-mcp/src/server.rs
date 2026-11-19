@@ -19,8 +19,8 @@ use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 
 use crate::{
-    Change, ChangeKind, Direction, ImageExport, ImageFormat, ImageOf, NewNote, NoteAnchor,
-    NoteAnswer, PagesWanted, Place, SharedEditor,
+    Activity, Change, ChangeKind, Direction, ImageExport, ImageFormat, ImageOf, NewNote,
+    NoteAnchor, NoteAnswer, PagesWanted, Place, SharedEditor,
 };
 
 /// Longest side of a rendered page unless the caller asks otherwise. Large
@@ -209,6 +209,18 @@ struct ProposalArgs {
 struct ListNotesArgs {
     /// Also the notes that are resolved (default false).
     include_resolved: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ProgressArgs {
+    /// What you are doing now, in a few words the author understands
+    /// ("reading section 2", "checking equation 3 against the text").
+    message: String,
+    /// How many of the things you were asked to do are done, where you
+    /// know.
+    done: Option<u32>,
+    /// How many there are in all, where you know.
+    total: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -769,6 +781,26 @@ impl Server {
         self.value(move |editor| editor.notes(all)).await
     }
 
+    /// Tell the author what you are doing now, in a few words, before
+    /// each step of your work (and how many of how many things are done,
+    /// where you know). They see it in the window as you work, beside each
+    /// tool you call: without it they cannot tell what you are at.
+    #[tool(annotations(title = "Report progress", read_only_hint = true))]
+    async fn report_progress(
+        &self,
+        Parameters(args): Parameters<ProgressArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.editor.activity(Activity::Said {
+            session: self.caller().session,
+            message: args.message,
+            done: args.done,
+            total: args.total,
+        });
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "shown to the author",
+        )]))
+    }
+
     /// Leave a note for the user on the text: a remark, a doubt, a
     /// question. It is shown on the page by the text it is about, with
     /// `anchor_text` or `line`, and moves with that text as it is edited.
@@ -884,8 +916,47 @@ impl ServerHandler for Server {
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
         let caller = crate::caller::of(&context.peer);
-        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        crate::caller::scope(caller, self.tool_router.call(call)).await
+        let session = self.caller().session;
+        let tool = request.name.to_string();
+        let about = about(request.arguments.as_ref());
+        self.editor.activity(Activity::Began {
+            session: session.clone(),
+            tool: tool.clone(),
+            about,
+        });
+        let started = std::time::Instant::now();
+        // Paused by the author: what would change anything is refused,
+        // what only reads is not.
+        let changes = self
+            .tool_router
+            .get(&tool)
+            .and_then(|tool| tool.annotations.as_ref())
+            .is_none_or(|annotations| annotations.read_only_hint != Some(true));
+        let result = if changes && self.editor.agents_paused() {
+            Ok(failure(PAUSED.to_owned()).into())
+        } else {
+            let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            crate::caller::scope(caller, self.tool_router.call(call)).await
+        };
+        let error = match &result {
+            Err(error) => Some(error.message.to_string()),
+            Ok(rmcp::model::CallToolResponse::Complete(done)) if done.is_error == Some(true) => {
+                Some(
+                    done.content
+                        .iter()
+                        .find_map(|block| block.as_text().map(|text| text.text.clone()))
+                        .unwrap_or_else(|| "it failed".to_owned()),
+                )
+            }
+            Ok(_) => None,
+        };
+        self.editor.activity(Activity::Ended {
+            session,
+            tool,
+            millis: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            error,
+        });
+        result
     }
 
     fn get_info(&self) -> ServerConfig {
@@ -922,6 +993,11 @@ impl ServerHandler for Server {
     async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
         if let Some(info) = context.peer.peer_info() {
             self.connection.named(&info.client_info.name);
+            self.editor.activity(Activity::Connected {
+                session: self.caller().session,
+                name: info.client_info.name.clone(),
+                version: info.client_info.version.clone(),
+            });
         }
     }
 
@@ -1005,6 +1081,64 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 /// A tool result reporting that the tool could not do what was asked. The
 /// calling model sees the message and can react to it.
+/// What a tool that would change anything answers while the author has
+/// paused agents.
+const PAUSED: &str = "The author has paused agents: nothing may be changed now. Reading is \
+                      allowed. Tell the author with report_progress what you were about to do, \
+                      and stop, or wait_for_review until they go on.";
+
+/// What the arguments of a tool call say it is about, in a line: a few
+/// of the values that say where (lines, a section, a page, an id), and
+/// the first words of any text.
+fn about(arguments: Option<&serde_json::Map<String, serde_json::Value>>) -> String {
+    const WHERE: &[&str] = &[
+        "section",
+        "page",
+        "line",
+        "from_line",
+        "to_line",
+        "id",
+        "note_id",
+        "query",
+        "category",
+        "what",
+        "anchor_text",
+        "old_str",
+        "quote",
+        "text",
+        "note",
+        "answer",
+        "message",
+    ];
+    let Some(arguments) = arguments else {
+        return String::new();
+    };
+    let mut said = Vec::new();
+    for key in WHERE {
+        let Some(value) = arguments.get(*key) else {
+            continue;
+        };
+        let shown = match value {
+            serde_json::Value::String(text) => {
+                let first: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let cut: String = first.chars().take(40).collect();
+                if cut.len() < first.len() {
+                    format!("“{cut}…”")
+                } else {
+                    format!("“{cut}”")
+                }
+            }
+            serde_json::Value::Null => continue,
+            other => other.to_string(),
+        };
+        said.push(format!("{key} {shown}"));
+        if said.len() == 3 {
+            break;
+        }
+    }
+    said.join(", ")
+}
+
 pub(crate) fn failure(message: String) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(message)])
 }
@@ -1103,11 +1237,15 @@ pub fn serve_stdio(editor: SharedEditor, tools: Tools) -> std::io::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let connection = Server::new(editor, tools)
+        let server = Server::new(editor, tools);
+        let (told, session) = (server.editor.clone(), server.caller().session);
+        let connection = server
             .serve(rmcp::transport::stdio())
             .await
             .map_err(std::io::Error::other)?;
-        connection.waiting().await.map_err(std::io::Error::other)?;
+        let waited = connection.waiting().await.map_err(std::io::Error::other);
+        told.activity(Activity::Left { session });
+        waited?;
         Ok(())
     })
 }
@@ -1152,12 +1290,15 @@ pub fn serve(socket: &Path, editor: SharedEditor, tools: Tools) -> std::io::Resu
                         accepted = listener.accept() => {
                             let Ok((stream, _)) = accepted else { break };
                             let server = server.for_connection();
+                            let (told, session) =
+                                (server.editor.clone(), server.caller().session);
                             tokio::spawn(async move {
                                 // A client that speaks nonsense or hangs up only
                                 // ends its own connection.
                                 if let Ok(connection) = server.serve(stream).await {
                                     let _ = connection.waiting().await;
                                 }
+                                told.activity(Activity::Left { session });
                             });
                         }
                     }

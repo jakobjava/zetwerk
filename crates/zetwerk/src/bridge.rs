@@ -933,6 +933,61 @@ impl Editor for Bridge {
         self.now(Viewer::brief_text).ok()
     }
 
+    fn activity(&self, activity: zetwerk_mcp::Activity) {
+        use zetwerk_app::viewer::activity::Event;
+        use zetwerk_mcp::Activity as Told;
+        let event = match activity {
+            Told::Connected {
+                session,
+                name,
+                version,
+            } => Event::Connected {
+                session,
+                name,
+                version,
+            },
+            Told::Began {
+                session,
+                tool,
+                about,
+            } => Event::Began {
+                session,
+                tool,
+                about,
+            },
+            Told::Ended {
+                session,
+                tool,
+                millis,
+                error,
+            } => Event::Ended {
+                session,
+                tool,
+                millis,
+                error,
+            },
+            Told::Said {
+                session,
+                message,
+                done,
+                total,
+            } => Event::Said {
+                session,
+                message,
+                done,
+                total,
+            },
+            Told::Left { session } => Event::Left { session },
+        };
+        // Handed over, not waited for: the server's thread goes on.
+        let task: Task = Box::new(move |viewer| viewer.agent_activity(event));
+        let _ = self.handle.send(Request::Do(task));
+    }
+
+    fn agents_paused(&self) -> bool {
+        zetwerk_app::viewer::activity::AGENTS_PAUSED.load(Ordering::Relaxed)
+    }
+
     fn review_summary(&self) -> Option<Value> {
         self.now(Viewer::review_summary).ok()
     }

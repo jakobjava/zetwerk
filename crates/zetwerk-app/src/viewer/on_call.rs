@@ -10,9 +10,11 @@
 //! as something is asked of agents.
 //!
 //! - **What it is told.** The command is run by the shell with the task
-//!   as its last argument (unless it names `$ZETWERK_TASK` itself, which
-//!   holds the task too): answer the open questions and do the reviews
-//!   asked for, with the window's tools, then stop. `ZETWERK_SOCKET` names
+//!   on its standard input, and in `$ZETWERK_TASK` too: answer the open
+//!   questions and do the reviews asked for, with the window's tools,
+//!   then stop. Not as an argument: an option that takes several values
+//!   (`claude --allowedTools a b`) took the task for one of them, and the
+//!   agent was given no task at all. `ZETWERK_SOCKET` names
 //!   this window's socket, and `zetwerk mcp` goes there first: the agent
 //!   works in the window that called it, however many there are.
 //! - **One at a time.** What is asked while one runs is left for it, and
@@ -103,10 +105,12 @@ fn task(questions: usize, reviews: usize) -> String {
     };
     format!(
         "The author is writing in the zetwerk window, whose tools you have as the MCP server \
-         zetwerk, and has asked something of you: {asked}. Read the author's brief first \
-         (get_brief) and follow it; read what is asked about (read_source, get_outline). Suggest, \
-         do not edit, unless the author asked for the change itself. Do not save. When all of \
-         it is answered, stop: do not wait for more."
+         zetwerk, and has asked something of you: {asked}. The author watches you work in the \
+         window: before each step, say in a few words what you are doing with report_progress \
+         (with done and total: how many of the things asked are answered, of how many). Read \
+         the author's brief first (get_brief) and follow it; read what is asked about \
+         (read_source, get_outline). Suggest, do not edit, unless the author asked for the \
+         change itself. Do not save. When all of it is answered, stop: do not wait for more."
     )
 }
 
@@ -210,17 +214,13 @@ impl Viewer {
         let log = directory.join("agent.log");
         let out = std::fs::File::create(&log).map_err(|err| format!("{}: {err}", log.display()))?;
         let err = out.try_clone().map_err(|err| err.to_string())?;
-        let script = if command.contains("ZETWERK_TASK") {
-            command
-        } else {
-            format!("{command} \"$ZETWERK_TASK\"")
-        };
+        let told = task(questions, reviews);
         let mut shell = Command::new("sh");
         shell
             .arg("-c")
-            .arg(&script)
-            .env("ZETWERK_TASK", task(questions, reviews))
-            .stdin(Stdio::null())
+            .arg(&command)
+            .env("ZETWERK_TASK", &told)
+            .stdin(Stdio::piped())
             .stdout(out)
             .stderr(err);
         if let Some(socket) = &self.on_call.settings.socket {
@@ -233,6 +233,13 @@ impl Viewer {
         std::os::unix::process::CommandExt::process_group(&mut shell, 0);
         let mut child = shell.spawn().map_err(|err| err.to_string())?;
         let group = child.id();
+        // The task, and then the end of the input: what reads it to its
+        // end goes on.
+        if let Some(mut input) = child.stdin.take() {
+            std::thread::spawn(move || {
+                let _ = std::io::Write::write_all(&mut input, told.as_bytes());
+            });
+        }
         let (done, waited) = mpsc::channel();
         let wake = self.on_call.wake.clone();
         std::thread::spawn(move || {

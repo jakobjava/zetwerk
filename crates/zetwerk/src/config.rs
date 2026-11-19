@@ -541,7 +541,7 @@ pub struct Ai {
     pub save: Option<bool>,
     /// The writer's own agent, which the window starts when something is
     /// asked of agents (`gq`, `gQ`): a command for the shell, given the
-    /// task as its last argument.
+    /// task on its standard input.
     #[serde(default)]
     pub agent: Option<String>,
 }
