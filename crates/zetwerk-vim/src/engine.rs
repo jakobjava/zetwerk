@@ -5160,6 +5160,9 @@ fn host_command(c: char) -> Option<&'static str> {
         'h' => "history",
         // Who wrote the text, tinted on the page.
         'H' => "authors view",
+        // Not Vim's `gI` (which inserts at the first column): the pane of
+        // what is asked of agents and what they do.
+        'I' => "ai",
         _ => return None,
     })
 }

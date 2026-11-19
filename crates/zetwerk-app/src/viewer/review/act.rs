@@ -931,6 +931,15 @@ impl Viewer {
                     said.push(format!("of request {number}"));
                     tests.push(Box::new(move |s| s.request == Some(number)));
                 }
+                // What answers a question (`:ask`, `gq`): of the AI pane.
+                "note" => {
+                    let number = words.next().and_then(|n| n.parse::<u64>().ok());
+                    let Some(number) = number else {
+                        return Err("which note? :review accept note 3".to_owned());
+                    };
+                    said.push(format!("of note {number}"));
+                    tests.push(Box::new(move |s| s.note == Some(number)));
+                }
                 kind if Kind::named(kind).is_some() => {
                     let kind = Kind::named(kind).unwrap_or(Kind::Replace);
                     said.push(kind.name().to_owned());

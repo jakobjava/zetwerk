@@ -687,7 +687,12 @@ const ALL: &[(&str, &str, Does)] = &[
         Does::Run("table copy"),
     ),
     (
-        "agents: change the text or propose changes",
+        "the AI pane: ask agents, follow what they do, decide",
+        "gI  :ai",
+        Does::Run("ai"),
+    ),
+    (
+        "agents: what each is doing; pause them; live or propose",
         ":agents",
         Does::Run("agents"),
     ),

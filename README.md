@@ -194,6 +194,18 @@ agents' changes wait as suggestions on the page for you to accept or reject
 (`:review`). Who wrote what can be tinted on the page. Agents never fetch
 packages and never save, unless you allow it.
 
+**The AI pane** (`gI`, or `:ai`) stands beside the page, and it's where
+you work with agents. At the top it shows what each agent is doing:
+its state, what it says it's working on, a progress bar and its last steps.
+Below are your questions and review requests as threads, each with the
+text it's about, the agent's answers and its suggestions. You accept or
+reject them with `a` and `r`, and Enter takes you to the text. At the
+bottom is a line to ask in: type a question about the paragraph or the
+selection, or `/review clarity`, `/cite`, `/explain`, `/draft`,
+`/check maths`. `Ctrl-W l` and `Ctrl-W h` move between the page and the
+pane. `:agents` lists every agent connected, step by step, and
+`:agents pause` stops them all from changing anything until you resume.
+
 **An agent on call.** You don't need to keep an agent running in a
 terminal. Name your own agent command in the settings, and zetwerk starts it
 when you ask agents something: a question at the cursor (`gq` or

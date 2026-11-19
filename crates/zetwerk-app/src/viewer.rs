@@ -8,6 +8,7 @@
 pub mod activity;
 mod again;
 pub mod agent;
+mod ai_pane;
 mod aids;
 mod assist;
 pub mod authors;
@@ -1026,6 +1027,9 @@ pub struct Viewer {
     on_call: on_call::OnCall,
     /// What agents are doing (see [`activity`]).
     activity: activity::Activity,
+    /// The pane of what is asked of agents and what they do (see
+    /// [`ai_pane`]).
+    ai: ai_pane::AiPane,
     /// What the pages put in whole keep between keys (see [`pages`]).
     pages: pages::Pages,
     /// The talk being given, and what is known of the deck (see [`present`]).
@@ -1163,6 +1167,7 @@ impl Viewer {
             import_offers: import_offer::ImportOffers::default(),
             on_call: on_call::OnCall::default(),
             activity: activity::Activity::default(),
+            ai: ai_pane::AiPane::default(),
             pages: pages::Pages::default(),
             present: present::Present::default(),
             report: report::Recorder::default(),
@@ -1495,6 +1500,11 @@ impl Viewer {
 
     fn split(&self) -> (u32, u32, u32) {
         let width = self.window.0;
+        // With the AI pane: the page, and the pane at the right of it.
+        let ai = self.ai_width();
+        if ai > 0 {
+            return (0, 0, width - ai);
+        }
         match (&self.editor, self.shown_panes()) {
             (None, _) | (_, Panes::Page) => (0, 0, width),
             (_, Panes::Source) => (width, width, 0),
@@ -1929,6 +1939,11 @@ impl Viewer {
     /// takes the rest of a command shown faint.
     fn plain_key(&mut self, press: KeyPress) {
         self.report_reached(press);
+        // The AI pane first, while it is in front: what is typed into its
+        // line is its own, every letter of it (`p` too, which would paste).
+        if self.ai_pane_key(press) {
+            return;
+        }
         // A page put in whole is not pasted into: its own keys say so.
         if self.page_here().is_none() && self.paste_key(press) {
             return;
@@ -2341,6 +2356,7 @@ impl Viewer {
         let modified = !unwritten.is_empty();
         if self.file_command(command)
             || self.activity_command(command)
+            || self.ai_command(command)
             || self.set_command(command)
             || self.ui_command(command)
             || self.settings_command(command)
@@ -2557,6 +2573,7 @@ impl Viewer {
         // Drawn after the pages: a page zoomed wider than its pane must
         // not reach over the source.
         self.source_pane(&mut scene, has);
+        self.ai_pane(&mut scene, has);
         self.composed_overlays(&mut scene, has);
         self.status_line(&mut scene, has);
         if self.performance_panel {

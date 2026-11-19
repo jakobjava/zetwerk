@@ -253,7 +253,8 @@ impl Viewer {
             || self.is_presenting()
             || self.is_jumping()
             || self.is_retyping()
-            || self.is_setting();
+            || self.is_setting()
+            || self.ai_focused();
         if plain {
             self.plain_key(press);
         } else {

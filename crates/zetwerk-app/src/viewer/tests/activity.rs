@@ -1,10 +1,8 @@
 //! What agents are doing, as the MCP server tells it: the status line,
 //! the list of agents (`:agents`), which follows them, and the pause.
 
-use std::sync::atomic::Ordering;
-
 use super::*;
-use crate::viewer::activity::{AGENTS_PAUSED, Event};
+use crate::viewer::activity::Event;
 
 fn session() -> String {
     "s-1".to_owned()
@@ -106,7 +104,7 @@ fn what_an_agent_does_is_in_the_status_line_and_the_list_as_it_does_it() {
 fn agents_are_paused_and_let_go_on() {
     let (mut viewer, directory) = editing("A sentence.\n");
     press(&mut viewer, ":agents pause<CR>");
-    assert!(AGENTS_PAUSED.load(Ordering::Relaxed));
+    assert!(viewer.agents_paused());
     assert_eq!(viewer.agents_status(), "agents paused  ");
     press(&mut viewer, ":agents<CR>");
     assert!(
@@ -115,7 +113,7 @@ fn agents_are_paused_and_let_go_on() {
             .any(|item| item.starts_with("let agents go on"))
     );
     press(&mut viewer, "<Esc>:agents resume<CR>");
-    assert!(!AGENTS_PAUSED.load(Ordering::Relaxed));
+    assert!(!viewer.agents_paused());
     assert_eq!(viewer.agents_status(), "");
     // The option's own words still work.
     press(&mut viewer, ":agents propose<CR>");

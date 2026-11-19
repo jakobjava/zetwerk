@@ -12,6 +12,7 @@ use super::*;
 use crate::keys;
 
 mod activity;
+mod ai_pane;
 mod authors;
 mod changes;
 mod comfort;

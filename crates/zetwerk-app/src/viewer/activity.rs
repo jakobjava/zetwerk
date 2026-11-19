@@ -115,10 +115,24 @@ struct Agent {
     called: bool,
 }
 
+/// An agent as the AI pane shows it.
+pub(super) struct Shown {
+    pub(super) name: String,
+    pub(super) state: String,
+    /// What it said it is doing, and how many of how many are done.
+    pub(super) said: Option<(String, Option<u32>, Option<u32>)>,
+    /// Its last steps, newest first, in words.
+    pub(super) steps: Vec<String>,
+    pub(super) gone: bool,
+}
+
 /// What the viewer keeps of agents' doings.
 #[derive(Default)]
 pub(super) struct Activity {
     agents: Vec<Agent>,
+    /// Whether the writer paused agents, as this window shows it; the
+    /// server reads [`AGENTS_PAUSED`], which is set with it.
+    paused: bool,
 }
 
 /// What a tool is, as the writer would say it of an agent.
@@ -382,7 +396,7 @@ impl Viewer {
     /// What the status line says of agents, if anything: what the one at
     /// work is doing, or that they are paused.
     pub(super) fn agents_status(&self) -> String {
-        if AGENTS_PAUSED.load(Ordering::Relaxed) {
+        if self.activity.paused {
             return "agents paused  ".to_owned();
         }
         let doing = self
@@ -491,7 +505,7 @@ impl Viewer {
                 Target::Command("agent log".to_owned()),
             ));
         }
-        if AGENTS_PAUSED.load(Ordering::Relaxed) {
+        if self.activity.paused {
             items.push((
                 "let agents go on\tthey are paused: they may read, not change".to_owned(),
                 Target::Command("agents resume".to_owned()),
@@ -515,6 +529,7 @@ impl Viewer {
                 self.open_picker("agents", items, 0);
             }
             "agents pause" => {
+                self.activity.paused = true;
                 AGENTS_PAUSED.store(true, Ordering::Relaxed);
                 self.notice(
                     "agents are paused: they may read, and change nothing (:agents resume)",
@@ -522,6 +537,7 @@ impl Viewer {
                 self.refresh_agents_list();
             }
             "agents resume" => {
+                self.activity.paused = false;
                 AGENTS_PAUSED.store(false, Ordering::Relaxed);
                 self.notice("agents may go on");
                 self.refresh_agents_list();
@@ -529,6 +545,53 @@ impl Viewer {
             _ => return false,
         }
         true
+    }
+
+    /// The agents at work or gone a short while ago, for the AI pane:
+    /// who, in what state, what it said, and its last steps in words.
+    pub(super) fn agents_shown(&self) -> Vec<Shown> {
+        let mut agents: Vec<&Agent> = self
+            .activity
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent
+                    .left
+                    .is_none_or(|left| left.elapsed() < Duration::from_mins(2))
+            })
+            .collect();
+        agents.sort_by_key(|agent| std::cmp::Reverse(agent.last));
+        agents
+            .into_iter()
+            .map(|agent| Shown {
+                name: agent.name.clone(),
+                state: agent.state(),
+                said: agent
+                    .said
+                    .as_ref()
+                    .map(|said| (said.message.clone(), said.done, said.total)),
+                steps: agent
+                    .now
+                    .iter()
+                    .map(|step| format!("{}  now: {}", clock(step.at), in_words(&step.tool)))
+                    .chain(agent.steps.iter().take(3).map(|step| {
+                        let failed = if step.error.is_some() {
+                            "  (failed)"
+                        } else {
+                            ""
+                        };
+                        format!("{}  {}{failed}", clock(step.at), in_words(&step.tool))
+                    }))
+                    .take(3)
+                    .collect(),
+                gone: agent.left.is_some(),
+            })
+            .collect()
+    }
+
+    /// Whether the writer paused agents.
+    pub(super) fn agents_paused(&self) -> bool {
+        self.activity.paused
     }
 
     /// The list of agents made anew where it is up, as they work.

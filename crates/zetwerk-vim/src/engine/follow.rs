@@ -71,6 +71,7 @@ const G: &[(&str, &str, When)] = &[
     ),
     ("R", "all suggestions of agents, to review", When::Idle),
     ("H", "who wrote what, tinted on the page", When::Idle),
+    ("I", "the AI pane: ask agents, follow them", When::Idle),
     (
         "! Q",
         "an instruction to agents, a review asked of them",
