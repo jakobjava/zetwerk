@@ -156,7 +156,9 @@ pub struct ChangeOptions {
 impl Default for ChangeOptions {
     fn default() -> Self {
         Self {
-            bars: true,
+            // Off unless asked for: beside equations and on slides the bar
+            // stood against the text, and read as a second cursor.
+            bars: false,
             since: "saved".to_owned(),
             git: true,
         }
@@ -542,6 +544,12 @@ fn page_style(source: &Source) -> (Option<String>, f64) {
 }
 
 impl Viewer {
+    /// Shows the bars beside the lines that changed, or not
+    /// (`:set changes.bars`).
+    pub(super) fn changes_shown(&mut self, shown: bool) {
+        self.changes.shown = shown;
+    }
+
     /// Takes what the user's settings say of changes.
     pub(super) fn changes_configured(&mut self, options: &ChangeOptions) {
         self.changes.shown = options.bars;

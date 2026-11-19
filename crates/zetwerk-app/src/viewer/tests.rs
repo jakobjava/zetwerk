@@ -648,6 +648,7 @@ fn an_equation_that_stands_by_itself_stays_so_while_it_is_typed() {
                 #set math.equation(numbering: \"(1)\")\n\
                 Before.\n\n$ a + b $\n\nAfter.\n";
     let (mut viewer, directory) = editing(text);
+    viewer.steady = true;
     press(&mut viewer, "gsgs/\\=+ b<CR>");
     compile(&mut viewer);
     // The line of the equation is that of its number, the glyph furthest
@@ -2659,6 +2660,36 @@ fn things_are_put_in_from_a_menu() {
     press(&mut viewer, "i + fra");
     assert_eq!(labels(&viewer)[0], "fraction");
     press(&mut viewer, "<C-e><Esc>");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn behind_a_blank_in_an_equation_laid_over_the_page_the_cursor_is_there() {
+    // Out of what is raised (`x^2` and a blank), the equation laid over
+    // the page had no cursor at all: it is where the next symbol goes,
+    // as large as that.
+    let text = "#set page(width: 300pt, height: 300pt)\nSome words and $x^2$ in a line.\n";
+    let (mut viewer, directory) = editing(text);
+    viewer.in_parts = false;
+    viewer.numbers = false;
+    viewer.stats.compile_ms = 10.0 * QUICK_COMPILE_MS;
+    press(&mut viewer, "gsgs");
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(text.find("2$").unwrap() + 1);
+    }
+    press(&mut viewer, "i");
+    viewer.stats.compile_ms = 10.0 * QUICK_COMPILE_MS;
+    press(&mut viewer, "3");
+    let raised = tints(&mut viewer, PAGE_BAR);
+    assert_eq!(raised.len(), 1, "{raised:?}");
+    press(&mut viewer, " ");
+    let out = tints(&mut viewer, PAGE_BAR);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(
+        out[0].height > raised[0].height * 1.2,
+        "{raised:?} then {out:?}"
+    );
+    assert!(out[0].x > raised[0].x, "{raised:?} then {out:?}");
     let _ = std::fs::remove_dir_all(directory);
 }
 

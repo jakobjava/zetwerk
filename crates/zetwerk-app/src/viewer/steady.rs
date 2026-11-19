@@ -9,6 +9,9 @@
 //! right, as a line of text does. Once typing pauses, the document is
 //! typeset whole and the equation is centred again, in one step.
 //!
+//! Off unless asked for (`:set steady`): coming back to the middle only
+//! once typing pauses, the equation was found to lag behind the keys.
+//!
 //! It stays only where it still fits there: between the left and the
 //! right edge of the text of the page, and clear of what else stands in
 //! its line (its number). Otherwise it is shown centred, as Typst sets

@@ -895,7 +895,8 @@ mod tests {
         assert_eq!(typing("$|$", "\\mathbb{R}"), "$RR|$");
         assert_eq!(typing("$|$", "\\foo "), "$\"\\\\foo\" |$");
         assert_eq!(typing("$|$", "\\alpha\\beta "), "$alpha beta |$");
-        assert_eq!(typing("$|$", "\\displaystyle x"), "$ x|$");
+        // An equation by itself, as asked: it keeps its blank.
+        assert_eq!(typing("$|$", "\\displaystyle x"), "$ x| $");
     }
 
     #[test]

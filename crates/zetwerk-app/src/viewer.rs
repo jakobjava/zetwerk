@@ -207,6 +207,9 @@ const UI_STEP: f64 = 1.15;
 /// What is typeset where the cursor is in a place with nothing in it:
 /// a line of text as high as any, of no width, that shows nothing.
 const CURSOR_MARK: &str = "#box(width: 0pt, clip: true)[|]";
+/// The same in an equation: a symbol that takes no room, set where the
+/// next symbol typed would be and as large (small in what is raised).
+const MATH_CURSOR_MARK: &str = "#box(width: 0pt, clip: true)[|];";
 
 /// How wide a blank is, in parts of the height of its line: a quarter
 /// of the font's size, as in most fonts for text.
@@ -834,7 +837,8 @@ pub struct Viewer {
     /// (see `local`): on, unless the user turned it off (`:parts`).
     in_parts: bool,
     /// Whether an equation by itself stays where it began while it is
-    /// typed into (see `steady`): on, unless turned off (`:set steady`).
+    /// typed into (see `steady`): off, unless turned on (`:set steady`);
+    /// centred again only on the pause, it was found to lag behind.
     steady: bool,
     /// What the user wants to be able to put into running text, besides
     /// what everybody can (see `typst_text::TEXT_INSERTS`).
@@ -1058,7 +1062,7 @@ impl Viewer {
             jump: jump::Jump::default(),
             focus: focus::Focus::default(),
             in_parts: true,
-            steady: true,
+            steady: false,
             inserts: Vec::new(),
             shown_put: Vec::new(),
             names: HashMap::new(),
@@ -1344,6 +1348,21 @@ impl Viewer {
         // (and the empty place of the last, which is put first).
         let missing = missing_arguments(source, &equation);
         put.extend(missing.into_iter().map(|place| (place, EMPTY_ARGUMENT)));
+        // Behind a blank (out of what is raised, say) or a closing
+        // bracket (behind `sqrt(2)`) nothing is typeset where the cursor
+        // is, or something that stands for more than the place: the mark
+        // is, as the next symbol would be. Not where what follows would
+        // take it in (`^`, `_`, a bracket it is in, where it would be as
+        // large as text and not as what is raised).
+        let typing_here = editor.mode() == editor::Mode::Insert;
+        let inside = equation.start < cursor && cursor < equation.end;
+        let before = source.text()[..cursor].chars().next_back();
+        let after = source.text()[cursor..].chars().next();
+        let behind = before.is_some_and(|c| matches!(c, ' ' | '\n' | ')' | ']'));
+        let free = after.is_some_and(|c| c.is_whitespace() || matches!(c, '$' | ',' | ';' | '&'));
+        if typing_here && inside && behind && free {
+            put.push((cursor, MATH_CURSOR_MARK));
+        }
         // The word the cursor is typing: up to it, and what letters
         // stand right behind it (it was typed before them).
         let text = source.text();

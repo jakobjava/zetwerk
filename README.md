@@ -104,8 +104,9 @@ Half an equation is usually no equation: `frac(1,` lacks its denominator, and
 Typst refuses it. zetwerk shows what's still to come as an empty box `□`,
 leaves nothing of it in the file, and keeps the equation typeset while you
 type. `(` and `[` close themselves (typing the closing one steps over it).
-A display equation keeps its left edge while you type into it, and is centred
-again once you pause.
+After a blank (out of an exponent, say), the cursor stands where the next
+symbol will go, as large as it will be. Typing at the end of a display
+equation keeps it a display equation.
 
 ![Completing a symbol name in an equation](docs/screenshots/completion.png)
 
@@ -167,8 +168,9 @@ help on those. `:tutor` teaches the editor in short lessons, on the page.
 - **Spelling and grammar** in the document's language, with Hunspell and,
   if you run one, LanguageTool: `]s`, `[s`, `z=`, `zg`, `:spell`.
 - **Changes since saving** (or since opening, a step of the history, or a
-  git commit) as bars in the margin, listed and gone through with `]v`.
-  `:git log` lists the history.
+  git commit), listed and gone through with `]v`, and shown as bars beside
+  the lines if you want them (`:changes on`, or `changes.bars` in the
+  settings; off by default). `:git log` lists the history.
 - **Sources:** `:sources` lists the bibliography (BibTeX or Hayagriva).
   You can cite from it and add to it.
 - **Comfort:** night and sepia colours (`zn`), a typewriter mode (`zT`), focus

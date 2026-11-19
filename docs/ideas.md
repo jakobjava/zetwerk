@@ -242,6 +242,81 @@ Not started then: 1 (needs the user at a keyboard), 9, 10, 11, 12, 15.
 None of what the agents built has been seen in a real window: it is covered by
 tests that drive the viewer, not by anybody's eyes.
 
+## How it feels (2026-11-19): two rounds of ideas after a day of use
+
+The user found the app janky at times, most of all in equations, and judged
+these worth doing. Each says what was seen that led to it.
+
+Done on 2026-11-19:
+
+- **Equations stay equations while typed.** `frac(a)` shows as `frac(a, □)`
+  in the equation being typed (it was refused and turned red); `(` and `[`
+  close as they open in math. Keys in an equation were measured at 1–5 ms,
+  already typeset as parts: there was no compile to wait for.
+- **A display equation keeping its left edge** while typed into, centred
+  again on the pause: built, and turned off by default (`:set steady`): the
+  user found that it came back to the middle "very slowly and laggy".
+- **A display equation stays one when typed into at its end.** What looked
+  like the in-place piece standing at the left, without the number and with
+  "Equation 0" behind it, was the equation become one in its line: the
+  cursor on the closing `$`, behind its blank, and what was typed took the
+  blank from it. What is typed there now keeps a blank behind it.
+- **The cursor behind a blank in an equation** (out of an exponent, after
+  `x^2 `) stood behind the 2, small, or was gone. A mark that takes no room
+  is now typeset at the cursor while typing there (never in the file), and
+  the cursor stands where it is, as large as the next symbol.
+
+To do, about what is seen:
+
+- **`/` on the page finds what the source says, too.** On the page, `/` reads
+  the page: `/lambda) x` finds nothing where it shows "λ)𝑥". Where the page
+  has no match, look in the source, or say that the source has one.
+- **`:25` says which line it went to.** In the page view it went to line 27
+  of the file. Either `:N` is always the file's line, or it says what it
+  counted.
+- **A key for each view.** `gs` goes round page, split, source; from the split
+  back to the page is two presses. Give each view its own key or command.
+- **The change bar is no second cursor.** Inside an equation, or on a slide
+  whose margin is small, the bar of a changed line stands against the text
+  and reads as a cursor. Keep it in the margin, or hide it on the line being
+  typed.
+- **The completion list in equations.** "integral" twice (`int` and the
+  symbol); `inter`, `interleave`, `interrobang` above the template
+  `integral_a^b dif x`; no glyph beside a symbol's name. The list also slides
+  right with every letter: keep it under the start of the word.
+- **Slides once while writing.** A slide with `#pause` is two pages on screen
+  ("the last slides twice"); while editing, show each slide's last step only,
+  as `:pdf handout` does, and all of them in `:present` and the PDF.
+
+To do, about messages:
+
+- **Long messages kept.** The status line now cuts what does not fit (the
+  tutor's instructions lost their end). Keep recent messages for `:messages`,
+  or let a key show the one standing in full.
+- **Quieter while typing.** Alerts such as "no equation yet, so it is shown as
+  it is written" fire mid-word; hold them back until typing pauses, and let
+  notices not change the line on every key.
+
+To do, about packages:
+
+- **Import a package as its manual does.** `:package search` and `:package
+  add` write `#import "@preview/alchemist:0.2.0"`, the module only, and a
+  snippet pasted from the manual (`#skeletize(…)`) is refused. Write the
+  import the package's README shows, or `: *`. (`i` in `:why` puts it right
+  afterwards since 2026-11-19.)
+
+To do, about measuring and drawing:
+
+- **Reports that see the screen.** A Ctrl-G report says why a key waited for a
+  compile, not what was on screen. Keep for each key how long until the
+  screen was right, and whether a frame showed an old page or the caret
+  elsewhere: the flicker of `#` typed on a slide (2026-11-19) could not be
+  played again, because it is in the drawing.
+- **A page swapped whole.** Never show a frame of new and old pieces of a page
+  together; the guess for that flicker.
+- **The frame rate on battery.** Check whether `power auto` lowers it, which
+  would feel like jank whatever the compiles cost.
+
 ## 1. Real-keyboard dogfooding
 
 Every bug the user found was one scripted tests could not see. Write two real

@@ -780,7 +780,15 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         }
         Ground::Math if matches!(c, '(' | '[') && closes_here(text, at) => {
             let closer = if c == '(' { ')' } else { ']' };
-            return Some((at..at, format!("{c}{closer}"), 1));
+            let blank = if stays_apart(source, at) { " " } else { "" };
+            return Some((at..at, format!("{c}{closer}{blank}"), 1));
+        }
+        // Right before the dollar sign that closes an equation by itself,
+        // behind the blank before it, what is typed goes in with a blank
+        // behind it: else the equation would be one in its line, set
+        // where its paragraph begins, without its number.
+        Ground::Math if !c.is_whitespace() && stays_apart(source, at) => {
+            return Some((at..at, format!("{c} "), c.len_utf8()));
         }
         Ground::Math | Ground::Code => return None,
     }
@@ -906,6 +914,25 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         _ => None,
     };
     sealed(source, at, c, meant)
+}
+
+/// Whether byte `at` of `source` is right before the dollar sign that
+/// closes an equation by itself (with a blank inside each of its dollar
+/// signs), behind the blank before it: what is typed there would take
+/// that blank away from the dollar sign.
+fn stays_apart(source: &Source, at: usize) -> bool {
+    let text = source.text();
+    let Some(equation) = equation_at(source, at) else {
+        return false;
+    };
+    let Some(written) = text.get(equation.clone()) else {
+        return false;
+    };
+    written.len() > 2
+        && at + 1 == equation.end
+        && written.ends_with('$')
+        && written[1..].starts_with(char::is_whitespace)
+        && text[..at].ends_with(char::is_whitespace)
 }
 
 /// Whether a bracket opened at byte `at` of `text` (in an equation) is
@@ -3330,6 +3357,18 @@ mod tests {
     }
 
     #[test]
+    fn an_equation_by_itself_stays_so_when_typed_into_at_its_end() {
+        assert_eq!(typing("$ x |$", '+').as_deref(), Some("$ x +| $"));
+        assert_eq!(typing("$ x + |$", 'y').as_deref(), Some("$ x + y| $"));
+        assert_eq!(typing("$\n  x\n|$", 'y').as_deref(), Some("$\n  x\ny| $"));
+        // Before the blank, as typed.
+        assert_eq!(typing("$ x| $", '+'), None);
+        // In its line it stays in its line.
+        assert_eq!(typing("$x |$", '+'), None);
+        assert_eq!(typing("$ x|$", '+'), None);
+    }
+
+    #[test]
     fn a_bracket_in_an_equation_is_closed_as_it_is_opened() {
         assert_eq!(typing("$x |$", '(').as_deref(), Some("$x (|)$"));
         assert_eq!(typing("$frac|$", '(').as_deref(), Some("$frac(|)$"));
@@ -3344,6 +3383,9 @@ mod tests {
         assert_eq!(typing("$a|$", ')'), None);
         // Not in text.
         assert_eq!(typing("a |", '(').as_deref(), None);
+        // Right before the dollar sign that closes an equation by itself,
+        // with a blank behind it, that it stays by itself.
+        assert_eq!(typing("$ x |$", '(').as_deref(), Some("$ x (|) $"));
         // Backspace between the two takes both.
         let unmade = |text: &str| {
             after(text, |source, at| {

@@ -264,7 +264,7 @@ pub(crate) const TABLE: &[Opt] = &[
         "typing.steady",
         Group::Typing,
         Kind::Switch,
-        ON,
+        OFF,
         "an equation by itself stays where it began while it is typed into, \
          and is centred again when typing pauses",
         |v| Value::Switch(v.steady),
@@ -664,13 +664,15 @@ pub(crate) const TABLE: &[Opt] = &[
         "changes.bars",
         Group::Page,
         Kind::Switch,
-        ON,
+        OFF,
         "a bar beside the lines that changed since the version compared with \
-         (:changes off for now)",
+         (:changes on, :changes off)",
         |v| held(v, "changes.bars"),
-        |v, value| v.settings.hold("changes.bars", value.clone()),
+        |v, value| {
+            v.changes_shown(value.is_on());
+            v.settings.hold("changes.bars", value.clone());
+        },
     )
-    .next_start()
     .session(&["changes"]),
     opt(
         "changes.since",

@@ -233,11 +233,29 @@ impl Viewer {
             text.replace_range(0..1, "\u{a0}");
             cursor += usize::from(at > 0);
         }
+        // Behind a blank or a closing bracket in an equation nothing is
+        // set where the cursor is (see `put_to_show`): a mark that takes
+        // no room is, as the next symbol would be, and the cursor is at it.
+        let mut into_mark = 0;
+        let free = text[cursor..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_whitespace() || matches!(c, '$' | ',' | ';' | '&'));
+        if places.is_some()
+            && text[..cursor].ends_with([' ', '\n', ')', ']'])
+            && free
+            && text[cursor..].contains('$')
+        {
+            text.insert_str(cursor, super::MATH_CURSOR_MARK);
+            into_mark = super::MATH_CURSOR_MARK.find('|').unwrap_or(0);
+        }
         for _ in 0..TRIES {
             let markup = chrome::in_place_markup(&text, &style, false);
             if let Some((image, end)) = self.chrome.render_in_place(&markup, zoom) {
-                let caret = chrome::in_place_body(&markup)
-                    .and_then(|body| self.chrome.caret_in_place(&markup, zoom, body + cursor));
+                let caret = chrome::in_place_body(&markup).and_then(|body| {
+                    self.chrome
+                        .caret_in_place(&markup, zoom, body + cursor + into_mark)
+                });
                 return Some(Piece { image, end, caret });
             }
             // A name that is none (yet): the word it is.

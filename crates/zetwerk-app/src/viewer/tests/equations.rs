@@ -1086,6 +1086,7 @@ fn an_equation_by_itself_stays_where_it_began_while_it_is_typed_into() {
              $ a + b $\n\nAfter it, more words.\n"
         );
         let (mut viewer, directory) = typed(&text, " $\n\nAfter", "i");
+        viewer.steady = true;
         compile(&mut viewer);
         let began = equation_left(&viewer);
         for key in keys::parse(" + c^2").unwrap() {
@@ -1114,6 +1115,7 @@ fn an_equation_that_no_longer_fits_where_it_began_is_centred() {
     let text = "#set page(width: 200pt, height: 300pt)\nBefore the equation, a line.\n\n\
                 $ a + b $\n\nAfter it, more words.\n";
     let (mut viewer, directory) = typed(text, " $\n\nAfter", "i");
+    viewer.steady = true;
     compile(&mut viewer);
     let began = equation_left(&viewer);
     press(&mut viewer, " + c + d + e + f + g + h + i + j + k + l");
@@ -1122,4 +1124,119 @@ fn an_equation_that_no_longer_fits_where_it_began_is_centred() {
     let left = equation_left(&viewer);
     assert!(left < began - 5.0, "{began} to {left}");
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn an_equation_by_itself_typed_into_at_its_end_stays_by_itself() {
+    // The cursor on the closing dollar sign, behind the blank: what was
+    // typed took the blank from it, and the equation became one in its
+    // line, at the left, without its number ("Equation 0" behind it).
+    let text = include_str!("../../../../zetwerk-corpus/docs/paper.typ");
+    let (mut viewer, directory) = typed(text, "$ <eq-avg>", "i+ frac(1, 2)<Esc>");
+    let written = viewer.text().unwrap_or_default();
+    assert!(
+        written.contains("$ y_i = lambda x_i + (1 - lambda) x_(i+1) + frac(1, 2) $ <eq-avg>"),
+        "{written}"
+    );
+    settle(&mut viewer);
+    assert_eq!(viewer.state().problems, Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Where the cursor is drawn on the first page, as the page map has it:
+/// its cell.
+fn caret_cell(viewer: &Viewer) -> typst::layout::Rect {
+    let editor = viewer.editor.as_ref().unwrap();
+    let world = viewer.compiled_world.as_ref().unwrap();
+    let page = &viewer.document.as_ref().unwrap().pages()[0];
+    let map = PageMap::build(world, &page.frame);
+    map.caret(editor.file(), editor.cursor()).unwrap().cell
+}
+
+#[test]
+fn behind_a_blank_in_an_equation_the_cursor_is_where_the_next_symbol_goes() {
+    // `x^2` and a blank: out of what is raised. The cursor stood behind
+    // the 2, as small, or was gone; it is where a symbol typed next is
+    // set, as large as that.
+    let text = "#set page(width: 300pt, height: 200pt)\nA $x^2$ b.\n";
+    let (mut viewer, directory) = typed(text, "2$", "a");
+    compile(&mut viewer);
+    let raised = caret_cell(&viewer);
+    // As the key is shown at once (a part typeset by itself), and once
+    // all of it is typeset again.
+    press(&mut viewer, " ");
+    assert_eq!(
+        viewer.document_revision,
+        Some(viewer.revision),
+        "{:?}",
+        viewer.declined
+    );
+    let at_once = caret_cell(&viewer);
+    compile(&mut viewer);
+    let out = caret_cell(&viewer);
+    assert_eq!(at_once, out);
+    let height = |rect: typst::layout::Rect| (rect.max.y - rect.min.y).to_pt();
+    assert!(
+        height(out) > height(raised) * 1.2,
+        "{raised:?} then {out:?}"
+    );
+    assert!(out.min.x > raised.min.x, "{raised:?} then {out:?}");
+    // What is typed goes there, as large.
+    press(&mut viewer, "y");
+    compile(&mut viewer);
+    let typed = caret_cell(&viewer);
+    assert!(
+        (height(typed) - height(out)).abs() < 0.5,
+        "{out:?} then {typed:?}"
+    );
+    // Nothing of it is in the text.
+    assert_eq!(
+        viewer.text(),
+        Some("#set page(width: 300pt, height: 200pt)\nA $x^2 y$ b.\n")
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn behind_a_closed_call_in_an_equation_the_cursor_stays_on_the_line() {
+    // `sqrt(2` closed: the cursor stood at the top of the root sign, as
+    // high as all of it, for that is the glyph behind it. It stands
+    // where the next symbol goes, as large as the 2.
+    let text = "#set page(width: 300pt, height: 200pt)\nA $x + 1$ b.\n";
+    let (mut viewer, directory) = typed(text, "1$", "a + sqrt(2");
+    compile(&mut viewer);
+    let inside = caret_cell(&viewer);
+    press(&mut viewer, ")");
+    assert_eq!(
+        viewer.text(),
+        Some("#set page(width: 300pt, height: 200pt)\nA $x + 1 + sqrt(2)$ b.\n")
+    );
+    compile(&mut viewer);
+    let out = caret_cell(&viewer);
+    let height = |rect: typst::layout::Rect| (rect.max.y - rect.min.y).to_pt();
+    assert!(
+        (height(out) - height(inside)).abs() < 1.0,
+        "{inside:?} then {out:?}"
+    );
+    assert!(
+        (out.min.y - inside.min.y).to_pt().abs() < 1.0,
+        "{inside:?} then {out:?}"
+    );
+    assert!(
+        out.min.x.to_pt() >= inside.max.x.to_pt() - 0.01,
+        "{inside:?} then {out:?}"
+    );
+    // What would take it in is left alone: `)^` raises what is closed.
+    let (mut viewer, other) = typed("A $(a + b)^2$ c.\n", ")^", "a");
+    compile(&mut viewer);
+    assert!(
+        viewer
+            .shown_put
+            .iter()
+            .all(|(_, mark)| !mark.contains("box")),
+        "{:?}",
+        viewer.shown_put
+    );
+    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(other);
 }
