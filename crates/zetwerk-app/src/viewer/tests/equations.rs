@@ -868,12 +868,12 @@ fn a_deletion_over_two_equations_leaves_neither() {
 
 #[test]
 fn an_equation_shown_as_written_stays_so_when_the_cursor_leaves_it() {
-    // `$` typed in an equation Typst refuses (here a fraction without
-    // what it divides by) took the cursor out of it, the text as it was:
+    // `$` typed in an equation Typst refuses (here a fraction of three
+    // arguments) took the cursor out of it, the text as it was:
     // the pages were taken for those of that text, and as the equation
     // was tried again and refused, it was not shown as written again.
     // Typesetting stopped there, with a complaint and nothing changing.
-    let (mut viewer, directory) = typed("A $x$ b.\n", "x$", "a frac(a");
+    let (mut viewer, directory) = typed("A $x$ b.\n", "x$", "a frac(a, b, c");
     settle(&mut viewer);
     assert!(viewer.written.is_some());
     for keys in ["$", " c"] {
@@ -883,7 +883,7 @@ fn an_equation_shown_as_written_stays_so_when_the_cursor_leaves_it() {
         assert!(viewer.written.is_some(), "{keys}");
         assert_eq!(viewer.document_revision, Some(viewer.revision), "{keys}");
     }
-    assert_eq!(viewer.text(), Some("A $x frac(a)$ c b.\n"));
+    assert_eq!(viewer.text(), Some("A $x frac(a, b, c)$ c b.\n"));
     let _ = std::fs::remove_dir_all(directory);
 }
 
@@ -897,14 +897,14 @@ fn two_equations_typst_refuses_are_both_shown_as_written() {
     let (mut viewer, directory) = typed(text, "x$", "");
     settle(&mut viewer);
     assert!(viewer.written.is_some());
-    press(&mut viewer, "a frac(b");
+    press(&mut viewer, "a frac(b, c, d");
     settle(&mut viewer);
     assert_eq!(viewer.state().problems, Vec::<String>::new());
     assert_eq!(viewer.document_revision, Some(viewer.revision));
     let shown = shown_text(&mut viewer);
     assert_eq!(shown.matches("[`$").count(), 2, "{shown:?}");
     // Each is shown as what it means once it is an equation again.
-    press(&mut viewer, ", c)<Esc>");
+    press(&mut viewer, "<BS><BS><BS><Esc>");
     settle(&mut viewer);
     assert_eq!(viewer.state().problems, Vec::<String>::new());
     let shown = shown_text(&mut viewer);
@@ -1060,5 +1060,66 @@ fn a_name_typst_refuses_once_typing_is_over_is_shown_as_written() {
     settle(&mut viewer);
     assert_eq!(viewer.state().problems, Vec::<String>::new());
     assert!(viewer.written.is_some());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// Where the leftmost glyph of the equation `$ a…` is on the first page
+/// as shown, in points across it.
+fn equation_left(viewer: &Viewer) -> f64 {
+    let editor = viewer.editor.as_ref().unwrap();
+    let world = viewer.compiled_world.as_ref().unwrap();
+    let source = world.written(editor.file()).unwrap();
+    let at = source.text().find("$ a").unwrap() + 1;
+    let equation = crate::typst_text::equation_at(&source, at).unwrap();
+    let page = &viewer.document.as_ref().unwrap().pages()[0];
+    let map = PageMap::build(world, &page.frame);
+    super::super::steady::equation_on(&map, editor.file(), &equation)
+        .unwrap()
+        .left
+}
+
+#[test]
+fn an_equation_by_itself_stays_where_it_began_while_it_is_typed_into() {
+    for rules in ["", "#set math.equation(numbering: \"(1)\")\n"] {
+        let text = format!(
+            "#set page(width: 300pt, height: 300pt)\n{rules}Before the equation, a line of words.\n\n\
+             $ a + b $\n\nAfter it, more words.\n"
+        );
+        let (mut viewer, directory) = typed(&text, " $\n\nAfter", "i");
+        compile(&mut viewer);
+        let began = equation_left(&viewer);
+        for key in keys::parse(" + c^2").unwrap() {
+            let local = viewer.stats.local;
+            viewer.key(key);
+            assert_eq!(
+                viewer.stats.local,
+                local + 1,
+                "{rules:?}: typeset as a part"
+            );
+            let left = equation_left(&viewer);
+            assert!((left - began).abs() < 0.01, "{rules:?}: {began} to {left}");
+        }
+        // Typing paused: typeset whole, it is centred again, further left.
+        press(&mut viewer, "<Esc>");
+        settle(&mut viewer);
+        assert!(viewer.document.as_ref().unwrap().is_whole());
+        let centred = equation_left(&viewer);
+        assert!(centred < began - 5.0, "{rules:?}: {began} to {centred}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[test]
+fn an_equation_that_no_longer_fits_where_it_began_is_centred() {
+    let text = "#set page(width: 200pt, height: 300pt)\nBefore the equation, a line.\n\n\
+                $ a + b $\n\nAfter it, more words.\n";
+    let (mut viewer, directory) = typed(text, " $\n\nAfter", "i");
+    compile(&mut viewer);
+    let began = equation_left(&viewer);
+    press(&mut viewer, " + c + d + e + f + g + h + i + j + k + l");
+    // Too wide to begin where it began and stay on the page: as Typst
+    // sets it, at the left of the text.
+    let left = equation_left(&viewer);
+    assert!(left < began - 5.0, "{began} to {left}");
     let _ = std::fs::remove_dir_all(directory);
 }

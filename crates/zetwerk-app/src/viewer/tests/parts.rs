@@ -69,6 +69,9 @@ const PAPER: &str = include_str!("../../../../zetwerk-corpus/docs/paper.typ");
 /// page then, if it says it shows the text.
 fn after_keys(text: &str, at: &str, behind: bool, keys: &str) -> Option<String> {
     let (mut viewer, directory) = editing(text);
+    // A part is to be as the whole sets it: an equation typed into is
+    // not held where it began.
+    viewer.steady = false;
     press(&mut viewer, "gsgs");
     let found = text
         .find(at)

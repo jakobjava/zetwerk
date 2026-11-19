@@ -15,7 +15,8 @@
 //! what Typst refuses (the code behind `#` it is in, the `@` of a
 //! reference, the mark that is not closed), `c` makes a name Typst does
 //! not know the one it most likely is (`page` with letters typed into
-//! it, say), `u` goes back by undoing to
+//! it, say), `i` imports a name Typst does not know from the package on
+//! this machine that has it (see `import_offer`), `u` goes back by undoing to
 //! the text the pages show, `e` loads the file as it was saved (`:e!`), and Esc puts
 //! the panel away; any other key puts it away too and does what it
 //! always does. Undo brings back what any of them changed.
@@ -92,6 +93,16 @@ pub(super) struct Refusal {
 }
 
 impl Refusal {
+    /// The file it is in.
+    pub(super) fn file(&self) -> FileId {
+        self.file
+    }
+
+    /// Its bytes in the text of that file.
+    pub(super) fn range(&self) -> Option<&Range<usize>> {
+        self.range.as_ref()
+    }
+
     /// Where it is: the file if it is another, the line and the words
     /// around it.
     fn place(&self) -> String {
@@ -553,6 +564,9 @@ impl Viewer {
             )
         });
         let mut said = for_writer(message);
+        if let Some(has) = self.import_said(*of, range) {
+            let _ = write!(said, "; {has}");
+        }
         if let Some((_, _, name)) = self
             .refused
             .likely
@@ -600,7 +614,11 @@ impl Viewer {
             self.refused.away = false;
         }
         self.refused.likely = None;
-        self.refused.likely = self.likely_name(world);
+        self.import_offer_compiled(world);
+        // A name a package has is not a misspelling of another.
+        if self.import_offered().is_none() {
+            self.refused.likely = self.likely_name(world);
+        }
         let Some(editor) = &self.editor else {
             return;
         };
@@ -688,6 +706,11 @@ impl Viewer {
             Key::Char('x') => self.take_out_refused(&refusal),
             Key::Char('c') if self.likely_here(&refusal).is_some() => {
                 self.correct_refused(&refusal);
+            }
+            Key::Char('i') if self.import_offered().is_some() => {
+                if self.import_refused() {
+                    self.refused.again = true;
+                }
             }
             Key::Char('g') if self.package_offered() => self.fetch_missing(),
             Key::Char('u') if self.good_state().is_some() => self.back_to_good(),
@@ -925,9 +948,7 @@ impl Viewer {
                 shortened(taken, BEGINS)
             ));
         }
-        if let Some((_, name)) = self.likely_here(&refusal) {
-            lines.push(format!("c      make it “{}”", name.trim_matches('"')));
-        }
+        lines.extend(self.name_lines(&refusal));
         if let Some((_, steps)) = self.good_state() {
             let undos = if steps == 1 { "undo" } else { "undos" };
             lines.push(format!(
@@ -969,6 +990,19 @@ impl Viewer {
         if !has(image.id) {
             scene.images.push(image);
         }
+    }
+
+    /// The panel's ways out of a name Typst does not know: `i` imports
+    /// it, `c` makes it the one it most likely is.
+    fn name_lines(&self, refusal: &Refusal) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(offer) = self.import_offered() {
+            lines.push(format!("i      {}", offer.does));
+        }
+        if let Some((_, name)) = self.likely_here(refusal) {
+            lines.push(format!("c      make it “{}”", name.trim_matches('"')));
+        }
+        lines
     }
 
     /// Whether the panel is up.

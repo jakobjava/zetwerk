@@ -1156,28 +1156,7 @@ impl Viewer {
             self.notice(told);
             return false;
         }
-        // Behind the last import that has a line of its own; else at the
-        // top.
-        let at = imports
-            .iter()
-            .filter(|import| {
-                let start = text[..import.literal.start]
-                    .rfind('\n')
-                    .map_or(0, |at| at + 1);
-                text[start..].starts_with("#import")
-            })
-            .map(|import| {
-                text[import.literal.end..]
-                    .find('\n')
-                    .map_or(text.len(), |end| import.literal.end + end + 1)
-            })
-            .max()
-            .unwrap_or(0);
-        let newline = if at > 0 && !text[..at].ends_with('\n') {
-            "\n"
-        } else {
-            ""
-        };
+        let (at, newline) = super::import_offer::import_place(text, &imports);
         let line = format!("{newline}#import \"{spec}\"\n");
         if let Err(why) = editor.replace(&[(at..at, line.as_str())]) {
             self.alert(format!("not changed: {why}"));

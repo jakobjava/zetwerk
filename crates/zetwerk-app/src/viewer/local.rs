@@ -221,6 +221,12 @@ impl Viewer {
             &|item| stays.contains(&item),
         )
         .map_err(|why| format!("{why:?}"))?;
+        // An equation being typed into stays where it stood (see
+        // `steady.rs`).
+        let frame = match on_screen.pages().get(index) {
+            Some(shown) => self.steady_equation(index, &shown.frame, &was, frame, &part.world),
+            None => frame,
+        };
 
         let mut patched: EcoVec<Page> = pages.iter().cloned().collect();
         if let Some(slot) = patched.make_mut().get_mut(index) {

@@ -771,6 +771,17 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
                 (at..at, format!("\"{c}\""), c.len_utf8() + 2)
             });
         }
+        // A bracket is closed as it is opened, where nothing stands right
+        // behind it that it would take in: then what is typed in it is
+        // an equation all the while, not one that runs on to its end. The
+        // bracket that closes it is typed over.
+        Ground::Math if matches!(c, ')' | ']') && text[at..].starts_with(c) => {
+            return Some((at..at + 1, c.to_string(), 1));
+        }
+        Ground::Math if matches!(c, '(' | '[') && closes_here(text, at) => {
+            let closer = if c == '(' { ')' } else { ']' };
+            return Some((at..at, format!("{c}{closer}"), 1));
+        }
         Ground::Math | Ground::Code => return None,
     }
     let escaped = || plain(format!("\\{c}"));
@@ -895,6 +906,16 @@ pub fn typed(source: &Source, at: usize, c: char) -> Option<(Range<usize>, Strin
         _ => None,
     };
     sealed(source, at, c, meant)
+}
+
+/// Whether a bracket opened at byte `at` of `text` (in an equation) is
+/// closed there too: where a blank, the end of the equation or what
+/// closes or parts something stands behind it, not what it would take in.
+fn closes_here(text: &str, at: usize) -> bool {
+    text[at..]
+        .chars()
+        .next()
+        .is_none_or(|c| c.is_whitespace() || ")]},;$&".contains(c))
 }
 
 /// Whether the line of byte `at` of `text`, up to it, is a number and a
@@ -1959,7 +1980,7 @@ pub fn unmake(source: &Source, at: usize) -> Option<(Range<usize>, String)> {
         return gone(script);
     }
     let (chain, _) = containing(source, at);
-    chain.iter().rev().find_map(|node| {
+    let call = chain.iter().rev().find_map(|node| {
         let args = node
             .children()
             .find(|child| child.kind() == SyntaxKind::MathArgs)
@@ -1970,6 +1991,12 @@ pub fn unmake(source: &Source, at: usize) -> Option<(Range<usize>, String)> {
             .all(|c| c.is_whitespace() || matches!(c, ',' | ';'));
         (empty && args.range().start < at && at < args.range().end)
             .then(|| (node.range(), String::new()))
+    });
+    // Else brackets with nothing between them, as an opening one typed
+    // made them: both go.
+    call.or_else(|| {
+        matches!(text.get(at - 1..at + 1), Some("()" | "[]"))
+            .then(|| (at - 1..at + 1, String::new()))
     })
 }
 
@@ -2061,6 +2088,67 @@ pub const EMPTY: &str = "\u{25a1}";
 #[must_use]
 pub fn empty_places(source: &Source, equation: &Range<usize>) -> Vec<usize> {
     lacking(source, equation, false)
+}
+
+/// What stands for an argument of a call in an equation that is yet to
+/// be typed, behind those that are there: `frac(a)` is shown as
+/// `frac(a, □)`.
+pub const EMPTY_ARGUMENT: &str = ", \u{25a1}";
+
+/// The functions of equations that take more than one argument, and
+/// how many they take at least.
+const ARGUMENTS: &[(&str, usize)] = &[("frac", 2), ("binom", 2), ("root", 2)];
+
+/// Where in the equation at bytes `equation` of `source` a call lacks
+/// arguments it cannot be without (see [`ARGUMENTS`]): a place for each
+/// that is lacking, behind those it has, in order. Typst refuses such a
+/// call (`frac(a)`: "missing argument: denom"), and the equation would
+/// show as it is written while the second is yet to be typed.
+#[must_use]
+pub fn missing_arguments(source: &Source, equation: &Range<usize>) -> Vec<usize> {
+    fn walk(node: &LinkedNode, text: &str, places: &mut Vec<usize>) {
+        if node.kind() == SyntaxKind::MathCall
+            && let Some(name) = node.children().next()
+            && let Some((_, least)) = ARGUMENTS
+                .iter()
+                .find(|(known, _)| text.get(name.range()) == Some(*known))
+            && let Some(args) = node
+                .children()
+                .find(|child| child.kind() == SyntaxKind::MathArgs)
+        {
+            let parts: Vec<SyntaxKind> = args.children().map(|part| part.kind()).collect();
+            // Of rows of arguments (`;`), or of named ones, the count says
+            // nothing.
+            let plain = !parts
+                .iter()
+                .any(|kind| matches!(kind, SyntaxKind::Semicolon | SyntaxKind::Named));
+            let given = 1 + parts
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::Comma)
+                .count();
+            if plain && given < *least {
+                let at = args
+                    .children()
+                    .find(|part| part.kind() == SyntaxKind::RightParen)
+                    .map_or(args.range().end, |close| close.range().start);
+                places.extend(std::iter::repeat_n(at, least - given));
+            }
+        }
+        for child in node.children() {
+            walk(&child, text, places);
+        }
+    }
+    let mut places = Vec::new();
+    let Some(node) = LinkedNode::new(source.root())
+        .leaf_at(equation.start, Side::After)
+        .and_then(|leaf| leaf.parent().cloned())
+        .filter(|node| node.kind() == SyntaxKind::Equation)
+    else {
+        return places;
+    };
+    walk(&node, source.text(), &mut places);
+    places.sort_unstable();
+    places
 }
 
 /// How many words and characters of running text `source` has: what is
@@ -3213,6 +3301,58 @@ mod tests {
         };
         assert_eq!(unmade("a \\#|").as_deref(), Some("a |"));
         assert_eq!(unmade("a \\#x|"), None);
+    }
+
+    #[test]
+    fn arguments_a_call_cannot_be_without_have_places() {
+        let shown = |text: &str| {
+            let source = source(text);
+            let at = text.find('$').unwrap_or_else(|| panic!("an equation")) + 1;
+            let equation = equation_at(&source, at).unwrap_or_else(|| panic!("an equation"));
+            let mut shown = text.to_owned();
+            for at in missing_arguments(&source, &equation).into_iter().rev() {
+                shown.insert_str(at, EMPTY_ARGUMENT);
+            }
+            shown
+        };
+        assert_eq!(shown("$frac(a)$"), "$frac(a, \u{25a1})$");
+        assert_eq!(shown("$x + frac(a$"), "$x + frac(a, \u{25a1}$");
+        assert_eq!(shown("$frac(a, b)$"), "$frac(a, b)$");
+        assert_eq!(shown("$frac(a,)$"), "$frac(a,)$");
+        assert_eq!(
+            shown("$binom(n) + root(3)$"),
+            "$binom(n, \u{25a1}) + root(3, \u{25a1})$"
+        );
+        assert_eq!(shown("$frac(frac(a), b)$"), "$frac(frac(a, \u{25a1}), b)$");
+        // Rows and named arguments are not counted.
+        assert_eq!(shown("$frac(a; b)$"), "$frac(a; b)$");
+        assert_eq!(shown("$sqrt(a) + f(a)$"), "$sqrt(a) + f(a)$");
+    }
+
+    #[test]
+    fn a_bracket_in_an_equation_is_closed_as_it_is_opened() {
+        assert_eq!(typing("$x |$", '(').as_deref(), Some("$x (|)$"));
+        assert_eq!(typing("$frac|$", '(').as_deref(), Some("$frac(|)$"));
+        assert_eq!(typing("$x|$", '[').as_deref(), Some("$x[|]$"));
+        assert_eq!(typing("$ a + | $", '(').as_deref(), Some("$ a + (|) $"));
+        assert_eq!(typing("$(a, |)$", '(').as_deref(), Some("$(a, (|))$"));
+        // Before what it would take in, it is one bracket.
+        assert_eq!(typing("$x |a + b$", '('), None);
+        // The one that closes it is typed over.
+        assert_eq!(typing("$(a|)$", ')').as_deref(), Some("$(a)|$"));
+        assert_eq!(typing("$[a|]$", ']').as_deref(), Some("$[a]|$"));
+        assert_eq!(typing("$a|$", ')'), None);
+        // Not in text.
+        assert_eq!(typing("a |", '(').as_deref(), None);
+        // Backspace between the two takes both.
+        let unmade = |text: &str| {
+            after(text, |source, at| {
+                unmake(source, at).map(|(range, with)| (range, with, 0))
+            })
+        };
+        assert_eq!(unmade("$x (|)$").as_deref(), Some("$x |$"));
+        assert_eq!(unmade("$x [|]$").as_deref(), Some("$x |$"));
+        assert_eq!(unmade("$x (|a)$"), None);
     }
 
     #[test]

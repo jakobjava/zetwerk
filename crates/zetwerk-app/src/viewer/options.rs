@@ -261,6 +261,17 @@ pub(crate) const TABLE: &[Opt] = &[
     )
     .session(&["latex"]),
     opt(
+        "typing.steady",
+        Group::Typing,
+        Kind::Switch,
+        ON,
+        "an equation by itself stays where it began while it is typed into, \
+         and is centred again when typing pauses",
+        |v| Value::Switch(v.steady),
+        |v, value| v.steady = value.is_on(),
+    )
+    .names(&["steady"]),
+    opt(
         "typing.tidy",
         Group::Typing,
         Kind::Switch,

@@ -499,21 +499,41 @@ pub struct Status<'a> {
 #[must_use]
 pub fn status_markup(status: &Status, width: f64) -> String {
     let left_color = if status.alert { ALERT } else { FOREGROUND };
+    // The left text stays on one line: what does not fit is cut at a
+    // grapheme and ends in an ellipsis, the longest such start that fits
+    // found by halving.
     format!(
         r#"#set page(width: {width}pt, height: {STATUS_HEIGHT}pt, margin: (x: 8pt, y: 0pt), fill: rgb("{BACKGROUND}"))
 #set text(font: "{FONT}", size: 10pt, fill: rgb("{FOREGROUND}"))
 #set align(horizon)
+#let one-line(s) = layout(size => {{
+  if measure(text(s)).width <= size.width {{ return text(s) }}
+  let parts = s.clusters()
+  let cut(n) = parts.slice(0, n).sum(default: "").trim(at: end) + "…"
+  let (low, high) = (0, parts.len())
+  while low < high {{
+    let middle = calc.div-euclid(low + high + 1, 2)
+    if measure(text(cut(middle))).width <= size.width {{ low = middle }} else {{ high = middle - 1 }}
+  }}
+  text(cut(low))
+}})
 #grid(
   columns: (auto, 1fr, auto),
   column-gutter: 10pt,
   text(weight: "bold", fill: rgb("{ACCENT}"), {mode}),
-  box(width: 100%, height: 12pt, clip: true, text(fill: rgb("{left_color}"), {left})),
+  box(width: 100%, height: 12pt, clip: true, text(fill: rgb("{left_color}"), one-line({left}))),
   {right},
 )"#,
         mode = string(status.mode),
-        left = string(status.left),
+        left = string(&one_line(status.left)),
         right = string(status.right),
     )
+}
+
+/// `text` with its line breaks and tabs as spaces, for a line that has
+/// room for one line only.
+fn one_line(text: &str) -> String {
+    text.replace(['\n', '\r', '\t'], " ")
 }
 
 /// The text of one row of the source pane. Blanks at either end may get
@@ -741,6 +761,34 @@ mod tests {
             .unwrap_or_else(|| panic!("status line compiles"))
             .pixmap;
         assert_eq!((pixmap.width(), pixmap.height()), (300, 20));
+    }
+
+    #[test]
+    fn long_text_stays_on_one_line() {
+        let long = "word ".repeat(400) + "\nmore";
+        let status = Status {
+            mode: "",
+            left: &long,
+            right: "",
+            alert: false,
+        };
+        let image = chrome().render(&status_markup(&status, 300.0), 2.0);
+        let pixmap = image
+            .unwrap_or_else(|| panic!("status line compiles"))
+            .pixmap;
+        let (width, background) = (pixmap.width() as usize, pixmap.pixels()[0]);
+        let inked: Vec<bool> = pixmap
+            .pixels()
+            .chunks(width)
+            .map(|row| row.iter().any(|pixel| *pixel != background))
+            .collect();
+        let first = inked.iter().position(|ink| *ink);
+        let last = inked.iter().rposition(|ink| *ink);
+        let (Some(first), Some(last)) = (first, last) else {
+            panic!("no text was drawn")
+        };
+        // Two lines leave blank rows between them; one line does not.
+        assert!(inked[first..=last].iter().all(|ink| *ink), "{inked:?}");
     }
 
     #[test]

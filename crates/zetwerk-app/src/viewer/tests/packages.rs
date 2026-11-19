@@ -488,3 +488,102 @@ fn local_packages_just_work_and_templates_are_begun_from() {
     assert_eq!(viewer.text(), Some(""));
     let _ = std::fs::remove_dir_all(directory);
 }
+
+const ALCHEMIST: &str = "#let skeletize(body) = body\n#let double(..args) = none\n";
+
+/// A viewer editing `text`, with alchemist 0.2.0 on the machine, and
+/// `more` packages, each by name and what its `lib.typ` holds.
+fn with_alchemist(text: &str, more: &[(&str, &str)]) -> (Viewer, PathBuf) {
+    let (mut viewer, directory, packages) = opened(text, Download::Never);
+    fetched_already(&packages, "alchemist", "0.1.0", "#let old() = none\n", "");
+    fetched_already(&packages, "alchemist", "0.2.0", ALCHEMIST, "");
+    for (name, lib) in more {
+        fetched_already(&packages, name, "1.0.0", lib, "");
+    }
+    viewer.project.packages_changed();
+    viewer.file_changed(&directory.join("main.typ"));
+    compile(&mut viewer);
+    (viewer, directory)
+}
+
+#[test]
+fn a_name_a_package_here_has_is_imported_with_i() {
+    // Pasted from the package's manual, into a document that does not
+    // import it.
+    let (mut viewer, directory) = with_alchemist("= Hi\n\n#skeletize[x]\n", &[]);
+    let status = viewer.refused_status().unwrap();
+    assert!(
+        status.contains("Typst knows nothing called “skeletize”; alchemist 0.2.0 has it"),
+        "{status}"
+    );
+    press(&mut viewer, ":why<CR>i");
+    assert_eq!(
+        viewer.text(),
+        Some("#import \"@preview/alchemist:0.2.0\": *\n= Hi\n\n#skeletize[x]\n")
+    );
+    assert!(
+        said(&viewer).contains("“skeletize” imported from alchemist 0.2.0"),
+        "{}",
+        said(&viewer)
+    );
+    compile(&mut viewer);
+    assert_eq!(viewer.problems, Vec::<String>::new());
+    press(&mut viewer, "u");
+    assert_eq!(viewer.text(), Some("= Hi\n\n#skeletize[x]\n"));
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn an_import_of_the_package_is_made_to_name_it() {
+    // As `:package add` and `:package search` write it: the module.
+    let (mut viewer, directory) =
+        with_alchemist("#import \"@preview/alchemist:0.2.0\"\n#skeletize[x]\n", &[]);
+    press(&mut viewer, ":why<CR>i");
+    assert_eq!(
+        viewer.text(),
+        Some("#import \"@preview/alchemist:0.2.0\": *\n#skeletize[x]\n")
+    );
+    let _ = std::fs::remove_dir_all(directory);
+
+    // The module used as one: another import beside it.
+    let text = "#import \"@preview/alchemist:0.2.0\"\n#alchemist.double()\n#skeletize[x]\n";
+    let (mut viewer, directory) = with_alchemist(text, &[]);
+    press(&mut viewer, ":why<CR>i");
+    assert_eq!(
+        viewer.text(),
+        Some(
+            "#import \"@preview/alchemist:0.2.0\"\n#import \"@preview/alchemist:0.2.0\": skeletize\n#alchemist.double()\n#skeletize[x]\n"
+        )
+    );
+    compile(&mut viewer);
+    assert_eq!(viewer.problems, Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(directory);
+
+    // Names: one more.
+    let text = "#import \"@preview/alchemist:0.2.0\": double\n#double()\n#skeletize[x]\n";
+    let (mut viewer, directory) = with_alchemist(text, &[]);
+    press(&mut viewer, ":why<CR>i");
+    assert_eq!(
+        viewer.text(),
+        Some("#import \"@preview/alchemist:0.2.0\": double, skeletize\n#double()\n#skeletize[x]\n")
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_name_several_packages_have_or_none_is_not_imported() {
+    let other = "#let skeletize(body) = body\n";
+    let (mut viewer, directory) = with_alchemist("#skeletize[x]\n", &[("other", other)]);
+    let status = viewer.refused_status().unwrap();
+    assert!(!status.contains("has it"), "{status}");
+    press(&mut viewer, ":why<CR>i");
+    // `i` was not the panel's: nothing was imported.
+    assert!(!viewer.text().unwrap().contains("#import"));
+    let _ = std::fs::remove_dir_all(directory);
+
+    // A version that is not the newest is not looked into.
+    let (viewer, directory) = with_alchemist("#old()\n", &[]);
+    let status = viewer.refused_status().unwrap();
+    assert!(!status.contains("has it"), "{status}");
+    let _ = std::fs::remove_dir_all(directory);
+}

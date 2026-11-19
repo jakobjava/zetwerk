@@ -821,6 +821,30 @@ impl<'a> Target<'a> {
     }
 }
 
+/// The frame reached by `path` (child indices through nested groups)
+/// from `frame`, if every step of it is a group.
+#[must_use]
+pub fn frame_at<'a>(frame: &'a Frame, path: &[usize]) -> Option<&'a Frame> {
+    descend(frame, path)
+}
+
+/// A copy of `frame` in which the items `items` of the frame reached by
+/// `holder` stand `dx` further across. `None` where `holder` leads to
+/// nothing.
+#[must_use]
+pub fn moved_across(frame: &Frame, holder: &[usize], items: &[usize], dx: Abs) -> Option<Frame> {
+    let parent = descend(frame, holder)?;
+    let moved = map_items(parent, |at, pos, item| {
+        let pos = if items.contains(&at) {
+            Point::new(pos.x + dx, pos.y)
+        } else {
+            pos
+        };
+        (pos, item.clone())
+    });
+    Some(replace(frame, holder, moved))
+}
+
 /// Follows `path` (child indices through nested groups) down from `frame`.
 fn descend<'a>(frame: &'a Frame, path: &[usize]) -> Option<&'a Frame> {
     path.iter()
