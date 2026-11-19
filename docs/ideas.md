@@ -317,6 +317,89 @@ To do, about measuring and drawing:
 - **The frame rate on battery.** Check whether `power auto` lowers it, which
   would feel like jank whatever the compiles cost.
 
+## Faster creation (2026-11-19): what would make writing quicker
+
+Asked for after the feel was put right: ideas whose aim is that documents
+are made faster. Keyboard only, as ever.
+
+Typing mathematics:
+
+- **Shortcuts that expand as they are typed,** in equations only: `x1` →
+  `x_1`, `sr` → `^2`, `ff` → `frac(□, □)` with the cursor in the first box,
+  `->` → an arrow, `vec` behind a letter. One `u` takes an expansion back.
+  (Tab snippets exist; these need no Tab.)
+- **Enter in an equation by itself begins the next aligned line**, with the
+  line break and the `&` where the line above has one; Tab goes through the
+  cells of `mat(…)` and `cases(…)`.
+- **One's own snippets** (`[snippets]` in the settings, with places Tab goes
+  through) and Vim's `:iabbrev` (`iff` → "if and only if"); neither exists.
+
+References and sources:
+
+- **A DOI, an arXiv id or a URL pasted becomes a citation:** the entry is
+  fetched (only when asked, as packages are), added to the bibliography, and
+  `@key` is put at the cursor. (Sources pasted as BibTeX are added already.)
+- **Labels made for what is made,** from its caption or heading, and a key
+  for a reference to the last thing labelled.
+- **Citing from a Zotero library** as Better BibTeX exports it, searched
+  behind `@`.
+
+Structure:
+
+- **Outline first:** sections folded on the page, moved up and down by a
+  key, headings promoted and demoted (agents can move sections; the writer
+  cannot yet).
+- **Slides from headings:** a slide that runs over split in two by a key, a
+  slide's layout repeated for the next.
+
+Pictures and data:
+
+- **A screenshot as a figure:** `:shot` takes a region of the screen
+  (grim and slurp on Wayland), keeps it beside the document and puts in a
+  figure with its caption to type. (Pasted images become figures already.)
+- **Plots from a formula or a CSV,** written as cetz or lilaq code to edit.
+
+With agents (see the next section):
+
+- **Requests at the cursor.** This exists: `gq` or `:ask` leaves a question
+  for agents there, answered with a proposal (`ga` takes it), and `gQ` asks
+  for a review of what is selected. What it lacks is an agent that is there
+  to answer (below).
+- **Gaps to fill later:** `[?]` typed anywhere (a citation, a caption, a
+  number) is a gap; `:gaps` lists them, and agents can be asked to fill them
+  all, as proposals.
+
+## Working with agents (2026-11-19): more ways
+
+The program asks no model itself, and that stays: agents come in through
+MCP. What is lacking is mostly that an agent has to be running already,
+started from a terminal, and waiting; from the window alone a question
+waits for nobody.
+
+- **An agent on call.** `[ai] agent = "…"`: the writer's own agent command
+  (for Claude Code `claude -p … ` with zetwerk as its MCP server), started
+  by zetwerk when there is something for it (a question, a gap, a request
+  for review), for that, and gone when it is done. The status line says
+  what it is on; Ctrl-C stops it; nothing runs when nothing is asked.
+- **"This" means what the writer is looking at.** A tool that tells an
+  agent what the cursor is in (its paragraph, its equation, the selection),
+  what is on screen and what was changed lately, so that "tighten this" and
+  "is this step right?" need no quoting.
+- **A section drafted from notes.** Headings and bullet points written
+  quickly; `gQ` with "draft" makes each into paragraphs, as proposals to
+  take one by one, in the voice of the rest (`:brief` holds how).
+- **Figures from words.** "A commutative square A → B → D, A → C → D" or
+  "the plot of the data in results.csv" becomes cetz or fletcher code,
+  shown on the page as it would look before it is taken (`zp`).
+- **A look on save.** `[ai] review_on_save`: what changed since the last
+  save (the changes are known already) is given to the agent to read for
+  mistakes, as remarks and suggestions, not changes.
+- **Claims without a source.** The agent finds sentences that claim
+  something and cite nothing, and suggests sources for them, added to the
+  bibliography only when taken.
+- **Slides from a section.** A section of a paper made into a few slides
+  of a deck beside it, as a proposal of a new file.
+
 ## 1. Real-keyboard dogfooding
 
 Every bug the user found was one scripted tests could not see. Write two real
