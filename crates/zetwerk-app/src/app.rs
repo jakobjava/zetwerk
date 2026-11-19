@@ -68,6 +68,8 @@ pub struct Options {
     pub templates: Option<PathBuf>,
     /// Whether packages are fetched, and where they are kept.
     pub packages: viewer::packages::Settings,
+    /// The agent the window calls when something is asked of agents.
+    pub agent: viewer::on_call::Settings,
     /// What the user says of reviewing with agents.
     pub review: viewer::review::Settings,
     /// What the user has to say about giving talks.
@@ -401,6 +403,21 @@ impl ApplicationHandler<Event> for App {
 }
 
 impl Session {
+    /// What the viewer does aside wakes the window when it is done.
+    fn in_background(&mut self, proxy: &EventLoopProxy<Event>) {
+        let wake = |proxy: &EventLoopProxy<Event>| {
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(Event::Wake);
+            }
+        };
+        self.viewer.export_in_background(wake(proxy));
+        self.viewer.packages_in_background(wake(proxy));
+        self.viewer.agent_in_background(wake(proxy));
+        self.viewer.report_in_background(wake(proxy));
+        self.viewer.paste_in_background(wake(proxy));
+    }
+
     fn open(
         options: &Options,
         proxy: &EventLoopProxy<Event>,
@@ -510,10 +527,7 @@ impl Session {
             waiting: Vec::new(),
             ime: ime::Ime::default(),
         };
-        session.viewer.export_in_background(wake(proxy));
-        session.viewer.packages_in_background(wake(proxy));
-        session.viewer.report_in_background(wake(proxy));
-        session.viewer.paste_in_background(wake(proxy));
+        session.in_background(proxy);
         session.watch_dependencies();
         switch::welcome(&mut session.viewer, options, false);
         session.scheduler.request(Urgency::Now, Instant::now());
@@ -709,6 +723,9 @@ impl Session {
         self.viewer.export_progress();
         if self.viewer.packages_progress() {
             self.scheduler.request(Urgency::Now, Instant::now());
+        }
+        if self.viewer.agent_progress() {
+            self.window.request_redraw();
         }
         for tile in self.rasterizer.poll() {
             let (width, height) = (tile.pixmap.width(), tile.pixmap.height());

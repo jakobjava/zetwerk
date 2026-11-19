@@ -376,11 +376,15 @@ MCP. What is lacking is mostly that an agent has to be running already,
 started from a terminal, and waiting; from the window alone a question
 waits for nobody.
 
-- **An agent on call.** `[ai] agent = "…"`: the writer's own agent command
-  (for Claude Code `claude -p … ` with zetwerk as its MCP server), started
-  by zetwerk when there is something for it (a question, a gap, a request
-  for review), for that, and gone when it is done. The status line says
-  what it is on; Ctrl-C stops it; nothing runs when nothing is asked.
+- **An agent on call** (built 2026-11-19, viewer/on_call.rs). `[ai] agent
+  = "…"`: the writer's own agent command (for Claude Code `claude -p
+  --allowedTools mcp__zetwerk`), started by the window when a question is
+  asked (`gq`, `:ask`) or a review (`gQ`), given the task as its last
+  argument and this window's socket in `ZETWERK_SOCKET` (which `zetwerk
+  mcp` goes to first); one at a time, called once more for what was asked
+  meanwhile; "agent at work" in the status line; `:agent stop` ends it and
+  what it started, `:agent log` says where its output is; nothing runs
+  when nothing is asked. Gaps (`[?]`) are to call it too, once they exist.
 - **"This" means what the writer is looking at.** A tool that tells an
   agent what the cursor is in (its paragraph, its equation, the selection),
   what is on screen and what was changed lately, so that "tighten this" and

@@ -1093,5 +1093,7 @@ impl Viewer {
         self.notice(format!(
             "asked: agents see review request {id} ({what}); what they suggest comes back to it"
         ));
+        // The agent on call, if there is one, is called for it.
+        self.call_agent();
     }
 }

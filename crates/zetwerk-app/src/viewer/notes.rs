@@ -856,6 +856,10 @@ impl Viewer {
         } else {
             "noted; :notes lists the notes, ]n goes to the next"
         });
+        // The agent on call, if there is one, is called for it.
+        if ask {
+            self.call_agent();
+        }
     }
 
     /// The commands of reviewing. Returns whether `command` was one.

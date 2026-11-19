@@ -539,6 +539,11 @@ pub struct Ai {
     /// only where no window shows the document.
     #[serde(default)]
     pub save: Option<bool>,
+    /// The writer's own agent, which the window starts when something is
+    /// asked of agents (`gq`, `gQ`): a command for the shell, given the
+    /// task as its last argument.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -858,13 +863,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn what_changed_is_shown_unless_the_settings_say_otherwise() {
+    fn what_changed_is_known_and_its_bars_shown_when_asked() {
         let usual = parse("").unwrap_or_default().changes.options();
         assert_eq!(usual, zetwerk_app::viewer::ChangeOptions::default());
-        assert!(usual.bars && usual.git && usual.since == "saved");
+        // The bars are off unless asked for (since 2026-11-19).
+        assert!(!usual.bars && usual.git && usual.since == "saved");
         let own = parse(
             "[changes]
-bars = false
+bars = true
 since = \"HEAD\"
 git = false
 ",
@@ -872,7 +878,7 @@ git = false
         .unwrap_or_default()
         .changes
         .options();
-        assert!(!own.bars && !own.git && own.since == "HEAD");
+        assert!(own.bars && !own.git && own.since == "HEAD");
         // A key it does not know is left out, and said.
         assert!(
             parse(
@@ -887,11 +893,12 @@ colour = 1
     #[test]
     fn settings_are_optional_and_checked() {
         assert_eq!(parse(""), Ok(Config::default()));
-        let config = parse("[ai]\nedit_mode = \"propose\"\nsave = true\n");
+        let config = parse("[ai]\nedit_mode = \"propose\"\nsave = true\nagent = \"claude -p\"\n");
         let expected = Config {
             ai: Ai {
                 edit_mode: EditMode::Propose,
                 save: Some(true),
+                agent: Some("claude -p".to_owned()),
             },
             ..Config::default()
         };

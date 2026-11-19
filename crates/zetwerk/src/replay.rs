@@ -96,6 +96,8 @@ pub fn run(args: &Args, report: &Path) -> Result<(), String> {
             download: zetwerk_app::viewer::packages::Download::Never,
             ..Default::default()
         },
+        // Nor calls an agent.
+        agent: zetwerk_app::viewer::on_call::Settings::default(),
         review: config.review.settings(),
         talk: config.present.talk(),
         authors: config.authors.settings(),

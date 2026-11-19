@@ -1042,6 +1042,7 @@ mod tests {
             language: zetwerk_language::Settings::default(),
             templates: None,
             packages: zetwerk_app::viewer::packages::Settings::default(),
+            agent: zetwerk_app::viewer::on_call::Settings::default(),
             review: zetwerk_app::viewer::review::Settings::default(),
             talk: zetwerk_app::viewer::Talk::default(),
             report: zetwerk_app::viewer::report::Settings::default(),

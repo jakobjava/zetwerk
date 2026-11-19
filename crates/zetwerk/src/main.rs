@@ -232,6 +232,10 @@ fn options(
         templates: config::templates(),
         // `packages.download` comes with the other options of the table.
         packages: zetwerk_app::viewer::packages::Settings::default(),
+        agent: zetwerk_app::viewer::on_call::Settings {
+            command: config.ai.agent.clone(),
+            socket: zetwerk_mcp::socket_path(),
+        },
         review: config.review.settings(),
         talk: config.present.talk(),
         report: replay::report_settings(config),
@@ -454,6 +458,10 @@ fn mcp(args: &Args) -> Result<(), String> {
             .map_err(|err| format!("lost the connection to the zetwerk window: {err}"))
     };
     let path = match args.values.as_slice() {
+        // Called by a window for its agent on call: that window.
+        [] if let Some(socket) = std::env::var_os("ZETWERK_SOCKET").filter(|s| !s.is_empty()) => {
+            return proxy(PathBuf::from(socket));
+        }
         [] => {
             let socket = zetwerk_mcp::find_socket().map_err(|why| {
                 format!("{why}; `zetwerk mcp <file.typ>` works on a document without one")

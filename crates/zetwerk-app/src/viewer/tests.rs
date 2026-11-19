@@ -26,6 +26,7 @@ mod keyboard;
 mod latex;
 mod left_behind;
 mod names;
+mod on_call;
 mod packages;
 mod pages;
 mod panels;

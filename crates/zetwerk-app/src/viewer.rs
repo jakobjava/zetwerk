@@ -35,6 +35,7 @@ mod local;
 mod manager;
 mod margin;
 pub mod notes;
+pub mod on_call;
 pub(crate) mod options;
 pub mod packages;
 mod pages;
@@ -1019,6 +1020,9 @@ pub struct Viewer {
     packages: packages::Packages,
     /// What `i` in `:why` would import (see [`import_offer`]).
     import_offers: import_offer::ImportOffers,
+    /// The agent the window calls when something is asked of agents
+    /// (see [`on_call`]).
+    on_call: on_call::OnCall,
     /// What the pages put in whole keep between keys (see [`pages`]).
     pages: pages::Pages,
     /// The talk being given, and what is known of the deck (see [`present`]).
@@ -1154,6 +1158,7 @@ impl Viewer {
             waiting: waiting::Waiting::default(),
             packages: packages::Packages::default(),
             import_offers: import_offer::ImportOffers::default(),
+            on_call: on_call::OnCall::default(),
             pages: pages::Pages::default(),
             present: present::Present::default(),
             report: report::Recorder::default(),
@@ -1211,6 +1216,7 @@ impl Viewer {
         self.report_configured(&options.report, options.font_set);
         self.set_language(&options.language);
         self.set_packages(&options.packages);
+        self.set_agent_on_call(&options.agent);
         self.set_review(options.review);
         self.changes_configured(&options.changes);
         self.comfort_configured(options.comfort);
@@ -2335,6 +2341,7 @@ impl Viewer {
             || self.settings_command(command)
             || self.language_command(command)
             || self.notes_command(command)
+            || self.agent_command(command)
             || self.refused_command(command)
             || self.vim_command(command)
             || self.present_command(command)
@@ -3182,8 +3189,13 @@ impl Viewer {
             count => format!("{count} proposals ]p  "),
         };
         let notes = self.notes_status();
+        let agent = if self.agent_at_work().is_some() {
+            "agent at work  "
+        } else {
+            ""
+        };
         let right = format!(
-            "{proposals}{notes}{progress}{place}{}/{}  {percent:.0}%",
+            "{agent}{proposals}{notes}{progress}{place}{}/{}  {percent:.0}%",
             state.page, state.pages
         );
         let right = format!("{}{right}", self.search_count());

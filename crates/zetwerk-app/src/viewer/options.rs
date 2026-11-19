@@ -347,6 +347,16 @@ pub(crate) const TABLE: &[Opt] = &[
     .names(&["agents"])
     .on("propose"),
     opt(
+        "ai.agent",
+        Group::Agents,
+        Kind::Text,
+        Usual::Is(""),
+        "your agent, started when you ask agents something (gq, gQ): a \
+         command given the task, as claude -p --allowedTools mcp__zetwerk",
+        |v| Value::Text(v.agent_named().unwrap_or_default().to_owned()),
+        |v, value| v.set_agent_command(value.text().trim()),
+    ),
+    opt(
         "ai.save",
         Group::Agents,
         Kind::Maybe,

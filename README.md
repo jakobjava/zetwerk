@@ -194,6 +194,21 @@ agents' changes wait as suggestions on the page for you to accept or reject
 (`:review`). Who wrote what can be tinted on the page. Agents never fetch
 packages and never save, unless you allow it.
 
+**An agent on call.** You don't need to keep an agent running in a
+terminal. Name your own agent command in the settings, and zetwerk starts it
+when you ask agents something: a question at the cursor (`gq` or
+`:ask is this step right?`) or a review of what's selected (`gQ`). The agent
+gets the task, works in this window through its tools, and stops when it has
+answered. The status line says "agent at work" meanwhile. `:agent stop` ends
+it, and `:agent log` says where its output is. zetwerk itself still asks no
+model anything.
+
+```toml
+[ai]
+agent = "claude -p --allowedTools mcp__zetwerk"
+edit_mode = "propose"
+```
+
 ### Fast, light and safe
 
 - **No compile for every key.** Typing is a change to the source
