@@ -30,7 +30,7 @@ const FOREGROUND: &str = "#ebdbb2";
 const DIM: &str = "#928374";
 const ACCENT: &str = "#fabd2f";
 const CHOSEN: &str = "#504945";
-const FONT: &str = "DejaVu Sans Mono";
+use crate::chrome::FONT;
 const KEYS: &str = "j k walk · a accept · r reject (R why) · A rewrite · q answer · p wordings · \
                     z later · o open again · ! always · u undo · Tab states · s group · n narrow · \
                     t thread · b brief · w record · Esc";
@@ -684,7 +684,7 @@ impl Viewer {
         }
         format!(
             "#set page(width: auto, height: auto, margin: 8pt, fill: rgb(\"{BACKGROUND}\"))\n\
-             #set text(font: \"{FONT}\", size: 8.5pt, fill: rgb(\"{FOREGROUND}\"), ligatures: false, hyphenate: false)\n\
+             #set text(font: {FONT}, size: 8.5pt, fill: rgb(\"{FOREGROUND}\"), ligatures: false, hyphenate: false)\n\
              #stack(\n  spacing: 5pt,\n  text(fill: rgb(\"{ACCENT}\"), {}),\n{body}  line(length: 100%, stroke: 0.5pt + rgb(\"{DIM}\")),\n{lines}  block(width: {}em, text(fill: rgb(\"{DIM}\"), size: 7.5pt, {})),\n)",
             literal(&title),
             COLUMNS * 6 / 10,

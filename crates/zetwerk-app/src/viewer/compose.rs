@@ -126,7 +126,7 @@ impl Pending {
 }
 
 /// The source pane's font and colours, for what is composed there.
-const SOURCE_FONT: &str = "DejaVu Sans Mono";
+/// (The source pane is set in the window's font, see [`crate::chrome::UiFont`].)
 const SOURCE_SIZE: f64 = 10.5;
 const SOURCE_PAPER: &str = "#282828";
 const SOURCE_INK: &str = "#ebdbb2";
@@ -505,7 +505,7 @@ impl Viewer {
         }
         if let Some(at) = self.caret_at {
             let style = InPlace {
-                family: Some(SOURCE_FONT),
+                family: Some(crate::chrome::FONT.family()),
                 size: SOURCE_SIZE,
                 weight: 400,
                 italic: false,

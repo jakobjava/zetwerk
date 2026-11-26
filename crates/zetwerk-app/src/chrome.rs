@@ -32,7 +32,55 @@ const ACCENT: &str = "#fabd2f";
 const ALERT: &str = "#fb4934";
 const ADDED: &str = "#b8bb26";
 const CHOSEN: &str = "#504945";
-const FONT: &str = "DejaVu Sans Mono";
+/// The font of the window's own text, as a Typst value (see [`UiFont`]).
+pub const FONT: UiFont = UiFont;
+
+/// What every piece of chrome is set in: the system's monospaced font
+/// (what fontconfig gives for `monospace`), then the one Typst carries,
+/// for a system without fontconfig or a font Typst cannot read. Written
+/// into markup it is the list of both, `("Libertinus Mono", "DejaVu
+/// Sans Mono")`; it is looked up once, as the window starts.
+#[derive(Debug, Clone, Copy)]
+pub struct UiFont;
+
+/// The font Typst carries, for where the system's is not to be had.
+const CARRIED_FONT: &str = "DejaVu Sans Mono";
+
+impl UiFont {
+    /// The family of the system's monospaced font, or the carried one.
+    #[must_use]
+    pub fn family(self) -> &'static str {
+        static FAMILY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        FAMILY.get_or_init(|| system_monospace().unwrap_or_else(|| CARRIED_FONT.to_owned()))
+    }
+}
+
+impl std::fmt::Display for UiFont {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let family = self.family();
+        if family == CARRIED_FONT {
+            write!(f, "{}", string(family))
+        } else {
+            write!(f, "({}, {})", string(family), string(CARRIED_FONT))
+        }
+    }
+}
+
+/// The family fontconfig gives for `monospace`. Tests keep to the
+/// carried font, so that what they measure is the same on every machine.
+fn system_monospace() -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    let output = std::process::Command::new("fc-match")
+        .args(["--format=%{family[0]}", "monospace"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let family = String::from_utf8(output.stdout).ok()?;
+    let family = family.trim();
+    (output.status.success() && !family.is_empty()).then(|| family.to_owned())
+}
 
 /// How many chrome renders a result in Typst's cache may go unused before
 /// it is dropped. The cache is shared with the document (see
@@ -469,7 +517,7 @@ pub fn in_place_markup(source: &str, style: &InPlace, literal: bool) -> String {
 pub fn margin_number_markup(number: usize, size: f64) -> String {
     format!(
         "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
-         #set text(font: \"{FONT}\", size: {size}pt, fill: rgb(\"{DIM}\").transparentize(25%))\n\
+         #set text(font: {FONT}, size: {size}pt, fill: rgb(\"{DIM}\").transparentize(25%))\n\
          {number}"
     )
 }
@@ -504,7 +552,7 @@ pub fn status_markup(status: &Status, width: f64) -> String {
     // found by halving.
     format!(
         r#"#set page(width: {width}pt, height: {STATUS_HEIGHT}pt, margin: (x: 8pt, y: 0pt), fill: rgb("{BACKGROUND}"))
-#set text(font: "{FONT}", size: 10pt, fill: rgb("{FOREGROUND}"))
+#set text(font: {FONT}, size: 10pt, fill: rgb("{FOREGROUND}"))
 #set align(horizon)
 #let one-line(s) = layout(size => {{
   if measure(text(s)).width <= size.width {{ return text(s) }}
@@ -552,7 +600,7 @@ fn row_preamble(dim: bool) -> String {
     let color = if dim { DIM } else { FOREGROUND };
     format!(
         r#"#set page(width: auto, height: {ROW_HEIGHT}pt, margin: 0pt, fill: none)
-#set text(font: "{FONT}", size: {SOURCE_SIZE}pt, fill: rgb("{color}"), top-edge: "ascender", bottom-edge: "descender", ligatures: false, kerning: false, hyphenate: false)
+#set text(font: {FONT}, size: {SOURCE_SIZE}pt, fill: rgb("{color}"), top-edge: "ascender", bottom-edge: "descender", ligatures: false, kerning: false, hyphenate: false)
 #set align(horizon)
 "#
     )
@@ -572,7 +620,7 @@ pub fn panel_markup(rows: &[(&str, String)]) -> String {
     }
     format!(
         r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
-#set text(font: "{FONT}", size: 9pt, fill: rgb("{FOREGROUND}"))
+#set text(font: {FONT}, size: 9pt, fill: rgb("{FOREGROUND}"))
 #grid(
   columns: 2,
   column-gutter: 16pt,
@@ -597,7 +645,7 @@ pub fn proposal_markup(title: &str, hint: &str, old: &[String], new: &[String]) 
     }
     format!(
         r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
-#set text(font: "{FONT}", size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
+#set text(font: {FONT}, size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
 #stack(
   spacing: 6pt,
   text(fill: rgb("{ACCENT}"), {title}) + h(24pt) + text(fill: rgb("{DIM}"), {hint}),
@@ -638,7 +686,7 @@ pub fn list_markup(
     }
     format!(
         r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
-#set text(font: "{FONT}", size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
+#set text(font: {FONT}, size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
 #stack(
   spacing: 6pt,
 {lines})"#
@@ -665,7 +713,7 @@ pub fn text_markup(lines: &[String]) -> String {
     }
     format!(
         r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
-#set text(font: "{FONT}", size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
+#set text(font: {FONT}, size: 9pt, fill: rgb("{FOREGROUND}"), ligatures: false, hyphenate: false)
 #stack(
   spacing: 6pt,
 {stacked})"#

@@ -26,6 +26,7 @@
 //! where the text they lead to is refused as well. Nothing of this is in
 //! the text.
 
+use crate::chrome::FONT;
 use std::fmt::Write;
 use std::ops::Range;
 use std::sync::Arc;
@@ -173,7 +174,7 @@ fn panel_markup(title: &str, lines: &[String]) -> String {
     }
     format!(
         r##"#set page(width: auto, height: auto, margin: 10pt, fill: rgb("#282828"))
-#set text(font: "DejaVu Sans Mono", size: 11pt, fill: rgb("#ebdbb2"), ligatures: false, hyphenate: false)
+#set text(font: {FONT}, size: 11pt, fill: rgb("#ebdbb2"), ligatures: false, hyphenate: false)
 #stack(
   spacing: 7pt,
 {stacked})"##

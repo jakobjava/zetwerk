@@ -65,7 +65,7 @@ const BACKGROUND: &str = "#282828";
 const FOREGROUND: &str = "#ebdbb2";
 const DIM: &str = "#928374";
 const ACCENT: &str = "#fabd2f";
-const FONT: &str = "DejaVu Sans Mono";
+use crate::chrome::FONT;
 /// How wide the text of a panel is, in characters, and how many lines
 /// of a note or an answer it shows.
 const CARD_COLUMNS: usize = 64;
@@ -381,7 +381,7 @@ pub(super) fn wrap(text: &str, columns: usize, most: usize) -> Vec<String> {
 fn tag_markup(words: &str, stripe: &str) -> String {
     format!(
         "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
-         #set text(font: \"{FONT}\", size: {TAG_SIZE}pt, fill: rgb(\"#3c3836\"), hyphenate: false, \
+         #set text(font: {FONT}, size: {TAG_SIZE}pt, fill: rgb(\"#3c3836\"), hyphenate: false, \
          top-edge: \"ascender\", bottom-edge: \"descender\")\n\
          #box(fill: rgb(\"#fbf1c7\"), stroke: (left: 1.4pt + rgb(\"{stripe}\")), \
          inset: (x: 2.2pt, y: 1.2pt), radius: (right: 1.5pt), {})",
@@ -398,7 +398,7 @@ fn card_markup(title: &str, lines: &[String], hint: &str) -> String {
     }
     format!(
         "#set page(width: auto, height: auto, margin: 8pt, fill: rgb(\"{BACKGROUND}\"))\n\
-         #set text(font: \"{FONT}\", size: 9pt, fill: rgb(\"{FOREGROUND}\"), ligatures: false, hyphenate: false)\n\
+         #set text(font: {FONT}, size: 9pt, fill: rgb(\"{FOREGROUND}\"), ligatures: false, hyphenate: false)\n\
          #stack(\n  spacing: 6pt,\n  text(fill: rgb(\"{ACCENT}\"), {}),\n{stacked}  text(fill: rgb(\"{DIM}\"), {}),\n)",
         literal(title),
         literal(hint)

@@ -57,7 +57,7 @@ const TAG: &str = "#928374";
 const FRAME: [u8; 4] = [0x45, 0x85, 0x88, 0xd0];
 /// The size of the tag's text, in points of the page, and its font.
 const TAG_SIZE: f64 = 6.5;
-const FONT: &str = "DejaVu Sans Mono";
+use crate::chrome::FONT;
 
 /// What is kept between keys.
 #[derive(Default)]
@@ -327,7 +327,7 @@ pub(super) fn not_pages(
 fn tag_markup(called: &str, size: f64) -> String {
     format!(
         "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
-         #set text(font: \"{FONT}\", size: {size}pt, top-edge: \"ascender\", bottom-edge: \"descender\", fill: rgb(\"{TAG}\").transparentize(15%))\n\
+         #set text(font: {FONT}, size: {size}pt, top-edge: \"ascender\", bottom-edge: \"descender\", fill: rgb(\"{TAG}\").transparentize(15%))\n\
          {}",
         crate::figure_text::quoted(called)
             .strip_prefix('"')

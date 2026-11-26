@@ -40,7 +40,7 @@ const FOREGROUND: &str = "#ebdbb2";
 const DIM: &str = "#928374";
 const ACCENT: &str = "#fabd2f";
 const WARN: &str = "#fb4934";
-const FONT: &str = "DejaVu Sans Mono";
+use crate::chrome::FONT;
 /// How wide the slip is in characters, and how many lines of the reason
 /// it shows.
 const COLUMNS: usize = 62;
@@ -201,7 +201,7 @@ fn slip_markup(
     }
     format!(
         "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
-         #set text(font: \"{FONT}\", size: 8.5pt, fill: rgb(\"{FOREGROUND}\"), ligatures: false, hyphenate: false)\n\
+         #set text(font: {FONT}, size: 8.5pt, fill: rgb(\"{FOREGROUND}\"), ligatures: false, hyphenate: false)\n\
          #block(fill: rgb(\"{BACKGROUND}\"), stroke: (left: 2.5pt + rgb(\"{stripe}\")), inset: (left: 8pt, rest: 6pt), radius: (right: 2pt), \
          stack(\n  spacing: 5pt,\n  text(fill: rgb(\"{ACCENT}\"), {}),\n{stacked}  text(fill: rgb(\"{DIM}\"), {}),\n  text(fill: rgb(\"{DIM}\"), size: 7.5pt, {}),\n))",
         literal(title),

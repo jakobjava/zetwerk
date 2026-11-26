@@ -33,6 +33,7 @@
 //! Agents are told the same through MCP (`get_authorship`); they cannot
 //! change it: an agent's edit is an agent's, whatever it asks.
 
+use crate::chrome::FONT;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -487,7 +488,7 @@ impl Viewer {
             }
             let markup = format!(
                 "#set page(width: auto, height: auto, margin: 7pt, fill: rgb(\"#282828\"))\n\
-                 #set text(font: \"DejaVu Sans Mono\", size: 8pt, fill: rgb(\"#ebdbb2\"))\n\
+                 #set text(font: {FONT}, size: 8pt, fill: rgb(\"#ebdbb2\"))\n\
                  #stack(spacing: 4pt,\n{rows})"
             );
             let bottom = f64::from(self.window.1) - f64::from(self.status_height()) - margin;
@@ -658,7 +659,7 @@ impl Viewer {
         );
         format!(
             "#set page(width: 330pt, height: auto, margin: 8pt, fill: rgb(\"#282828\"))\n\
-             #set text(font: \"DejaVu Sans Mono\", size: 8pt, fill: rgb(\"#ebdbb2\"))\n\
+             #set text(font: {FONT}, size: 8pt, fill: rgb(\"#ebdbb2\"))\n\
              #stack(spacing: 7pt,\n{rows})"
         )
     }

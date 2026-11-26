@@ -28,6 +28,7 @@
 //! What is drawn is found once for a text, a cursor and the pages, and
 //! for each page only when that page is drawn; a frame only draws it.
 
+use crate::chrome::FONT;
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -132,7 +133,7 @@ impl Side {
 fn hint_markup(word: &str) -> String {
     format!(
         "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
-         #set text(font: \"DejaVu Sans Mono\", size: {HINT_SIZE}pt, \
+         #set text(font: {FONT}, size: {HINT_SIZE}pt, \
          fill: rgb(\"#83a598\").transparentize(45%), top-edge: \"ascender\", \
          bottom-edge: \"descender\")\n\
          {word}"

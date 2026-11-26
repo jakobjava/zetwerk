@@ -55,7 +55,7 @@ const NEIGHBOURS: usize = 8;
 /// How many image sizes are remembered before starting over.
 const SIZES_KEPT: usize = 4000;
 /// The font of the marks: the interface's.
-const FONT: &str = "DejaVu Sans Mono";
+use crate::chrome::FONT;
 
 /// The ground under text the compiler complains about, and the bar beside
 /// its line, for errors and for warnings. Colours are RGBA.
@@ -242,7 +242,7 @@ fn literal(text: &str) -> String {
 fn note_markup(pieces: &[(String, &str)]) -> String {
     let mut markup = format!(
         "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n\
-         #set text(font: \"{FONT}\", size: {SIZE}pt, top-edge: \"ascender\", \
+         #set text(font: {FONT}, size: {SIZE}pt, top-edge: \"ascender\", \
          bottom-edge: \"descender\")\n"
     );
     for (index, (text, colour)) in pieces.iter().enumerate() {

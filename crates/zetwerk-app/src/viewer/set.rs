@@ -34,6 +34,7 @@
 //! options is looked at before and after it. Commands that change an
 //! option for the time being only (`:slides`, `gs`) are left out.
 
+use crate::chrome::FONT;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -1528,7 +1529,7 @@ impl Viewer {
         let (about, help) = self.settings_detail(rows.get(panel.chosen), panel);
         format!(
             "#set page(width: auto, height: auto, margin: 9pt, fill: rgb(\"{GROUND}\"))\n\
-             #set text(font: \"DejaVu Sans Mono\", size: 9pt, fill: rgb(\"{TEXT}\"), \
+             #set text(font: {FONT}, size: 9pt, fill: rgb(\"{TEXT}\"), \
              ligatures: false, hyphenate: false)\n\
              #block(width: {WIDTH}pt)[\n\
              #text(fill: rgb(\"{ACCENT}\"), {title})\n\

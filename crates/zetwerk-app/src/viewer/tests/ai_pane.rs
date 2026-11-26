@@ -1,5 +1,5 @@
 //! The AI pane: beside the page, what is asked of agents, what came of
-//! it, and what they are doing; asked from its own line.
+//! it, and what they are doing; asked from the command line.
 
 use super::*;
 
@@ -16,7 +16,7 @@ fn pane_drawn(viewer: &mut Viewer) -> bool {
 }
 
 #[test]
-fn the_pane_stands_beside_the_page_and_asks_from_its_own_line() {
+fn the_pane_stands_beside_the_page_and_asks_from_the_command_line() {
     let (mut viewer, directory) = editing("A first paragraph, about averages.\n\nA second one.\n");
     press(&mut viewer, "gsgs");
     let whole = viewer.split().2;
@@ -30,8 +30,15 @@ fn the_pane_stands_beside_the_page_and_asks_from_its_own_line() {
         "the pane typesets with nothing asked"
     );
 
-    // A question, typed in its line, about the paragraph of the cursor.
-    press(&mut viewer, "iis this clear?<CR>");
+    // A question about the paragraph of the cursor: `i` puts `:ai ` on
+    // the command line, and the pane is in front again once it is asked.
+    press(&mut viewer, "i");
+    assert_eq!(
+        viewer.editor.as_ref().and_then(|e| e.command_line()),
+        Some("ai ")
+    );
+    press(&mut viewer, "is this clear?<CR>");
+    assert!(viewer.ai_focused(), "back to the pane");
     let asked: Vec<_> = viewer
         .notes()
         .iter()
@@ -43,12 +50,20 @@ fn the_pane_stands_beside_the_page_and_asks_from_its_own_line() {
     assert!(asked[0].1.contains("A first paragraph"), "{asked:?}");
     let threads = viewer.ai_threads();
     assert_eq!(threads.len(), 1);
-    assert!(threads[0].markup.contains("is this clear?"));
-    assert!(threads[0].markup.contains("waiting for an agent"));
+    assert!(threads[0].head.contains("is this clear?"));
+    assert!(threads[0].head.contains("waiting for an agent"));
+    assert!(threads[0].open);
+    assert!(
+        threads[0]
+            .body
+            .iter()
+            .any(|line| line.contains("A first paragraph"))
+    );
     assert!(pane_drawn(&mut viewer), "the pane typesets with a thread");
 
     // A review, asked as one.
     press(&mut viewer, "i/review clarity, keep it short<CR>");
+    assert!(viewer.ai_focused());
     assert_eq!(viewer.review_requests().len(), 1);
     assert_eq!(viewer.review_requests()[0].what, "clarity");
     assert_eq!(viewer.review_requests()[0].words, "keep it short");
@@ -62,6 +77,12 @@ fn the_pane_stands_beside_the_page_and_asks_from_its_own_line() {
     assert!(!viewer.ai_focused(), "j is the page's");
     press(&mut viewer, "<C-w>l");
     assert!(viewer.ai_focused());
+    // Left with Escape, the command line gives the pane back too.
+    press(&mut viewer, "ifoo<Esc>");
+    assert_eq!(viewer.notes().iter().filter(|n| n.to_agent).count(), 1);
+    press(&mut viewer, "zR");
+    assert!(pane_drawn(&mut viewer), "the pane typesets unfolded");
+    press(&mut viewer, "zMGgg");
     press(&mut viewer, "j<CR>");
     assert!(!viewer.ai_focused(), "Enter goes to the page");
     // Put away: the page has the window again.

@@ -13,19 +13,25 @@
 //! - **Threads,** below: each question asked and each review asked for,
 //!   newest and open first, with the text it is about, what was said in
 //!   it, and the suggestions made for it with what became of them.
-//! - **A line to ask in,** at its foot: what is typed there is asked of
-//!   agents about what is selected, or the paragraph of the cursor
-//!   (`:ask`); `/review clarity` (or any kind of review, with words after
-//!   a comma) asks for a review of it (`:review this`); `/cite`,
-//!   `/explain`, `/draft` and `/check maths` ask for those. Sending calls
-//!   the agent on call, if one is named (see `on_call`).
+//!
+//! It is a window of its own, as a split is in Vim: lines of text, one
+//! of them the cursor's line, threads folded to their first line but for
+//! the one the cursor is on, `~` past the last line, a status line of
+//! its own at its foot. Nothing is typed into the pane itself: `i` (or
+//! `o`) opens the command line with `:ai ` on it, and what is typed
+//! there is asked of agents about what is selected, or the paragraph of
+//! the cursor (`:ask`); `:ai /review clarity` (or any kind of review,
+//! with words after a comma) asks for a review of it (`:review this`);
+//! `/cite`, `/explain`, `/draft` and `/check maths` ask for those.
+//! Sending calls the agent on call, if one is named (see `on_call`).
 //!
 //! Keys, with the pane in front (`Ctrl-W l`, or as it opens; `Ctrl-W h`
-//! goes back to the page): `j` and `k` go through the threads, Enter
-//! goes to the text one is about, `a` accepts what waits in it and `r`
-//! rejects it (`:review accept note 3`, one undo step), `i` (or `/`)
-//! types in the line, Enter there sends and Escape leaves it; Escape
-//! goes back to the page, `q` puts the pane away.
+//! goes back to the page): `j` and `k` go through the threads, `gg` and
+//! `G` to the first and the last, Enter goes to the text one is about,
+//! `a` accepts what waits in it and `r` rejects it (`:review accept note
+//! 3`, one undo step), `zR` unfolds every thread and `zM` folds them
+//! again (`za` switches); Escape goes back to the page, `q` puts the
+//! pane away.
 //!
 //! The pane is typeset as the other panels are, and only when what it
 //! shows changes: nothing is asked of the machine while nothing happens.
@@ -49,36 +55,56 @@ const QUOTED: usize = 110;
 /// How many characters of a suggestion's old and new text are shown.
 const CHANGED: usize = 140;
 
-const FONT: &str = "DejaVu Sans Mono";
+use crate::chrome::FONT;
+const BACKGROUND: &str = "#282828";
 const TEXT: &str = "#ebdbb2";
 const FAINT: &str = "#928374";
 const ACCENT: &str = "#fabd2f";
 const GOOD: &str = "#b8bb26";
 const BAD: &str = "#fb4934";
-const EDGE: &str = "#504945";
+/// Vim's colours, as gruvbox has them: the cursor's line, the status
+/// line of the window in front and of one that is not, the line between
+/// windows, and the `~` past the last line.
+const CURSOR_LINE: &str = "#3c3836";
+const STATUS_IN_FRONT: &str = "#504945";
+const STATUS_BEHIND: &str = "#32302f";
+const SPLIT: &str = "#504945";
+const NON_TEXT: &str = "#665c54";
+/// The pane's margins, in points: the status line reaches across them.
+const LEFT: f64 = 10.0;
+const RIGHT: f64 = 8.0;
 
 /// What is kept of the pane.
 #[derive(Default)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each is a state of its own: shown, in front, typing, after Ctrl-W"
+    reason = "each is a state of its own: shown, in front, asking, all unfolded, after Ctrl-W"
 )]
 pub(super) struct AiPane {
     pub(super) shown: bool,
     /// Whether keys go to the pane, not the page.
     focused: bool,
-    /// Whether what is typed goes into the line to ask in.
-    typing: bool,
-    input: String,
+    /// The command line was opened from the pane (`i`): when it closes,
+    /// the pane is in front again, as Vim goes back to the window a
+    /// command was typed in.
+    asking: bool,
+    /// `zR`: every thread unfolded, not only the one the cursor is on.
+    unfolded: bool,
     chosen: usize,
+    /// The first key of two (`g`, `z`), waiting for the second.
+    pending: Option<char>,
     /// `Ctrl-W` was pressed: the next key says which pane.
     window_key: bool,
 }
 
 /// A thread of the pane: what was asked, and what came of it.
 pub(super) struct Thread {
-    /// Typst markup for it, without its frame.
-    pub(super) markup: String,
+    /// Markup for its first line: what it is, and its state at the right.
+    pub(super) head: String,
+    /// Markup for the lines under it, shown when it is unfolded.
+    pub(super) body: Vec<String>,
+    /// Whether it is still open: something to wait for, or to decide.
+    pub(super) open: bool,
     /// Where the text it is about is.
     at: Option<(FileId, usize)>,
     /// What `a` and `r` take: `note 3`, `request 2`, if anything waits.
@@ -190,6 +216,43 @@ pub(super) fn asked(typed: &str) -> Option<(String, String)> {
     }
 }
 
+/// One line of the pane, as markup: `content` across its width, on the
+/// cursor's line colour where it is that line.
+fn line(content: &str, cursor: bool) -> String {
+    if cursor {
+        format!(
+            "#block(width: 100%, fill: rgb(\"{CURSOR_LINE}\"), outset: (left: {LEFT}pt, right: {RIGHT}pt, y: 1.5pt))[{content}]\n"
+        )
+    } else {
+        format!("#block(width: 100%)[{content}]\n")
+    }
+}
+
+/// A line under a thread's first one, indented as Vim indents a fold's
+/// insides.
+fn under(content: &str) -> String {
+    format!("#block(width: 100%, inset: (left: 1.2em))[{content}]\n")
+}
+
+/// A heading of the pane: `title` and how many are under it.
+fn heading(title: &str, count: usize) -> String {
+    format!(
+        "#block(width: 100%, above: 0.9em)[#text(weight: \"bold\", fill: rgb(\"{ACCENT}\"), {}) {}]\n",
+        literal(title),
+        coloured(FAINT, &format!("({count})"))
+    )
+}
+
+/// The first line of a thread: its mark, what it is, and its state at
+/// the right.
+fn head(mark: &str, title: &str, state: &str) -> String {
+    format!(
+        "{} {} #h(1fr) {state}",
+        coloured(FAINT, mark),
+        coloured(TEXT, &cut(title, 60))
+    )
+}
+
 impl Viewer {
     /// How wide the pane is, in pixels: none where it is not shown.
     pub(super) fn ai_width(&self) -> u32 {
@@ -208,8 +271,14 @@ impl Viewer {
         self.ai.shown && self.ai.focused
     }
 
+    /// Whether the pane is the window in front: it has the keys, or the
+    /// command line was opened from it.
+    fn ai_in_front(&self) -> bool {
+        self.ai.shown && (self.ai.focused || self.ai.asking)
+    }
+
     /// `:ai`: shows the pane, in front, or puts it away; `:ai <words>`
-    /// asks them as the line would.
+    /// asks them.
     pub(super) fn ai_command(&mut self, command: &str) -> bool {
         let Some(rest) = command.strip_prefix("ai") else {
             return false;
@@ -225,7 +294,7 @@ impl Viewer {
         if rest.is_empty() {
             self.ai.shown = !self.ai.shown;
             self.ai.focused = self.ai.shown;
-            self.ai.typing = false;
+            self.ai.asking = false;
             self.arrange();
             if self.ai.shown {
                 self.notice(
@@ -235,11 +304,14 @@ impl Viewer {
             }
         } else {
             self.ai_send(rest);
+            if std::mem::take(&mut self.ai.asking) {
+                self.ai.focused = self.ai.shown;
+            }
         }
         true
     }
 
-    /// Sends `typed` as the line would: a question or a request.
+    /// Sends `typed` as a question or a request.
     fn ai_send(&mut self, typed: &str) {
         let Some((command, _)) = asked(typed) else {
             return;
@@ -254,6 +326,16 @@ impl Viewer {
         self.ai.chosen = 0;
     }
 
+    /// `i` in the pane: the command line, with `:ai ` on it.
+    fn ai_ask(&mut self) {
+        self.ai.focused = false;
+        self.plain_key(KeyPress::plain(Key::Char(':')));
+        self.ai.asking = true;
+        for c in "ai ".chars() {
+            self.plain_key(KeyPress::plain(Key::Char(c)));
+        }
+    }
+
     /// A key, where the pane has it: `Ctrl-W` and what follows it, and
     /// every key while the pane is in front. Returns whether it was the
     /// pane's.
@@ -261,6 +343,16 @@ impl Viewer {
         if !self.ai.shown || self.picker.is_some() {
             self.ai.window_key = false;
             return false;
+        }
+        if self.ai.asking
+            && self
+                .editor
+                .as_ref()
+                .is_none_or(|editor| editor.command_line().is_none())
+        {
+            // The command line opened from the pane was left: back to it.
+            self.ai.asking = false;
+            self.ai.focused = true;
         }
         let normal = self
             .editor
@@ -271,49 +363,43 @@ impl Viewer {
                 Key::Char('l' | 'w') | Key::Right => self.ai.focused = true,
                 Key::Char('h') | Key::Left => self.ai.focused = false,
                 Key::Char('W') => self.ai.focused = !self.ai.focused,
-                Key::Char('c' | 'q') => {
-                    self.ai.shown = false;
-                    self.ai.focused = false;
-                    self.arrange();
-                }
+                Key::Char('c' | 'q') => self.ai_close(),
                 _ => {}
             }
             return true;
         }
         let window_key = press.ctrl && press.key == Key::Char('w');
-        if window_key && (normal || self.ai.focused) && !self.ai.typing {
+        if window_key && (normal || self.ai.focused) {
             self.ai.window_key = true;
             return true;
         }
         if !self.ai.focused {
             return false;
         }
-        if self.ai.typing {
-            self.ai_typing_key(press);
+        let threads = self.ai_threads().len();
+        let last = threads.saturating_sub(1);
+        if let Some(first) = self.ai.pending.take() {
+            match (first, press.key) {
+                ('g', Key::Char('g')) => self.ai.chosen = 0,
+                ('g', Key::Char('I')) => self.ai_close(),
+                ('z', Key::Char('R' | 'o' | 'O')) => self.ai.unfolded = true,
+                ('z', Key::Char('M' | 'c' | 'C')) => self.ai.unfolded = false,
+                ('z', Key::Char('a' | 'A')) => self.ai.unfolded = !self.ai.unfolded,
+                _ => {}
+            }
             return true;
         }
-        let threads = self.ai_threads().len();
         match press.key {
-            Key::Char('j') | Key::Down => {
-                self.ai.chosen = (self.ai.chosen + 1).min(threads.saturating_sub(1));
-            }
+            Key::Char('j') | Key::Down => self.ai.chosen = (self.ai.chosen + 1).min(last),
             Key::Char('k') | Key::Up => self.ai.chosen = self.ai.chosen.saturating_sub(1),
-            Key::Char('g') => self.ai.chosen = 0,
-            Key::Char('G') => self.ai.chosen = threads.saturating_sub(1),
-            Key::Char('i') => self.ai.typing = true,
-            Key::Char('/') => {
-                self.ai.typing = true;
-                "/".clone_into(&mut self.ai.input);
-            }
+            Key::Char(c @ ('g' | 'z')) if !press.ctrl => self.ai.pending = Some(c),
+            Key::Char('G') => self.ai.chosen = last,
+            Key::Char('i' | 'o') if !press.ctrl => self.ai_ask(),
             Key::Char('a') => self.ai_decide(true),
             Key::Char('r') => self.ai_decide(false),
             Key::Enter => self.ai_go(),
             Key::Escape => self.ai.focused = false,
-            Key::Char('q') => {
-                self.ai.shown = false;
-                self.ai.focused = false;
-                self.arrange();
-            }
+            Key::Char('q') => self.ai_close(),
             Key::Char(':') => {
                 // The command line is the page's.
                 self.ai.focused = false;
@@ -324,33 +410,12 @@ impl Viewer {
         true
     }
 
-    /// A key while typing in the line to ask in.
-    fn ai_typing_key(&mut self, press: KeyPress) {
-        match press.key {
-            Key::Escape => self.ai.typing = false,
-            Key::Enter => {
-                let typed = std::mem::take(&mut self.ai.input);
-                self.ai.typing = false;
-                self.ai_send(&typed);
-            }
-            Key::Backspace if press.ctrl => {
-                let kept = self.ai.input.trim_end().rfind(' ').map_or(0, |at| at + 1);
-                self.ai.input.truncate(kept);
-            }
-            Key::Backspace => {
-                self.ai.input.pop();
-            }
-            Key::Char('w' | 'u') if press.ctrl => {
-                let kept = if press.key == Key::Char('u') {
-                    0
-                } else {
-                    self.ai.input.trim_end().rfind(' ').map_or(0, |at| at + 1)
-                };
-                self.ai.input.truncate(kept);
-            }
-            Key::Char(c) if !press.ctrl && !press.alt => self.ai.input.push(c),
-            _ => {}
-        }
+    /// Puts the pane away: the page has the window again.
+    fn ai_close(&mut self) {
+        self.ai.shown = false;
+        self.ai.focused = false;
+        self.ai.asking = false;
+        self.arrange();
     }
 
     /// Enter on a thread: the cursor to the text it is about, the page in
@@ -390,7 +455,7 @@ impl Viewer {
         };
         let file = editor.file();
         let suggestions = self.suggestions();
-        let mut threads: Vec<(bool, u64, Thread)> = Vec::new();
+        let mut threads: Vec<(u64, Thread)> = Vec::new();
         for note in self.notes() {
             if !note.to_agent || note.by != Author::User {
                 continue;
@@ -403,62 +468,53 @@ impl Viewer {
                 .iter()
                 .filter(|s| s.note == Some(note.id))
                 .collect();
-            let open = made.iter().any(|s| s.state == State::Open);
-            let mut markup = String::new();
-            let state = if note.resolved {
+            let waits = made.iter().any(|s| s.state == State::Open);
+            let state = if waits {
+                coloured(ACCENT, "waits for you")
+            } else if note.resolved {
                 coloured(FAINT, "resolved")
             } else if answered {
                 coloured(GOOD, "answered")
             } else {
                 coloured(ACCENT, "waiting for an agent")
             };
-            let _ = writeln!(
-                markup,
-                "{} {} {state} \\",
-                coloured(ACCENT, "You asked"),
-                coloured(FAINT, "·")
-            );
-            let _ = writeln!(
-                markup,
-                "{} \\",
-                coloured(FAINT, &format!("“{}”", cut(&readable(&note.quote), QUOTED)))
-            );
-            let _ = writeln!(markup, "{} \\", coloured(TEXT, &note.text));
+            let mut body = Vec::new();
+            if note.text.chars().count() > 60 {
+                body.push(coloured(TEXT, &note.text));
+            }
+            push_quote(&mut body, &note.quote);
             for (by, said) in &note.answers {
-                let who = if *by == Author::Agent {
-                    "Agent:"
+                let (who, colour) = if *by == Author::Agent {
+                    ("agent ", GOOD)
                 } else {
-                    "You:"
+                    ("you   ", ACCENT)
                 };
-                let colour = if *by == Author::Agent { GOOD } else { ACCENT };
-                let _ = writeln!(
-                    markup,
-                    "{} {} \\",
+                body.push(format!(
+                    "{} {}",
                     coloured(colour, who),
                     coloured(TEXT, said)
-                );
+                ));
             }
-            push_suggestions(&mut markup, &made);
-            let waiting = open.then(|| format!("note {}", note.id));
-            let open_thread = !note.resolved && (!answered || open);
+            push_suggestions(&mut body, &made);
             threads.push((
-                open_thread,
                 note.id,
                 Thread {
-                    markup,
+                    head: head("?", &note.text, &state),
+                    body,
+                    open: !note.resolved && (!answered || waits),
                     at: (note.file == file).then_some((note.file, note.range.start)),
-                    waiting,
+                    waiting: waits.then(|| format!("note {}", note.id)),
                 },
             ));
         }
         threads.extend(self.request_threads(file));
-        threads.sort_by_key(|(open, id, _)| (std::cmp::Reverse(*open), std::cmp::Reverse(*id)));
-        threads.into_iter().map(|(_, _, thread)| thread).collect()
+        threads
+            .sort_by_key(|(id, thread)| (std::cmp::Reverse(thread.open), std::cmp::Reverse(*id)));
+        threads.into_iter().map(|(_, thread)| thread).collect()
     }
 
-    /// The threads of the review requests: whether each is open, its
-    /// number, and it.
-    fn request_threads(&self, file: FileId) -> Vec<(bool, u64, Thread)> {
+    /// The threads of the review requests, with their numbers.
+    fn request_threads(&self, file: FileId) -> Vec<(u64, Thread)> {
         let suggestions = self.suggestions();
         let mut threads = Vec::new();
         for request in self.review_requests() {
@@ -466,9 +522,10 @@ impl Viewer {
                 .iter()
                 .filter(|s| s.request == Some(request.id))
                 .collect();
-            let open = made.iter().any(|s| s.state == State::Open);
-            let mut markup = String::new();
-            let state = if request.done {
+            let waits = made.iter().any(|s| s.state == State::Open);
+            let state = if waits {
+                coloured(ACCENT, "waits for you")
+            } else if request.done {
                 coloured(GOOD, "done")
             } else {
                 coloured(ACCENT, "waiting for an agent")
@@ -478,135 +535,148 @@ impl Viewer {
             } else {
                 format!(" of {}", request.section)
             };
-            let _ = writeln!(
-                markup,
-                "{} {} {state} \\",
-                coloured(
-                    ACCENT,
-                    &format!("You asked for a review: {}{section}", request.what)
-                ),
-                coloured(FAINT, "·")
-            );
+            let mut body = Vec::new();
             if !request.words.is_empty() {
-                let _ = writeln!(markup, "{} \\", coloured(TEXT, &request.words));
+                body.push(coloured(TEXT, &request.words));
             }
-            let _ = writeln!(
-                markup,
-                "{} \\",
-                coloured(
-                    FAINT,
-                    &format!("“{}”", cut(&readable(&request.quote), QUOTED))
-                )
-            );
-            push_suggestions(&mut markup, &made);
+            push_quote(&mut body, &request.quote);
+            push_suggestions(&mut body, &made);
             threads.push((
-                !request.done || open,
                 request.id,
                 Thread {
-                    markup,
+                    head: head("R", &format!("review: {}{section}", request.what), &state),
+                    body,
+                    open: !request.done || waits,
                     at: (request.file == file).then_some((request.file, request.range.start)),
-                    waiting: open.then(|| format!("request {}", request.id)),
+                    waiting: waits.then(|| format!("request {}", request.id)),
                 },
             ));
         }
         threads
     }
 
-    /// The markup of the pane, `width` by `height` points.
-    fn ai_markup(&self, width: f64, height: f64) -> String {
-        let mut agents = String::new();
+    /// The lines on what agents are doing, under their heading.
+    fn ai_agents_markup(&self) -> String {
         let shown = self.agents_shown();
+        let mut agents = heading("Agents", shown.len());
         if shown.is_empty() {
             let waiting = if self.agent_at_work().is_some() {
                 "the agent the window called is starting"
             } else if self.agent_on_call() {
-                "no agent at work: ask below, and the agent on call is called"
+                "none at work; asking calls the agent on call"
             } else {
-                "no agent at work; [ai] agent in the settings lets the window call one"
+                "none at work; [ai] agent in the settings lets the window call one"
             };
-            let _ = writeln!(agents, "{} \\", coloured(FAINT, waiting));
+            agents.push_str(&line(&coloured(FAINT, waiting), false));
         }
         for agent in &shown {
-            let mark = if agent.gone { "○" } else { "●" };
-            let colour = if agent.gone { FAINT } else { GOOD };
-            let _ = writeln!(
-                agents,
-                "{} {} \\",
-                coloured(colour, &format!("{mark} {}", agent.name)),
-                coloured(FAINT, &agent.state)
-            );
+            let (mark, colour) = if agent.gone {
+                ("○", FAINT)
+            } else {
+                ("●", GOOD)
+            };
+            agents.push_str(&line(
+                &format!(
+                    "{} {} #h(1fr) {}",
+                    coloured(colour, mark),
+                    coloured(TEXT, &agent.name),
+                    coloured(FAINT, &agent.state)
+                ),
+                false,
+            ));
             if let Some((message, done, total)) = &agent.said {
-                let _ = writeln!(
-                    agents,
-                    "{} \\",
-                    coloured(TEXT, &format!("  “{}”", cut(message, 80)))
-                );
-                if let (Some(done), Some(total)) = (done, total) {
-                    let _ = writeln!(
-                        agents,
-                        "{} \\",
-                        coloured(ACCENT, &format!("  {}", bar(*done, *total)))
-                    );
-                }
+                let progress = match (done, total) {
+                    (Some(done), Some(total)) => {
+                        format!(" #h(1fr) {}", coloured(ACCENT, &bar(*done, *total)))
+                    }
+                    _ => String::new(),
+                };
+                agents.push_str(&under(&format!(
+                    "{}{progress}",
+                    coloured(TEXT, &cut(message, 80))
+                )));
             }
             for step in &agent.steps {
-                let _ = writeln!(agents, "{} \\", coloured(FAINT, &format!("  {step}")));
+                agents.push_str(&under(&coloured(FAINT, step)));
             }
         }
-        let paused = if self.agents_paused() {
-            format!(
-                "{} \\\n",
-                coloured(BAD, "agents are paused (:agents resume)")
-            )
-        } else {
-            String::new()
-        };
-        let threads = self.ai_threads();
-        let top = self.ai.chosen.saturating_sub(ABOVE);
-        let mut cards = String::new();
-        if threads.is_empty() {
-            cards.push_str(&coloured(
-                FAINT,
-                "nothing asked yet: i, then a question about the paragraph here or what is selected",
+        if self.agents_paused() {
+            agents.push_str(&line(
+                &coloured(BAD, "paused: they change nothing until :agents resume"),
+                false,
             ));
         }
-        for (index, thread) in threads.iter().enumerate().skip(top) {
-            let chosen = index == self.ai.chosen && self.ai_focused() && !self.ai.typing;
-            let stroke = if chosen {
-                format!("1pt + rgb(\"{ACCENT}\")")
-            } else {
-                format!("0.5pt + rgb(\"{EDGE}\")")
-            };
-            let _ = writeln!(
-                cards,
-                "#block(width: 100%, inset: 6pt, radius: 3pt, stroke: {stroke}, below: 6pt, breakable: false)[{}]",
-                thread.markup
-            );
+        agents
+    }
+
+    /// The markup of the pane, `width` by `height` points.
+    fn ai_markup(&self, width: f64, height: f64) -> String {
+        let threads = self.ai_threads();
+        let in_front = self.ai_in_front();
+        let chosen = self.ai.chosen.min(threads.len().saturating_sub(1));
+        let open = threads.iter().filter(|thread| thread.open).count();
+        let waits = threads.iter().filter(|t| t.waiting.is_some()).count();
+        let top = chosen.saturating_sub(ABOVE);
+        let mut list = String::new();
+        if threads.is_empty() {
+            list.push_str(&heading("Threads", 0));
+            list.push_str(&line(
+                &coloured(
+                    FAINT,
+                    "nothing asked yet: i asks about the paragraph here or what is selected",
+                ),
+                false,
+            ));
         }
-        let line = if self.ai.typing {
-            format!(
-                "{}{}",
-                coloured(TEXT, &format!("> {}", self.ai.input)),
-                coloured(ACCENT, "▌")
-            )
-        } else if self.ai_focused() {
-            coloured(
-                FAINT,
-                "i ask · / review, cite, explain, draft · j k Enter a r · Ctrl-W h page",
-            )
+        for (index, thread) in threads.iter().enumerate() {
+            if index < top {
+                continue;
+            }
+            if index == 0 && thread.open {
+                list.push_str(&heading("Open", open));
+            }
+            if index == open {
+                list.push_str(&heading("Done", threads.len() - open));
+            }
+            let cursor = index == chosen;
+            list.push_str(&line(&thread.head, cursor && in_front));
+            if cursor || self.ai.unfolded {
+                for body in &thread.body {
+                    list.push_str(&under(body));
+                }
+            }
+        }
+        let (status_fill, status_ink) = if in_front {
+            (STATUS_IN_FRONT, TEXT)
         } else {
-            coloured(FAINT, "Ctrl-W l to the pane · gI hides it")
+            (STATUS_BEHIND, FAINT)
         };
-        let frame = if self.ai_focused() { ACCENT } else { EDGE };
+        let mut said = format!("{open} open");
+        if waits > 0 {
+            let _ = write!(said, " · {waits} wait for you");
+        }
+        if self.agents_paused() {
+            said.push_str(" · agents paused");
+        }
+        let place = if threads.is_empty() {
+            String::new()
+        } else {
+            format!("{}/{}", chosen + 1, threads.len())
+        };
+        let agents = self.ai_agents_markup();
         format!(
-            r##"#set page(width: {width}pt, height: {height}pt, margin: (x: 9pt, top: 8pt, bottom: 34pt), fill: rgb("#1d2021"),
-  footer: block(width: 100%, inset: 6pt, radius: 3pt, stroke: 0.5pt + rgb("{frame}"), fill: rgb("#282828"))[{line}])
-#set text(font: "{FONT}", size: 9pt, fill: rgb("{TEXT}"), hyphenate: false)
-#set par(leading: 0.5em, justify: false)
-{agents}{paused}#line(length: 100%, stroke: 0.5pt + rgb("{EDGE}"))
-#v(2pt)
-{cards}
-"##
+            r#"#set page(width: {width}pt, height: {height}pt, margin: (left: {LEFT}pt, right: {RIGHT}pt, top: 4pt, bottom: 17pt), fill: rgb("{BACKGROUND}"),
+  background: place(left, rect(width: 1pt, height: 100%, fill: rgb("{SPLIT}"))),
+  footer-descent: 3pt,
+  footer: block(width: 100%, outset: (left: {LEFT}pt - 1pt, right: {RIGHT}pt), inset: (y: 3pt), fill: rgb("{status_fill}"),
+    text(fill: rgb("{status_ink}"))[#text(weight: "bold", "ai") #h(8pt) #{said} #h(1fr) #{place}]))
+#set text(font: {FONT}, size: 9pt, fill: rgb("{TEXT}"), ligatures: false, hyphenate: false)
+#set par(leading: 0.45em, justify: false, spacing: 0.45em)
+#set block(spacing: 0.45em)
+{agents}{list}#block(width: 100%, height: 1fr, clip: true, above: 0.45em, text(fill: rgb("{NON_TEXT}"), for _ in range(160) {{ "~"; linebreak() }}))
+"#,
+            said = literal(&said),
+            place = literal(&place),
         )
     }
 
@@ -637,12 +707,20 @@ impl Viewer {
     }
 }
 
-/// The suggestions `made` for a thread, as lines of `markup`: each with
-/// its kind, what became of it, and its change.
-fn push_suggestions(markup: &mut String, made: &[&super::review::Suggestion]) {
+/// The text a thread is about, as it reads, if it reads as anything.
+fn push_quote(lines: &mut Vec<String>, quote: &str) {
+    let quote = cut(&readable(quote), QUOTED);
+    if !quote.is_empty() {
+        lines.push(coloured(FAINT, &format!("“{quote}”")));
+    }
+}
+
+/// The suggestions `made` for a thread, as lines under it: each with its
+/// kind, what became of it, and its change.
+fn push_suggestions(lines: &mut Vec<String>, made: &[&super::review::Suggestion]) {
     for suggestion in made {
         let (word, colour) = match suggestion.state {
-            State::Open => ("waits: a accepts, r rejects", ACCENT),
+            State::Open => ("a accepts, r rejects", ACCENT),
             State::Later => ("put aside", FAINT),
             State::Accepted => ("accepted", GOOD),
             State::Rewritten => ("rewritten by you", GOOD),
@@ -650,42 +728,39 @@ fn push_suggestions(markup: &mut String, made: &[&super::review::Suggestion]) {
             State::Withdrawn => ("withdrawn", FAINT),
         };
         let category = if suggestion.category.is_empty() {
-            "suggestion".to_owned()
+            "suggestion"
         } else {
-            suggestion.category.clone()
+            &suggestion.category
         };
-        let _ = writeln!(
-            markup,
-            "{} {} \\",
-            coloured(TEXT, &format!("▸ {category}")),
+        lines.push(format!(
+            "{} {} #h(1fr) {}",
+            coloured(FAINT, "▸"),
+            coloured(TEXT, category),
             coloured(colour, word)
-        );
+        ));
         if !suggestion.reason.is_empty() {
-            let _ = writeln!(
-                markup,
-                "{} \\",
-                coloured(FAINT, &format!("  {}", cut(&suggestion.reason, 120)))
-            );
+            lines.push(format!(
+                "#h(1.2em){}",
+                coloured(FAINT, &cut(&suggestion.reason, 120))
+            ));
         }
         if !suggestion.quote.is_empty() {
-            let _ = writeln!(
-                markup,
-                "{} \\",
+            lines.push(format!(
+                "#h(1.2em){}",
                 coloured(
                     BAD,
-                    &format!("  − {}", cut(&readable(&suggestion.quote), CHANGED))
+                    &format!("- {}", cut(&readable(&suggestion.quote), CHANGED))
                 )
-            );
+            ));
         }
         if !suggestion.new.is_empty() {
-            let _ = writeln!(
-                markup,
-                "{} \\",
+            lines.push(format!(
+                "#h(1.2em){}",
                 coloured(
                     GOOD,
-                    &format!("  + {}", cut(&readable(&suggestion.new), CHANGED))
+                    &format!("+ {}", cut(&readable(&suggestion.new), CHANGED))
                 )
-            );
+            ));
         }
     }
 }

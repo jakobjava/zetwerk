@@ -36,7 +36,7 @@ const BAR: f64 = 40.0;
 /// How much of the presenter's view the slide shown takes across.
 const CURRENT_SHARE: f64 = 0.62;
 /// The text of the presenter's view.
-const FONT: &str = "DejaVu Sans Mono";
+use crate::chrome::FONT;
 const TEXT: &str = "#ebdbb2";
 const DIM: &str = "#928374";
 const ACCENT: &str = "#fabd2f";
@@ -300,7 +300,7 @@ impl Viewer {
         let said = format!("{}  ·  {}", time_of_day(), minutes(show.began.elapsed()));
         let markup = format!(
             "#set page(width: auto, height: auto, margin: (x: 7pt, y: 4pt), fill: rgb(\"#000000a0\"))\n\
-             #set text(font: \"{FONT}\", size: 14pt, fill: rgb(\"{TEXT}\"))\n#{}",
+             #set text(font: {FONT}, size: 14pt, fill: rgb(\"{TEXT}\"))\n#{}",
             literal(&said)
         );
         let margin = 10.0 * self.scale;
@@ -350,7 +350,7 @@ impl Viewer {
         };
         let label = format!(
             "#set page(width: auto, height: auto, margin: (x: 0pt, y: 2pt), fill: none)\n\
-             #set text(font: \"{FONT}\", size: 12pt, fill: rgb(\"{DIM}\"))\n#{}",
+             #set text(font: {FONT}, size: 12pt, fill: rgb(\"{DIM}\"))\n#{}",
             literal(&next_said)
         );
         let (_, label_height) = self.talk_panel(scene, has, &label, |_| (right, pad));
@@ -369,7 +369,7 @@ impl Viewer {
         let notes = deck.notes_of(page);
         let mut markup = format!(
             "#set page(width: {:.1}pt, height: {:.1}pt, margin: 0pt, fill: none)\n\
-             #set text(font: \"{FONT}\", size: 15pt, fill: rgb(\"{TEXT}\"), hyphenate: false)\n\
+             #set text(font: {FONT}, size: 15pt, fill: rgb(\"{TEXT}\"), hyphenate: false)\n\
              #set par(spacing: 0.9em)\n",
             column / s,
             notes_height / s
@@ -389,7 +389,7 @@ impl Viewer {
         let foot = self.presenter_foot(deck, pages);
         let markup = format!(
             "#set page(width: {:.1}pt, height: {:.1}pt, margin: (x: {PAD}pt), fill: none)\n\
-             #set text(font: \"{FONT}\", size: 14pt, fill: rgb(\"{TEXT}\"))\n\
+             #set text(font: {FONT}, size: 14pt, fill: rgb(\"{TEXT}\"))\n\
              #set align(horizon)\n{foot}",
             width / s,
             bar / s

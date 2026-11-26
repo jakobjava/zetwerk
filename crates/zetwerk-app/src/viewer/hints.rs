@@ -51,7 +51,7 @@ const GROUND: &str = "#282828";
 const DIM: &str = "#928374";
 const BRIGHT: &str = "#ebdbb2";
 /// Its font, and the size of the status line's text.
-const FONT: &str = "DejaVu Sans Mono";
+use crate::chrome::FONT;
 const STATUS_SIZE: f64 = 10.0;
 /// The size the source pane's font is measured at (see
 /// `Chrome::cell_width`).
@@ -308,7 +308,7 @@ fn following_markup(typed: &str, rows: &[(String, String)], columns: usize) -> S
     format!(
         "#set page(width: auto, height: auto, margin: (x: 8pt, y: 6pt), \
          fill: rgb(\"{GROUND}\").transparentize(12%))\n\
-         #set text(font: \"{FONT}\", size: 9pt, fill: rgb(\"{DIM}\"), ligatures: false, \
+         #set text(font: {FONT}, size: 9pt, fill: rgb(\"{DIM}\"), ligatures: false, \
          hyphenate: false)\n\
          #grid(\n  columns: {count},\n  column-gutter: ({gutters},),\n  row-gutter: 5pt,\n  \
          grid.cell(colspan: {count}, text(fill: rgb(\"{BRIGHT}\").transparentize(20%), {title})),\n\
@@ -339,7 +339,7 @@ fn ghost_markup(rest: &str, family: Option<&str>, size: f64, in_equation: bool) 
 fn command_ghost_markup(rest: &str) -> String {
     format!(
         "#set page(width: auto, height: {STATUS_HEIGHT}pt, margin: 0pt, fill: none)\n\
-         #set text(font: \"{FONT}\", size: {STATUS_SIZE}pt, fill: rgb(\"{DIM}\"))\n\
+         #set text(font: {FONT}, size: {STATUS_SIZE}pt, fill: rgb(\"{DIM}\"))\n\
          #set align(horizon)\n#{}",
         string(rest)
     )
