@@ -122,3 +122,32 @@ fn the_pane_quotes_the_text_as_it_reads_not_its_source() {
     );
     assert_eq!(readable("= Introduction\n\nWords."), "Introduction Words.");
 }
+
+#[test]
+fn a_question_can_be_asked_where_there_is_no_text_yet() {
+    // A new document: an agent is asked to start it.
+    let (mut viewer, directory) = editing("");
+    press(
+        &mut viewer,
+        "gIistart a short paper on the Euler-Lagrange equation<CR>",
+    );
+    let asked: Vec<_> = viewer
+        .notes()
+        .iter()
+        .filter(|n| n.to_agent)
+        .cloned()
+        .collect();
+    assert_eq!(asked.len(), 1, "asked on an empty line");
+    assert!(asked[0].quote.is_empty());
+    assert!(viewer.ai_threads()[0].head.contains("start a short paper"));
+    assert!(viewer.ai_focused());
+
+    // What is written there later does not lose the question its place.
+    press(&mut viewer, "<C-w>hiThe equation.<Esc>");
+    let note = viewer.notes().iter().find(|n| n.to_agent).cloned();
+    assert!(note.is_some_and(|note| !note.detached));
+    // A plain note still needs text to be on.
+    press(&mut viewer, "o<Esc>:note here<CR>");
+    assert_eq!(viewer.notes().iter().filter(|n| !n.to_agent).count(), 0);
+    let _ = std::fs::remove_dir_all(directory);
+}

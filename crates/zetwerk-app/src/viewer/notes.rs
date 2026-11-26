@@ -673,7 +673,8 @@ impl Viewer {
                     note.range = at..at + note.quote.len();
                 }
             }
-            note.detached = note.range.is_empty();
+            // A question asked on an empty line had no text to lose.
+            note.detached = note.range.is_empty() && !note.quote.is_empty();
         }
         before.clear();
         before.push_str(now);
@@ -795,10 +796,19 @@ impl Viewer {
         thing_at(editor.source(), editor.cursor())
     }
 
+    /// Where a question asked on an empty line is about: the place of the
+    /// cursor, with no text yet, as in a new document where an agent is
+    /// asked to start writing. A note needs text to be on; a question
+    /// does not.
+    fn asked_here(&self, ask: bool) -> Option<Range<usize>> {
+        let cursor = self.editor.as_ref()?.cursor();
+        ask.then_some(cursor..cursor)
+    }
+
     /// `gn`, `gq`: what the note or the question is about is taken now,
     /// and the command line is opened for its text.
     fn begin_note(&mut self, ask: bool) {
-        let Some(range) = self.noted_here() else {
+        let Some(range) = self.noted_here().or_else(|| self.asked_here(ask)) else {
             self.alert("there is nothing here to note: the line is empty");
             return;
         };
@@ -823,7 +833,7 @@ impl Viewer {
             Some((range, revision, then)) if revision == self.revision && then == cursor => {
                 Some(range)
             }
-            _ => self.noted_here(),
+            _ => self.noted_here().or_else(|| self.asked_here(ask)),
         };
         let Some(range) = range else {
             self.alert("there is nothing here to note: the line is empty");
