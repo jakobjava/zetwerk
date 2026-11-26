@@ -34,13 +34,13 @@ const FILL: u8 = 0x2a;
 const FILL_FRONT: u8 = 0x50;
 const LINE: u8 = 0x80;
 const LINE_FRONT: u8 = 0xe0;
+use crate::chrome::ACCENT;
+use crate::chrome::ALERT as WARN;
 /// The colours of the slip, as the panels of reviewing have them.
-const BACKGROUND: &str = "#282828";
-const FOREGROUND: &str = "#ebdbb2";
-const DIM: &str = "#928374";
-const ACCENT: &str = "#fabd2f";
-const WARN: &str = "#fb4934";
+use crate::chrome::BACKGROUND;
+use crate::chrome::DIM;
 use crate::chrome::FONT;
+use crate::chrome::FOREGROUND;
 /// How wide the slip is in characters, and how many lines of the reason
 /// it shows.
 const COLUMNS: usize = 62;

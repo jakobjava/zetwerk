@@ -53,7 +53,7 @@ const ON_A_PAGE: &str = "x takes it out, Enter shows what can be done with it";
 const NEIGHBOURS: usize = 12;
 /// The colour of the tag beside a page put in, and of the frame around
 /// it while the cursor is on it.
-const TAG: &str = "#928374";
+use crate::chrome::DIM as TAG;
 const FRAME: [u8; 4] = [0x45, 0x85, 0x88, 0xd0];
 /// The size of the tag's text, in points of the page, and its font.
 const TAG_SIZE: f64 = 6.5;

@@ -24,6 +24,7 @@
 //! line of the block that is none of the styles (written by hand, or by
 //! an agent) is left as it is and told of, never rewritten.
 
+use crate::chrome::typst_string as quoted;
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -978,11 +979,6 @@ pub fn unset_style(source: &Source, index: usize) -> Result<Edits, String> {
         .rev()
         .map(|line| (line.whole.clone(), String::new()))
         .collect())
-}
-
-/// A text as Typst writes a string.
-fn quoted(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// `typed` as a colour Typst knows: a name it has, or six (or three, or

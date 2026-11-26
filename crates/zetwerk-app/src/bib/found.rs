@@ -194,7 +194,7 @@ fn made(kind: &str, key: String, fields: Vec<(String, String)>) -> Found {
 }
 
 /// Whether `key` can be what a source is cited by as it is.
-fn usable_key(key: &str) -> bool {
+pub(crate) fn usable_key(key: &str) -> bool {
     !key.is_empty()
         && key
             .chars()

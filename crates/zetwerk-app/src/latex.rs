@@ -17,6 +17,7 @@
 //! The names are in `table`; Typst's are checked against Typst by the
 //! tests, not trusted.
 
+use crate::chrome::typst_string as quoted;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1212,19 +1213,6 @@ fn part(node: &Node) -> String {
         }
         node => format!("({})", alone(node, false)),
     }
-}
-
-fn quoted(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        if matches!(c, '"' | '\\') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out.push('"');
-    out
 }
 
 /// How a delimiter is named in Typst where it stands alone.

@@ -28,6 +28,7 @@
 mod chars;
 mod digraphs;
 
+use crate::chrome::typst_string as string;
 use std::fmt::Write;
 
 use typst::syntax::FileId;
@@ -128,8 +129,8 @@ impl Pending {
 /// The source pane's font and colours, for what is composed there.
 /// (The source pane is set in the window's font, see [`crate::chrome::UiFont`].)
 const SOURCE_SIZE: f64 = 10.5;
-const SOURCE_PAPER: &str = "#282828";
-const SOURCE_INK: &str = "#ebdbb2";
+use crate::chrome::BACKGROUND as SOURCE_PAPER;
+use crate::chrome::FOREGROUND as SOURCE_INK;
 
 impl Viewer {
     /// Text came that was typed otherwise than by one key: committed by
@@ -613,24 +614,6 @@ fn ctrl_k() -> KeyPress {
         ctrl: true,
         alt: false,
     }
-}
-
-/// `text` as a string of Typst's code.
-fn string(text: &str) -> String {
-    let mut quoted = String::with_capacity(text.len() + 2);
-    quoted.push('"');
-    for c in text.chars() {
-        match c {
-            '"' | '\\' => {
-                quoted.push('\\');
-                quoted.push(c);
-            }
-            '\n' => quoted.push_str("\\n"),
-            c => quoted.push(c),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 /// Markup that sets `text` as it is composed: underlined, the part being

@@ -679,7 +679,7 @@ impl Viewer {
     }
 
     /// The name of `file`, from the document's directory.
-    pub(super) fn file_name_of_id(&self, file: FileId) -> String {
+    pub(in crate::viewer) fn file_name_of_id(&self, file: FileId) -> String {
         let editor = self
             .editor
             .iter()

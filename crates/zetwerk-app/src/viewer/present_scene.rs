@@ -9,6 +9,7 @@
 //! and the step, the time of day, the time the talk has taken and, with
 //! a plan, the time left and how far ahead or behind the talk is.
 
+use crate::chrome::typst_string as literal;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -35,28 +36,12 @@ const PAD: f64 = 16.0;
 const BAR: f64 = 40.0;
 /// How much of the presenter's view the slide shown takes across.
 const CURRENT_SHARE: f64 = 0.62;
+use crate::chrome::ACCENT;
+use crate::chrome::ALERT;
+use crate::chrome::DIM;
 /// The text of the presenter's view.
 use crate::chrome::FONT;
-const TEXT: &str = "#ebdbb2";
-const DIM: &str = "#928374";
-const ACCENT: &str = "#fabd2f";
-const ALERT: &str = "#fb4934";
-
-/// `text` as a Typst string literal.
-fn literal(text: &str) -> String {
-    let mut literal = String::with_capacity(text.len() + 2);
-    literal.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => literal.push_str("\\\""),
-            '\\' => literal.push_str("\\\\"),
-            '\n' => literal.push_str("\\n"),
-            c => literal.push(c),
-        }
-    }
-    literal.push('"');
-    literal
-}
+use crate::chrome::FOREGROUND as TEXT;
 
 /// The widest and the highest page of `document`, in points.
 fn largest(document: &PagedDocument) -> (f64, f64) {

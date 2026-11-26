@@ -154,7 +154,7 @@ fn moved(findings: &[Finding], change: Change) -> Vec<Finding> {
 }
 
 /// How `new` differs from `old`, as one replacement.
-fn change_between(old: &str, new: &str) -> Change {
+pub(super) fn change_between(old: &str, new: &str) -> Change {
     match difference(old, new) {
         Difference::Nothing => Change::NONE,
         Difference::Replacement {

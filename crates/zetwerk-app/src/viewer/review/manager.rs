@@ -25,12 +25,12 @@ const COLUMNS: usize = 58;
 /// How many steps of the thread are shown, and how many when asked.
 const THREAD: usize = 4;
 const THREAD_ALL: usize = 14;
-const BACKGROUND: &str = "#282828";
-const FOREGROUND: &str = "#ebdbb2";
-const DIM: &str = "#928374";
-const ACCENT: &str = "#fabd2f";
-const CHOSEN: &str = "#504945";
+use crate::chrome::ACCENT;
+use crate::chrome::BACKGROUND;
+use crate::chrome::CHOSEN;
+use crate::chrome::DIM;
 use crate::chrome::FONT;
+use crate::chrome::FOREGROUND;
 const KEYS: &str = "j k walk · a accept · r reject (R why) · A rewrite · q answer · p wordings · \
                     z later · o open again · ! always · u undo · Tab states · s group · n narrow · \
                     t thread · b brief · w record · Esc";

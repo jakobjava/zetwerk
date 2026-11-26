@@ -34,9 +34,11 @@
 //! change it: an agent's edit is an agent's, whatever it asks.
 
 use crate::chrome::FONT;
+use crate::chrome::typst_string as string;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
+use zetwerk_core::now;
 
 use typst::layout::Rect;
 use zetwerk_core::{Credit, Kind, Mark, Origin};
@@ -147,29 +149,6 @@ fn hue(name: &str) -> [u8; 3] {
 
 fn with_alpha([r, g, b]: [u8; 3], alpha: u8) -> [u8; 4] {
     [r, g, b, alpha]
-}
-
-/// The current time, in seconds since 1970.
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
-
-/// `text` as a Typst string literal: never read as markup.
-fn string(text: &str) -> String {
-    let mut literal = String::with_capacity(text.len() + 2);
-    literal.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => literal.push_str("\\\""),
-            '\\' => literal.push_str("\\\\"),
-            '\n' => literal.push_str("\\n"),
-            c => literal.push(c),
-        }
-    }
-    literal.push('"');
-    literal
 }
 
 fn rgba([r, g, b, a]: [u8; 4]) -> String {

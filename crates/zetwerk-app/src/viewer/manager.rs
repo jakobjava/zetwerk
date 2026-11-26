@@ -10,6 +10,7 @@
 //! is a `#set` rule before the text, as Typst wants it, written and
 //! changed here so that nobody has to look at it.
 
+use crate::chrome::typst_string as quoted;
 use typst::World;
 use typst::syntax::Source;
 
@@ -492,11 +493,6 @@ fn template_sets(world: &zetwerk_typst::ProjectWorld, source: &Source) -> Vec<Op
         .zip(behind)
         .map(|(before, behind)| (before != behind && !behind.is_empty()).then_some(behind))
         .collect()
-}
-
-/// A text as Typst writes a string.
-fn quoted(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// What means something in running text: what is typed for a setting

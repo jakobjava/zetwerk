@@ -10,6 +10,7 @@
 //! one made of its author and year. A source typed in field by field is
 //! looked for too, as soon as it says what it is.
 
+use crate::bib::found::usable_key;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -60,14 +61,6 @@ pub struct There {
     pub line: String,
     /// The key of the one that is there.
     pub cited_as: String,
-}
-
-/// Whether `key` can be what a source is cited by as it is.
-fn usable_key(key: &str) -> bool {
-    !key.is_empty()
-        && key
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
 }
 
 /// `named`, a file the user typed, as a path: from the folder `beside`

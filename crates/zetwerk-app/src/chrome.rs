@@ -25,13 +25,13 @@ pub const ROW_HEIGHT: f64 = 17.0;
 /// Size of the source pane's text in points.
 const SOURCE_SIZE: f64 = 10.5;
 
-const BACKGROUND: &str = "#282828";
-const FOREGROUND: &str = "#ebdbb2";
-const DIM: &str = "#928374";
-const ACCENT: &str = "#fabd2f";
-const ALERT: &str = "#fb4934";
-const ADDED: &str = "#b8bb26";
-const CHOSEN: &str = "#504945";
+pub const BACKGROUND: &str = "#282828";
+pub const FOREGROUND: &str = "#ebdbb2";
+pub const DIM: &str = "#928374";
+pub const ACCENT: &str = "#fabd2f";
+pub const ALERT: &str = "#fb4934";
+pub const ADDED: &str = "#b8bb26";
+pub const CHOSEN: &str = "#504945";
 /// The font of the window's own text, as a Typst value (see [`UiFont`]).
 pub const FONT: UiFont = UiFont;
 
@@ -59,9 +59,14 @@ impl std::fmt::Display for UiFont {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let family = self.family();
         if family == CARRIED_FONT {
-            write!(f, "{}", string(family))
+            write!(f, "{}", typst_string(family))
         } else {
-            write!(f, "({}, {})", string(family), string(CARRIED_FONT))
+            write!(
+                f,
+                "({}, {})",
+                typst_string(family),
+                typst_string(CARRIED_FONT)
+            )
         }
     }
 }
@@ -309,7 +314,7 @@ impl Chrome {
             let _ = writeln!(
                 markup,
                 "#text(fill: rgb(\"{color}\"), {})",
-                string(&row.text)
+                typst_string(&row.text)
             );
         }
         self.project.set_main_text(&markup);
@@ -349,7 +354,11 @@ impl Chrome {
         {
             return width;
         }
-        let markup = format!("{}#{}", row_preamble(false), string(&"M".repeat(SAMPLE)));
+        let markup = format!(
+            "{}#{}",
+            row_preamble(false),
+            typst_string(&"M".repeat(SAMPLE))
+        );
         let width = self.rasterize(&markup, scale).map_or(
             // Should the sample not render, a usual width for such a font.
             SOURCE_SIZE * 0.6 * scale,
@@ -487,12 +496,12 @@ pub struct InPlace<'a> {
 /// `literal`, sets the characters of `source` as they are.
 #[must_use]
 pub fn in_place_markup(source: &str, style: &InPlace, literal: bool) -> String {
-    let font = style
-        .family
-        .map_or_else(String::new, |family| format!("font: {}, ", string(family)));
+    let font = style.family.map_or_else(String::new, |family| {
+        format!("font: {}, ", typst_string(family))
+    });
     let slant = if style.italic { "italic" } else { "normal" };
     let body = if literal {
-        format!("#{}", string(source))
+        format!("#{}", typst_string(source))
     } else {
         source.to_owned()
     };
@@ -572,9 +581,9 @@ pub fn status_markup(status: &Status, width: f64) -> String {
   box(width: 100%, height: 12pt, clip: true, text(fill: rgb("{left_color}"), one-line({left}))),
   {right},
 )"#,
-        mode = string(status.mode),
-        left = string(&one_line(status.left)),
-        right = string(status.right),
+        mode = typst_string(status.mode),
+        left = typst_string(&one_line(status.left)),
+        right = typst_string(status.right),
     )
 }
 
@@ -614,8 +623,8 @@ pub fn panel_markup(rows: &[(&str, String)]) -> String {
         let _ = writeln!(
             cells,
             "  {}, align(right, {}),",
-            string(label),
-            string(value)
+            typst_string(label),
+            typst_string(value)
         );
     }
     format!(
@@ -639,7 +648,7 @@ pub fn proposal_markup(title: &str, hint: &str, old: &[String], new: &[String]) 
             let _ = writeln!(
                 lines,
                 "  text(fill: rgb(\"{colour}\"), {}),",
-                string(&format!("{sign}{text}"))
+                typst_string(&format!("{sign}{text}"))
             );
         }
     }
@@ -650,8 +659,8 @@ pub fn proposal_markup(title: &str, hint: &str, old: &[String], new: &[String]) 
   spacing: 6pt,
   text(fill: rgb("{ACCENT}"), {title}) + h(24pt) + text(fill: rgb("{DIM}"), {hint}),
 {lines})"#,
-        title = string(title),
-        hint = string(hint),
+        title = typst_string(title),
+        hint = typst_string(hint),
     )
 }
 
@@ -667,10 +676,14 @@ pub fn list_markup(
 ) -> String {
     let mut lines = String::new();
     if let Some(title) = title {
-        let _ = writeln!(lines, "  text(fill: rgb(\"{ACCENT}\"), {}),", string(title));
+        let _ = writeln!(
+            lines,
+            "  text(fill: rgb(\"{ACCENT}\"), {}),",
+            typst_string(title)
+        );
     }
     for (index, (name, about)) in rows.iter().enumerate() {
-        let (name, about) = (string(name), string(about));
+        let (name, about) = (typst_string(name), typst_string(about));
         let about = format!("h(16pt) + text(fill: rgb(\"{DIM}\"), {about})");
         if index == chosen {
             let _ = writeln!(
@@ -682,7 +695,11 @@ pub fn list_markup(
         }
     }
     if let Some(detail) = detail {
-        let _ = writeln!(lines, "  text(fill: rgb(\"{DIM}\"), {}),", string(detail));
+        let _ = writeln!(
+            lines,
+            "  text(fill: rgb(\"{DIM}\"), {}),",
+            typst_string(detail)
+        );
     }
     format!(
         r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
@@ -709,7 +726,7 @@ pub fn text_markup(lines: &[String]) -> String {
     let mut stacked = String::new();
     for line in lines {
         // An empty line still takes its room.
-        let _ = writeln!(stacked, "  {} + h(0pt),", string(line));
+        let _ = writeln!(stacked, "  {} + h(0pt),", typst_string(line));
     }
     format!(
         r#"#set page(width: auto, height: auto, margin: 8pt, fill: rgb("{BACKGROUND}"))
@@ -721,8 +738,10 @@ pub fn text_markup(lines: &[String]) -> String {
 }
 
 /// `text` as a Typst string literal. Shown through a string, text is never
-/// interpreted as markup, whatever a file name or message contains.
-fn string(text: &str) -> String {
+/// interpreted as markup, whatever a file name or message contains. This
+/// is the one way the program writes a string for Typst.
+#[must_use]
+pub fn typst_string(text: &str) -> String {
     let mut literal = String::with_capacity(text.len() + 2);
     literal.push('"');
     for c in text.chars() {

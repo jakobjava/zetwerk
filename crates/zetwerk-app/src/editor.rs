@@ -1440,7 +1440,7 @@ impl Host for DocumentHost<'_> {
 }
 
 /// The nearest character boundary at or before `at`.
-fn floor_boundary(text: &str, at: usize) -> usize {
+pub(crate) fn floor_boundary(text: &str, at: usize) -> usize {
     let mut at = at.min(text.len());
     while !text.is_char_boundary(at) {
         at -= 1;

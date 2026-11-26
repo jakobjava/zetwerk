@@ -55,20 +55,20 @@ const QUOTED: usize = 110;
 /// How many characters of a suggestion's old and new text are shown.
 const CHANGED: usize = 140;
 
+use crate::chrome::ACCENT;
+use crate::chrome::ADDED as GOOD;
+use crate::chrome::ALERT as BAD;
+use crate::chrome::BACKGROUND;
+use crate::chrome::DIM as FAINT;
 use crate::chrome::FONT;
-const BACKGROUND: &str = "#282828";
-const TEXT: &str = "#ebdbb2";
-const FAINT: &str = "#928374";
-const ACCENT: &str = "#fabd2f";
-const GOOD: &str = "#b8bb26";
-const BAD: &str = "#fb4934";
+use crate::chrome::FOREGROUND as TEXT;
 /// Vim's colours, as gruvbox has them: the cursor's line, the status
 /// line of the window in front and of one that is not, the line between
 /// windows, and the `~` past the last line.
 const CURSOR_LINE: &str = "#3c3836";
-const STATUS_IN_FRONT: &str = "#504945";
+use crate::chrome::CHOSEN as STATUS_IN_FRONT;
 const STATUS_BEHIND: &str = "#32302f";
-const SPLIT: &str = "#504945";
+use crate::chrome::CHOSEN as SPLIT;
 const NON_TEXT: &str = "#665c54";
 /// The pane's margins, in points: the status line reaches across them.
 const LEFT: f64 = 10.0;

@@ -54,7 +54,7 @@ fn ancestors_below(source: &Source, at: usize) -> (Vec<LinkedNode<'_>>, usize) {
 }
 
 /// `range` without the blanks and line breaks at its ends.
-fn trimmed(text: &str, range: Range<usize>) -> Range<usize> {
+pub(crate) fn trimmed(text: &str, range: Range<usize>) -> Range<usize> {
     let inside = &text[range.clone()];
     let start = range.start + (inside.len() - inside.trim_start().len());
     let end = range.end - (inside.len() - inside.trim_end().len());

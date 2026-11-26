@@ -34,7 +34,9 @@
 //! options is looked at before and after it. Commands that change an
 //! option for the time being only (`:slides`, `gs`) are left out.
 
+use super::hints::common;
 use crate::chrome::FONT;
+use crate::chrome::typst_string as literal;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -51,12 +53,12 @@ use crate::settings::{Edit, Group, Kind, Opt, Preset, Stored, Value, When, Write
 const ROWS: usize = 18;
 /// How wide the panel is, in points.
 const WIDTH: f64 = 300.0;
+use crate::chrome::ACCENT;
 /// The colours of the interface (as in `chrome`).
-const GROUND: &str = "#282828";
-const TEXT: &str = "#ebdbb2";
-const DIM: &str = "#928374";
-const ACCENT: &str = "#fabd2f";
-const CHOSEN: &str = "#504945";
+use crate::chrome::BACKGROUND as GROUND;
+use crate::chrome::CHOSEN;
+use crate::chrome::DIM;
+use crate::chrome::FOREGROUND as TEXT;
 const OWN: &str = "#83a598";
 /// The file in the state directory that says the user was told that the
 /// page has become quieter.
@@ -221,24 +223,6 @@ pub(super) enum Row {
     Document(&'static str),
     /// Only says something.
     Info(String),
-}
-
-/// `text` as a Typst string literal.
-fn literal(text: &str) -> String {
-    let mut written = String::with_capacity(text.len() + 2);
-    written.push('"');
-    for c in text.chars() {
-        match c {
-            '\\' | '"' => {
-                written.push('\\');
-                written.push(c);
-            }
-            '\n' => written.push_str("\\n"),
-            _ => written.push(c),
-        }
-    }
-    written.push('"');
-    written
 }
 
 /// What the keys of normal mode do by themselves, for saying what a
@@ -434,16 +418,6 @@ fn arguments(line: &str) -> Vec<String> {
 /// `value` as `:set` takes it: blanks behind a backslash.
 fn typed(value: &str) -> String {
     value.replace(' ', "\\ ")
-}
-
-/// The longest beginning `a` and `b` have in common.
-fn common<'a>(a: &'a str, b: &str) -> &'a str {
-    let same = a
-        .char_indices()
-        .zip(b.chars())
-        .find(|((_, x), y)| x != y)
-        .map_or(a.len().min(b.len()), |((at, _), _)| at);
-    &a[..same]
 }
 
 /// What `:set` makes of one argument.

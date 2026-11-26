@@ -9,6 +9,7 @@
 //! `#set` rules before the text. They are written and changed here, by
 //! commands: nobody has to look at them.
 
+use crate::chrome::typst_string as quoted;
 use typst::World;
 
 use super::assist::Target;
@@ -948,11 +949,6 @@ const PAPERS: &[&str] = &[
     "presentation-16-9",
     "presentation-4-3",
 ];
-
-/// A text as Typst writes a string.
-fn quoted(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
-}
 
 /// `wanted` as a length: a number in `unit`, or a number with a unit of
 /// its own.

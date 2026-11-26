@@ -55,6 +55,7 @@
 //! a button is down (see [`Viewer::pointer_moved`]), and the view only
 //! moves by itself while a button is held beyond its edge.
 
+use crate::typst_text::trimmed;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -333,14 +334,6 @@ fn line(text: &str, at: usize) -> Range<usize> {
     let start = text[..at].rfind('\n').map_or(0, |found| found + 1);
     let end = text[at..].find('\n').map_or(text.len(), |found| at + found);
     start..end
-}
-
-/// `range` of `text` without the blanks and line breaks at its ends.
-fn trimmed(text: &str, range: Range<usize>) -> Range<usize> {
-    let inside = &text[range.clone()];
-    let start = range.start + (inside.len() - inside.trim_start().len());
-    let end = range.end - (inside.len() - inside.trim_end().len());
-    start..end.max(start)
 }
 
 /// The paragraph byte `at` of `source` is in, as a reader of the page

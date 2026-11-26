@@ -52,6 +52,7 @@
 //! nothing happens. Nothing of it is in the document, in an export (but
 //! `:changes pdf`) or in what an agent is shown.
 
+use super::notes::marker_length as block_mark;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -453,25 +454,6 @@ fn proof_text(new: &Source, old: &str, passages: &[Passage]) -> (String, Vec<usi
         ..Marked::default()
     };
     (proof, marks, marked)
-}
-
-/// How many bytes at the start of `line` only say what kind of block it
-/// is: a heading's equals signs, an item's mark, with the blanks behind.
-fn block_mark(line: &str) -> usize {
-    let blanks = line.len() - line.trim_start().len();
-    let rest = &line[blanks..];
-    let marks = if rest.starts_with('=') {
-        rest.len() - rest.trim_start_matches('=').len()
-    } else if rest.starts_with("- ") || rest.starts_with("+ ") {
-        1
-    } else {
-        return 0;
-    };
-    let behind = &rest[marks..];
-    if !behind.starts_with(' ') {
-        return 0;
-    }
-    blanks + marks + behind.len() - behind.trim_start().len()
 }
 
 /// The first `most` words of `piece` of Typst markup as they are read.

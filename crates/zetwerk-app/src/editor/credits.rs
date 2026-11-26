@@ -17,6 +17,7 @@
 //! yanks, deletions and puts.
 
 use std::ops::Range;
+use zetwerk_core::now;
 
 use zetwerk_core::{By, Credit, Credited, Document, Given, Origin, Replace};
 
@@ -261,12 +262,6 @@ fn occurrences(text: &str, part: &str, credits: &Given) -> Option<Given> {
         out.push((text.len() - at, None));
     }
     Some(out)
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
 }
 
 /// Something the editor does for the author: the author's, by zetwerk.

@@ -23,5 +23,5 @@ pub use document::{
 pub use history::{History, ROOT, StateId, Step};
 pub use origin::{
     Agent, Attribution, By, ChangeMarks, Credit, CreditId, Credited, Given, Kind, Mark, Origin,
-    Run, Runs,
+    Run, Runs, now,
 };

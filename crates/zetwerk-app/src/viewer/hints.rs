@@ -36,6 +36,7 @@
 //! for once a key, in at most [`WORD_REACH`] bytes before and behind the
 //! cursor, however long the document.
 
+use crate::chrome::typst_string as string;
 use std::fmt::Write;
 use std::time::{Duration, Instant};
 
@@ -47,11 +48,11 @@ use crate::keys::{Key, KeyPress};
 
 /// The colours of the interface (as in `chrome`): its ground, its
 /// dimmer text and its own text.
-const GROUND: &str = "#282828";
-const DIM: &str = "#928374";
-const BRIGHT: &str = "#ebdbb2";
+use crate::chrome::BACKGROUND as GROUND;
+use crate::chrome::DIM;
 /// Its font, and the size of the status line's text.
 use crate::chrome::FONT;
+use crate::chrome::FOREGROUND as BRIGHT;
 const STATUS_SIZE: f64 = 10.0;
 /// The size the source pane's font is measured at (see
 /// `Chrome::cell_width`).
@@ -149,24 +150,6 @@ fn in_name(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | ':')
 }
 
-/// `text` as a Typst string literal: shown, never read as markup.
-fn string(text: &str) -> String {
-    let mut literal = String::with_capacity(text.len() + 2);
-    literal.push('"');
-    for c in text.chars() {
-        match c {
-            '\\' | '"' => {
-                literal.push('\\');
-                literal.push(c);
-            }
-            '\n' => literal.push_str("\\n"),
-            _ => literal.push(c),
-        }
-    }
-    literal.push('"');
-    literal
-}
-
 /// `keys` in Vim's notation, as a mapping is written.
 pub(super) fn notation(keys: &[KeyPress]) -> String {
     let mut written = String::new();
@@ -236,7 +219,7 @@ fn nearest_word<'a>(text: &'a str, from: usize, typed: &str) -> Option<&'a str> 
 }
 
 /// The longest beginning `a` and `b` have in common.
-fn common<'a>(a: &'a str, b: &str) -> &'a str {
+pub(super) fn common<'a>(a: &'a str, b: &str) -> &'a str {
     let same = a
         .char_indices()
         .zip(b.chars())

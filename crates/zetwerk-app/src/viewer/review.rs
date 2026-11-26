@@ -43,7 +43,8 @@ mod store;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+use zetwerk_core::now;
 
 use typst::syntax::FileId;
 use zetwerk_core::StateId;
@@ -587,13 +588,6 @@ pub(super) struct Review {
     slip_at: Option<(f64, f64, f64, f64)>,
     signal: Arc<Signal>,
     settings: Settings,
-}
-
-/// Seconds since 1970.
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
 }
 
 /// Where byte `place` is after `edits` (each a range of bytes of the

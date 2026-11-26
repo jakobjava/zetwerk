@@ -18,6 +18,8 @@
 //! since (outside zetwerk), a place is found again by the text around it,
 //! or else by the heading above it, or else it is the start.
 
+use super::notes::{escape, unescape};
+use crate::editor::floor_boundary as floor;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -122,41 +124,6 @@ fn hash(bytes: &[u8]) -> u64 {
 fn store_path(state_dir: &Path, main: &Path) -> PathBuf {
     let name = hash(main.as_os_str().as_encoded_bytes());
     state_dir.join(DIRECTORY).join(format!("{name:016x}.place"))
-}
-
-fn escape(text: &str) -> String {
-    text.replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
-
-fn unescape(text: &str) -> String {
-    let mut plain = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            plain.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => plain.push('\n'),
-            Some('r') => plain.push('\r'),
-            Some('t') => plain.push('\t'),
-            Some(other) => plain.push(other),
-            None => {}
-        }
-    }
-    plain
-}
-
-/// The largest char boundary of `text` not after `at`.
-fn floor(text: &str, at: usize) -> usize {
-    let mut at = at.min(text.len());
-    while !text.is_char_boundary(at) {
-        at -= 1;
-    }
-    at
 }
 
 impl Spot {

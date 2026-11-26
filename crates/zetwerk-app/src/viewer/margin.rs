@@ -23,6 +23,7 @@
 //! edited, as only there keys reach what they name. None of it is part
 //! of the document, of what is exported or of what an agent sees.
 
+use super::language::change_between;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::ops::Range;
@@ -34,9 +35,7 @@ use typst_layout::PagedDocument;
 use zetwerk_typst::{Origin, PageLines, PageMap, ProjectWorld};
 
 use super::assist::Target;
-use super::{
-    Change, Difference, Edited, Message, Quad, Scene, TextureId, Viewer, difference, tint,
-};
+use super::{Change, Edited, Message, Quad, Scene, TextureId, Viewer, tint};
 use crate::chrome::{self, Chrome};
 use crate::editor;
 use crate::invisible::{self, Kind, Thing};
@@ -66,7 +65,7 @@ pub(super) const WARNING_BAR: [u8; 4] = [0xd7, 0x99, 0x21, 0xa0];
 
 /// The colours of the text of the marks: a tag, the tag the cursor is
 /// on, an error and a warning.
-const TAG: &str = "#928374";
+use crate::chrome::DIM as TAG;
 const CHOSEN: &str = "#af3a03";
 const ERROR: &str = "#cc241d";
 const WARNING: &str = "#b57614";
@@ -193,22 +192,6 @@ fn shown_by(origin: &Origin, file: FileId) -> Option<&Range<usize>> {
             file: of, range, ..
         } if *of == file => Some(range),
         _ => None,
-    }
-}
-
-/// How `new` differs from `old`, as one replacement.
-fn change_between(old: &str, new: &str) -> Change {
-    match difference(old, new) {
-        Difference::Nothing => Change::NONE,
-        Difference::Replacement {
-            offset,
-            removed,
-            text,
-        } => Change {
-            offset,
-            removed,
-            inserted: text.len(),
-        },
     }
 }
 

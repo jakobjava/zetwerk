@@ -23,6 +23,7 @@
 //! the user is in charge of. Beside the journal it survives a restart as
 //! the unsaved text does, and the file stays as the user wrote it.
 
+pub(super) use crate::chrome::typst_string as literal;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -60,12 +61,12 @@ const TAG_WORDS: usize = 16;
 const STRIPE_NOTE: &str = "#b16286";
 const STRIPE_QUESTION: &str = "#458588";
 const STRIPE_ANSWERED: &str = "#98971a";
+use crate::chrome::ACCENT;
 /// The colours of the panels, as the rest of the interface has them.
-const BACKGROUND: &str = "#282828";
-const FOREGROUND: &str = "#ebdbb2";
-const DIM: &str = "#928374";
-const ACCENT: &str = "#fabd2f";
+use crate::chrome::BACKGROUND;
+use crate::chrome::DIM;
 use crate::chrome::FONT;
+use crate::chrome::FOREGROUND;
 /// How wide the text of a panel is, in characters, and how many lines
 /// of a note or an answer it shows.
 const CARD_COLUMNS: usize = 64;
@@ -298,7 +299,7 @@ pub(super) fn line_at(text: &str, at: usize) -> Option<Range<usize>> {
 /// How many bytes at the start of a line of markup only say what kind
 /// of block it is: a heading's equals signs, an item's dash or plus,
 /// with the blanks behind them.
-fn marker_length(line: &str) -> usize {
+pub(super) fn marker_length(line: &str) -> usize {
     let blanks = line.len() - line.trim_start().len();
     let rest = &line[blanks..];
     let marks = if rest.starts_with('=') {
@@ -329,24 +330,6 @@ fn change_markup(old: &str, new: &str) -> String {
         );
     }
     markup
-}
-
-/// `text` as a Typst string literal: never read as markup.
-pub(super) fn literal(text: &str) -> String {
-    let mut literal = String::with_capacity(text.len() + 2);
-    literal.push('"');
-    for c in text.chars() {
-        match c {
-            '\\' => literal.push_str("\\\\"),
-            '"' => literal.push_str("\\\""),
-            '\n' => literal.push_str("\\n"),
-            '\r' => literal.push_str("\\r"),
-            '\t' => literal.push_str("\\t"),
-            c => literal.push(c),
-        }
-    }
-    literal.push('"');
-    literal
 }
 
 /// `text` in lines of at most `columns` characters, broken between
@@ -929,23 +912,6 @@ impl Viewer {
             .ok_or_else(|| format!("there is no note {id}; list_notes gives them"))
     }
 
-    /// The name of `file`, from the document's directory.
-    fn file_name_of(&self, file: FileId) -> String {
-        let editor = self
-            .editor
-            .iter()
-            .chain(&self.others)
-            .find(|e| e.file() == file);
-        editor.map_or_else(
-            || file.vpath().get_without_slash().to_owned(),
-            |editor| {
-                let path = editor.path();
-                let shown = path.strip_prefix(self.project.root_dir()).unwrap_or(path);
-                shown.to_string_lossy().into_owned()
-            },
-        )
-    }
-
     /// The text of `file`, if it is open.
     fn text_of(&self, file: FileId) -> Option<&str> {
         let mut editors = self.editor.iter().chain(&self.others);
@@ -966,7 +932,7 @@ impl Viewer {
                     .map_or(0, |text| line_column(text, note.range.start).0);
                 let mut about = format!("line {line}");
                 if note.file != file {
-                    let _ = write!(about, " of {}", self.file_name_of(note.file));
+                    let _ = write!(about, " of {}", self.file_name_of_id(note.file));
                 }
                 let kind = match (note.resolved, note.answers.is_empty(), note.to_agent) {
                     (true, ..) => ", resolved",
@@ -1241,7 +1207,7 @@ impl Viewer {
                 let about = text.get(note.range.clone()).unwrap_or_default();
                 Listed {
                     id: note.id,
-                    file: self.file_name_of(note.file),
+                    file: self.file_name_of_id(note.file),
                     line,
                     column,
                     text: cut(about, MAX_QUOTE),
@@ -1255,7 +1221,7 @@ impl Viewer {
                 }
             })
             .collect();
-        let name = self.file_name_of(current);
+        let name = self.file_name_of_id(current);
         listed.sort_by_key(|note| note.file != name);
         listed
     }
@@ -1329,7 +1295,7 @@ impl Viewer {
             Some(_) if file != self.file_id() => {
                 return Err(format!(
                     "the note is about {}, which is not the file being edited: answer it in words",
-                    self.file_name_of(file)
+                    self.file_name_of_id(file)
                 ));
             }
             Some((old, new)) => {

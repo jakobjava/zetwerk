@@ -7,6 +7,7 @@
 //! replace and what with, so that the rest of a call stays as its
 //! author wrote it.
 
+pub use crate::chrome::typst_string as quoted;
 use std::ops::Range;
 
 use typst::syntax::{LinkedNode, Source, SyntaxKind};
@@ -283,12 +284,6 @@ fn new_named(text: &str, args: &LinkedNode, written: &str) -> (Range<usize>, Str
         format!("{written}, ")
     };
     (at..at, lead)
-}
-
-/// A text as Typst writes a string.
-#[must_use]
-pub fn quoted(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// What the string written at `range` of `text` says.
