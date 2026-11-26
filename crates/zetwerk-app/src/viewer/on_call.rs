@@ -87,7 +87,9 @@ fn task(questions: usize, reviews: usize) -> String {
     if questions > 0 {
         asked.push(format!(
             "{questions} open question{} (list_notes gives them; answer each with answer_note, \
-             with a proposal where a change is the answer)",
+             in a few sentences; where text is to be written or changed, also suggest it, with \
+             note set to the question's id: an insert with only note goes where the question \
+             was asked, even on an empty line or into an empty document)",
             if questions == 1 { "" } else { "s" }
         ));
     }

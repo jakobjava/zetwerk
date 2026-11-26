@@ -72,6 +72,9 @@ pub struct Wanted {
     pub alternatives: Vec<String>,
     /// Made even where it goes against an instruction: flagged then.
     pub insist: bool,
+    /// The author's question it answers; an insert with neither
+    /// `old_str` nor `line` goes where it was asked.
+    pub note: Option<u64>,
 }
 
 /// Where a suggestion goes, worked out from what an agent asked.
@@ -208,7 +211,12 @@ impl Viewer {
             (None, Some(line)) => {
                 let at = offset_of(text, line, 1)
                     .ok_or_else(|| ("not_found", format!("the text has no line {line}")))?;
-                line_at(text, at).ok_or_else(|| ("not_found", format!("line {line} is empty")))?
+                match line_at(text, at) {
+                    Some(found) => found,
+                    // Something can be put in on an empty line.
+                    None if kind == Kind::Insert => at..at,
+                    None => return Err(("not_found", format!("line {line} is empty"))),
+                }
             }
             (None, None) => 0..text.len(),
         };
@@ -226,12 +234,24 @@ impl Viewer {
                     within
                 }
             }
-            None => {
-                return Err((
-                    "invalid",
-                    "give old_str (the exact text), or a line for the paragraph".to_owned(),
-                ));
-            }
+            None => match wanted.note {
+                Some(id) => self
+                    .notes()
+                    .iter()
+                    .find(|note| note.id == id && note.file == self.file_id())
+                    .map(|note| note.range.clone())
+                    .ok_or_else(|| ("not_found", format!("there is no question {id} here")))?,
+                // Into an empty document, where there is nothing to name.
+                None if kind == Kind::Insert && text.trim().is_empty() => text.len()..text.len(),
+                None => {
+                    return Err((
+                        "invalid",
+                        "give old_str (the exact text), a line for the paragraph, or the note \
+                         it answers"
+                            .to_owned(),
+                    ));
+                }
+            },
         };
         let new = wanted.new_str.clone().unwrap_or_default();
         let after = wanted
@@ -390,7 +410,7 @@ impl Viewer {
             thread: Vec::new(),
             proposal,
             request,
-            note: None,
+            note: wanted.note,
             flagged,
             stale: false,
             waiting: false,

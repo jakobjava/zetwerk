@@ -524,3 +524,36 @@ fn suggestions_are_marked_by_kind_and_older_proposals_become_suggestions() {
     assert_eq!(viewer.suggestions().last().unwrap().request, Some(id));
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn an_agent_writes_into_an_empty_document_where_it_was_asked() {
+    let (mut viewer, directory) = editing("");
+    press(&mut viewer, ":ask start an outline<CR>");
+    let asked = viewer.notes().iter().find(|n| n.to_agent).map(|n| n.id);
+    let Some(asked) = asked else {
+        panic!("asked on the empty line");
+    };
+    let outline = Wanted {
+        kind: "insert".to_owned(),
+        new_str: Some("= Introduction\n".to_owned()),
+        reason: "an outline to start from".to_owned(),
+        note: Some(asked),
+        ..Wanted::default()
+    };
+    let answer = viewer
+        .agent_suggest(&[outline.clone()], None, false, None, false, &agent())
+        .unwrap();
+    assert_eq!(answer["results"][0]["status"], "anchored", "{answer}");
+    let made = viewer.suggestions().last().cloned();
+    assert!(made.is_some_and(|s| s.note == Some(asked)));
+    // In an empty document an insert needs no place at all.
+    let anywhere = Wanted {
+        note: None,
+        ..outline
+    };
+    let answer = viewer
+        .agent_suggest(&[anywhere], None, false, None, false, &agent())
+        .unwrap();
+    assert_ne!(answer["results"][0]["status"], "invalid", "{answer}");
+    let _ = std::fs::remove_dir_all(directory);
+}

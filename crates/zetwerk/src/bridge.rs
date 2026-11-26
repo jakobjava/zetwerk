@@ -215,6 +215,7 @@ fn wanted(suggestion: NewSuggestion) -> WantedSuggestion {
         importance: suggestion.importance,
         alternatives: suggestion.alternatives,
         insist: suggestion.insist,
+        note: suggestion.note,
     }
 }
 

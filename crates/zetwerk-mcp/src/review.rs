@@ -125,6 +125,12 @@ pub struct NewSuggestion {
     /// (say why in reason): it is shown flagged. Default false.
     #[serde(default)]
     pub insist: bool,
+    /// The id of the author's question (see `list_notes`) it answers: it
+    /// is shown in that question's thread. An `insert` with neither
+    /// `old_str` nor `line` goes where the question was asked, which is
+    /// how to write into an empty line or an empty document; in an
+    /// empty document an `insert` needs neither.
+    pub note: Option<u64>,
 }
 
 /// A batch of suggestions.
