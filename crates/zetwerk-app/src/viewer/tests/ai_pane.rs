@@ -138,7 +138,7 @@ fn a_question_can_be_asked_where_there_is_no_text_yet() {
         .cloned()
         .collect();
     assert_eq!(asked.len(), 1, "asked on an empty line");
-    assert!(asked[0].quote.is_empty());
+    assert_eq!(asked[0].quote, "");
     assert!(viewer.ai_threads()[0].head.contains("start a short paper"));
     assert!(viewer.ai_focused());
 
