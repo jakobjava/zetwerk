@@ -50,14 +50,14 @@ fn the_pane_stands_beside_the_page_and_asks_from_the_command_line() {
     assert!(asked[0].1.contains("A first paragraph"), "{asked:?}");
     let threads = viewer.ai_threads();
     assert_eq!(threads.len(), 1);
-    assert!(threads[0].head.contains("is this clear?"));
-    assert!(threads[0].head.contains("waiting for an agent"));
+    assert!(threads[0].title.contains("is this clear?"));
+    assert!(threads[0].state.text.contains("waiting for an agent"));
     assert!(threads[0].open);
     assert!(
         threads[0]
             .body
             .iter()
-            .any(|line| line.contains("A first paragraph"))
+            .any(|line| line.plain().contains("A first paragraph"))
     );
     assert!(pane_drawn(&mut viewer), "the pane typesets with a thread");
 
@@ -83,7 +83,7 @@ fn the_pane_stands_beside_the_page_and_asks_from_the_command_line() {
     press(&mut viewer, "zR");
     assert!(pane_drawn(&mut viewer), "the pane typesets unfolded");
     press(&mut viewer, "zMGgg");
-    press(&mut viewer, "j<CR>");
+    press(&mut viewer, "]]j<CR>");
     assert!(!viewer.ai_focused(), "Enter goes to the page");
     // Put away: the page has the window again.
     press(&mut viewer, "<C-w>lq");
@@ -121,6 +121,10 @@ fn the_pane_quotes_the_text_as_it_reads_not_its_source() {
         "Abstract. We study x^2 here."
     );
     assert_eq!(readable("= Introduction\n\nWords."), "Introduction Words.");
+    assert_eq!(
+        readable("A. Author #h(2em) B. Author #text(size: 9pt)[Institute] here"),
+        "A. Author B. Author Institute here"
+    );
 }
 
 #[test]
@@ -139,7 +143,7 @@ fn a_question_can_be_asked_where_there_is_no_text_yet() {
         .collect();
     assert_eq!(asked.len(), 1, "asked on an empty line");
     assert_eq!(asked[0].quote, "");
-    assert!(viewer.ai_threads()[0].head.contains("start a short paper"));
+    assert!(viewer.ai_threads()[0].title.contains("start a short paper"));
     assert!(viewer.ai_focused());
 
     // What is written there later does not lose the question its place.
@@ -149,5 +153,40 @@ fn a_question_can_be_asked_where_there_is_no_text_yet() {
     // A plain note still needs text to be on.
     press(&mut viewer, "o<Esc>:note here<CR>");
     assert_eq!(viewer.notes().iter().filter(|n| !n.to_agent).count(), 0);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn the_pane_is_a_buffer_to_move_in_and_copy_from() {
+    let (mut viewer, directory) = editing("A first paragraph, about averages.\n");
+    press(&mut viewer, "gIiis it clear?<CR>");
+    let id = viewer.notes().iter().find(|n| n.to_agent).map(|n| n.id);
+    let Some(id) = id else {
+        panic!("asked");
+    };
+    // The agent answers in several lines; they stay lines in the pane.
+    let answered =
+        viewer.agent_answer_note(id, "Mostly.\nThe second sentence\nis long.", None, None);
+    assert!(answered.is_ok(), "{answered:?}");
+    assert!(pane_drawn(&mut viewer));
+    assert!(viewer.ai_focused());
+    let register = |viewer: &Viewer| {
+        viewer
+            .editor
+            .as_ref()
+            .and_then(|e| e.engine().register('"').map(|(text, _)| text.to_owned()))
+    };
+    // To the last line (the answer's last), and the last two copied.
+    press(&mut viewer, "GkVjy");
+    assert_eq!(
+        register(&viewer).as_deref(),
+        Some("The second sentence\nis long.\n")
+    );
+    // A word of a line, by character.
+    press(&mut viewer, "G^vly");
+    assert_eq!(register(&viewer).as_deref(), Some("is"));
+    assert!(viewer.ai_focused(), "copying keeps the pane in front");
+    press(&mut viewer, "<Esc>");
+    assert!(!viewer.ai_focused());
     let _ = std::fs::remove_dir_all(directory);
 }

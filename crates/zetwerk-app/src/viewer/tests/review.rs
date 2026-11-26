@@ -541,7 +541,14 @@ fn an_agent_writes_into_an_empty_document_where_it_was_asked() {
         ..Wanted::default()
     };
     let answer = viewer
-        .agent_suggest(&[outline.clone()], None, false, None, false, &agent())
+        .agent_suggest(
+            std::slice::from_ref(&outline),
+            None,
+            false,
+            None,
+            false,
+            &agent(),
+        )
         .unwrap();
     assert_eq!(answer["results"][0]["status"], "anchored", "{answer}");
     let made = viewer.suggestions().last().cloned();

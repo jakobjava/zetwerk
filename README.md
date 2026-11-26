@@ -201,8 +201,11 @@ Below are your questions and review requests as threads, each with the
 text it's about, the agent's answers and its suggestions. It works like
 a Vim split: the thread under the cursor is unfolded and the others are
 folded to one line (`zR` and `zM` unfold and fold them all), and it has
-its own status line. You accept or reject suggestions with `a` and `r`,
-and Enter takes you to the text. To ask, press `i`, which puts `:ai ` on
+its own status line. You move in it as in a Vim buffer you can only
+read (`j`, `k`, `w`, `$`, `]]` to the next thread), select with `v` or `V`
+and copy with `y` (into the unnamed register and the clipboard). You
+accept or reject suggestions with `a` and `r`, and Enter takes you to the
+text. To ask, press `i`, which puts `:ai ` on
 the command line, and type a question about the paragraph or the
 selection, or `/review clarity`, `/cite`, `/explain`, `/draft`,
 `/check maths`. `Ctrl-W l` and `Ctrl-W h` move between the page and the

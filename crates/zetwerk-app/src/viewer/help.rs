@@ -1096,7 +1096,7 @@ pub(super) const HELP: &[Help] = &[
     ),
     help(
         "gI  :ai",
-        "Puts the AI pane beside the page: what agents are doing, each question and review you asked with what came of it, as a window of its own. In the pane i puts :ai on the command line to ask (:ai /review clarity asks for a review), j and k go through the threads, Enter goes to the text, a and r accept or reject what waits, zR and zM unfold and fold every thread; Ctrl-W h back to the page, Ctrl-W l to the pane.",
+        "Puts the AI pane beside the page: what agents are doing, each question and review you asked with what came of it, as a window of its own. In the pane i puts :ai on the command line to ask (:ai /review clarity asks for a review); j k h l w b 0 $ gg G move as in Vim, ]] and [[ to the next and the last thread; v and V select and y copies (yy the line) into the register and the clipboard; Enter goes to the text, a and r accept or reject what waits, zR and zM unfold and fold every thread; Ctrl-W h back to the page, Ctrl-W l to the pane.",
         "",
         ":agents, gq, gQ, :agent",
         "i is this step right?  then Enter",

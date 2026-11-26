@@ -23,7 +23,7 @@ pub const STATUS_HEIGHT: f64 = 20.0;
 /// Height of a row of the source pane in points.
 pub const ROW_HEIGHT: f64 = 17.0;
 /// Size of the source pane's text in points.
-const SOURCE_SIZE: f64 = 10.5;
+pub const SOURCE_SIZE: f64 = 10.5;
 
 pub const BACKGROUND: &str = "#282828";
 pub const FOREGROUND: &str = "#ebdbb2";
