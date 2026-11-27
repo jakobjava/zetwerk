@@ -329,14 +329,22 @@ impl PageMap {
                 end: range.end,
                 blank: glyph.blank || matches!(glyph.origin, Origin::Space { .. }),
             });
-            match lines
-                .iter_mut()
-                .rev()
-                .find(|line| line.takes(left, right, top, bottom))
-            {
+            // A part of an equation above or below its middle (a limit,
+            // a numerator, a script) is of the equation's line: going
+            // down from an equation goes past all of it.
+            let math = matches!(glyph.origin, Origin::Math { .. });
+            match lines.iter_mut().rev().find(|line| {
+                line.takes(left, right, top, bottom)
+                    || (math && line.math && line.beside(left, right, top, bottom))
+            }) {
                 Some(line) => {
                     line.left = line.left.min(left);
                     line.right = line.right.max(right);
+                    if math {
+                        line.top = line.top.min(top);
+                        line.bottom = line.bottom.max(bottom);
+                        line.math = true;
+                    }
                     line.glyphs.extend(entry);
                 }
                 None => lines.push(PageLine {
@@ -345,9 +353,11 @@ impl PageMap {
                     left,
                     right,
                     glyphs: entry.into_iter().collect(),
+                    math,
                 }),
             }
         }
+        merge_equations(&mut lines);
         lines.retain(|line| !line.glyphs.is_empty());
         // The places for a cursor: each glyph, but all the glyphs one
         // thing made (a reference, a call) as one.
@@ -502,6 +512,10 @@ struct PageLine {
     right: f64,
     /// In the order the page has them.
     glyphs: Vec<LineGlyph>,
+    /// Whether it is of an equation: its glyphs stand above and below
+    /// each other (limits, fractions, scripts), and it grows to take
+    /// them all.
+    math: bool,
 }
 
 #[derive(Debug)]
@@ -534,6 +548,38 @@ impl LineGlyph {
     }
 }
 
+/// Makes one line of the pieces of an equation that came out as lines of
+/// their own: a limit or a numerator met before the part of the
+/// equation it stands by, two parts that something taller (an integral
+/// sign) joins later. Lines of an equation that overlap up and down and
+/// stand close sideways are one.
+fn merge_equations(lines: &mut Vec<PageLine>) {
+    let mut merged = true;
+    while merged {
+        merged = false;
+        'all: for first in 0..lines.len() {
+            if !lines[first].math {
+                continue;
+            }
+            for second in first + 1..lines.len() {
+                let (a, b) = (&lines[first], &lines[second]);
+                if !b.math || !(a.beside(b.left, b.right, b.top, b.bottom) || a.script(b)) {
+                    continue;
+                }
+                let b = lines.remove(second);
+                let a = &mut lines[first];
+                a.left = a.left.min(b.left);
+                a.right = a.right.max(b.right);
+                a.top = a.top.min(b.top);
+                a.bottom = a.bottom.max(b.bottom);
+                a.glyphs.extend(b.glyphs);
+                merged = true;
+                break 'all;
+            }
+        }
+    }
+}
+
 impl PageLine {
     fn height(&self) -> f64 {
         self.bottom - self.top
@@ -553,6 +599,34 @@ impl PageLine {
         // closer than the columns of a page do.
         let gap = (left - self.right).max(self.left - right);
         gap <= self.height().max(bottom - top) * 0.75
+    }
+
+    /// Whether a glyph from `top` to `bottom` overlaps the line up and
+    /// down, and stands close to it sideways.
+    fn beside(&self, left: f64, right: f64, top: f64, bottom: f64) -> bool {
+        if bottom < self.top || top > self.bottom {
+            return false;
+        }
+        let gap = (left - self.right).max(self.left - right);
+        gap <= self.height().max(bottom - top) * 0.75
+    }
+
+    /// Whether one of this line and `other` is a script or a limit of
+    /// the other: set smaller, right above or below it, and across from
+    /// it. The rows of an equation of several are set at full size, and
+    /// stay lines of their own.
+    fn script(&self, other: &PageLine) -> bool {
+        let (big, small) = if self.height() >= other.height() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        if small.height() > big.height() * 0.8 {
+            return false;
+        }
+        let gap = (small.top - big.bottom).max(big.top - small.bottom);
+        let across = small.left <= big.right && small.right >= big.left;
+        across && gap <= small.height() * 0.6
     }
 
     /// Whether `other` stands above or below this line and not in a
@@ -949,6 +1023,7 @@ impl PageLines {
                 left,
                 right,
                 glyphs: vec![glyph],
+                math: false,
             }],
             stops: vec![stop],
         }

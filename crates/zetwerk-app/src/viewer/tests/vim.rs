@@ -431,3 +431,46 @@ fn whole_lines_selected_on_the_page_are_the_lines_gone_over() {
         let _ = std::fs::remove_dir_all(directory);
     }
 }
+
+#[test]
+fn going_down_goes_past_all_of_an_equation() {
+    // The limits of an integral and the parts of a fraction stand above
+    // and below the middle of the equation: they were lines of their
+    // own, and j stuck in them or jumped past what came after.
+    let text = "= Functionals\n\
+                $ S[y] = integral_a^b L(x, y(x), y'(x)) dif x $\n\n\
+                = Deriving\n\
+                == Varying\n\
+                $ (partial L) / (partial y) - dif / (dif x) (partial L) / (partial y') = 0 $\n\n\
+                = Examples\n";
+    let (mut viewer, directory) = editing(text);
+    press(&mut viewer, "gsgs");
+    compile(&mut viewer);
+    let at = |needle: &str| text.find(needle).unwrap_or_default();
+    let cursor = |viewer: &Viewer| viewer.editor.as_ref().map_or(0, editor::Editor::cursor);
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(at("Functionals"));
+    }
+    // One j into each equation, one out of it: to the line after.
+    press(&mut viewer, "j");
+    assert!((at("S[y]")..at("= Deriving")).contains(&cursor(&viewer)));
+    press(&mut viewer, "j");
+    assert!((at("Deriving")..at("== Varying")).contains(&cursor(&viewer)));
+    press(&mut viewer, "jj");
+    assert!((at("(partial L)")..at("= Examples")).contains(&cursor(&viewer)));
+    press(&mut viewer, "j");
+    assert!(cursor(&viewer) >= at("Examples"), "{}", cursor(&viewer));
+    // Whole lines selected go past them too.
+    if let Some(editor) = viewer.editor.as_mut() {
+        editor.set_cursor(at("Functionals"));
+    }
+    press(&mut viewer, "Vjj");
+    let selected = viewer.editor.as_ref().and_then(editor::Editor::selection);
+    assert!(
+        selected
+            .as_ref()
+            .is_some_and(|range| range.end > at("Deriving")),
+        "{selected:?}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
