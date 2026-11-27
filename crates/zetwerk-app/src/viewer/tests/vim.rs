@@ -378,3 +378,56 @@ fn a_block_elsewhere_on_the_page_says_why_not_and_in_the_source_is_vims() {
     assert_eq!(viewer.text(), Some("ac\nac\n"));
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn whole_lines_selected_on_the_page_are_the_lines_gone_over() {
+    // Headings begin with markup the page shows as nothing (`= `): a
+    // selection of lines put at their start took the title above too.
+    let text = "#set heading(numbering: \"1.\")\n\n\
+                #align(center, text(17pt)[*The Title*])\n\n\
+                = Introduction\n// a note\n\n\
+                = Functionals\nSome words.\n\n\
+                = Deriving\n";
+    let lines = |viewer: &Viewer| -> Vec<String> {
+        let selected = viewer
+            .editor
+            .as_ref()
+            .and_then(editor::Editor::selection)
+            .unwrap_or(0..0);
+        text[selected]
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .map(str::to_owned)
+            .collect()
+    };
+    for (start, keys, wanted) in [
+        (
+            "Introduction",
+            "Vj",
+            &["= Introduction", "= Functionals"][..],
+        ),
+        ("Introduction", "Vjk", &["= Introduction"][..]),
+        (
+            "Functionals",
+            "Vk",
+            &["= Introduction", "= Functionals"][..],
+        ),
+        ("Functionals", "Vkj", &["= Functionals"][..]),
+        (
+            "Deriving",
+            "Vkk",
+            &["= Functionals", "Some words.", "= Deriving"][..],
+        ),
+    ] {
+        let (mut viewer, directory) = editing(text);
+        press(&mut viewer, "gsgs");
+        compile(&mut viewer);
+        let at = text.find(start).unwrap_or_default();
+        if let Some(editor) = viewer.editor.as_mut() {
+            editor.set_cursor(at);
+        }
+        press(&mut viewer, keys);
+        assert_eq!(lines(&viewer), wanted, "{keys} from {start}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

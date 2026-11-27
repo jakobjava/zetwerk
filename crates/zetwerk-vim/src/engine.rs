@@ -633,6 +633,12 @@ pub struct Engine {
     /// the end of its line, and where it was put: Escape leaves it where
     /// it was, as Vim leaves the cursor of `V`.
     line_cursor: Option<(usize, usize)>,
+    /// The same for the other end: where it was before it was put at an
+    /// end of its line, and where it was put. The start of a line may be
+    /// markup the host shows as nothing (the `=` of a heading); asked
+    /// which line that is on, the host answers with the line shown
+    /// before it, so its line is asked for where the end was.
+    line_anchor: Option<(usize, usize)>,
     /// Where what is shown under the cursor ends in the text, and what
     /// is shown under the other end of a selection, where the host shows
     /// other things than characters.
@@ -730,6 +736,7 @@ impl Engine {
             pairs: false,
             line_select: false,
             line_cursor: None,
+            line_anchor: None,
             extent: None,
             texts: Vec::new(),
             row_goal: None,
@@ -1019,6 +1026,7 @@ impl Engine {
         if self.mode != Mode::Visual {
             self.line_select = false;
             self.line_cursor = None;
+            self.line_anchor = None;
         }
         self.extent = None;
         if !self.rows_first || !matches!(self.mode, Mode::Normal | Mode::Visual) {
@@ -1079,7 +1087,13 @@ impl Engine {
         if self.mode == Mode::Visual && self.line_select {
             // Both ends at the ends of their lines, the lines between
             // and the two themselves taken whole.
-            let lines = (host.shown_line(self.anchor), host.shown_line(self.cursor));
+            // Each end asked about where it was before it was put at an
+            // end of its line.
+            let anchor_was = self
+                .line_anchor
+                .filter(|(_, put)| *put == self.anchor)
+                .map_or(self.anchor, |(was, _)| was);
+            let lines = (host.shown_line(anchor_was), host.shown_line(self.cursor));
             let lines = (
                 lines.0.map(|row| Self::rows_of_paragraph(row, host)),
                 lines.1.map(|row| Self::rows_of_paragraph(row, host)),
@@ -1093,6 +1107,7 @@ impl Engine {
                     (self.anchor, self.cursor) = (anchor.last, cursor.start);
                 }
                 self.line_cursor = Some((was, self.cursor));
+                self.line_anchor = Some((anchor_was, self.anchor));
             }
         }
         let end = |at: usize| host.stop(at, Seek::At).map(|stop| stop.end);
@@ -2788,15 +2803,30 @@ impl Engine {
             .row_goal
             .filter(|(column, _)| self.wanted_column == Some(*column))
             .map(|(_, across)| across);
-        let Some((to, across)) = host.row(self.cursor, if down { rows } else { -rows }, goal)
-        else {
+        // In a selection of whole lines the cursor was put at an end of
+        // its line, which may be markup shown as nothing (a heading's
+        // `=`), whose row the host does not know: the rows are counted
+        // from the first character shown after it (the last before it
+        // at the end of a line).
+        let from = if self.line_select && host.stop(self.cursor, Seek::At).is_none() {
+            let seek = if self.cursor < self.anchor {
+                Seek::After
+            } else {
+                Seek::Before
+            };
+            host.stop(self.cursor, seek)
+                .map_or(self.cursor, |stop| stop.start)
+        } else {
+            self.cursor
+        };
+        let Some((to, across)) = host.row(from, if down { rows } else { -rows }, goal) else {
             let moved = self.motion(if down { 'j' } else { 'k' }, host);
             return self.finish_motion(moved, host);
         };
         self.take_count();
         let text = Text(host.text());
         let to = clamp(text, to, self.selecting());
-        if to == self.cursor {
+        if to == self.cursor || to == from {
             return self.fail();
         }
         let column = text.column(to);
